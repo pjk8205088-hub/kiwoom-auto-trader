@@ -83,6 +83,12 @@ class AutoTradingService:
             self.storage.log("ERROR", "계좌", message)
             return message
 
+    def check_account_environment(self) -> str:
+        status = self.kiwoom_api.check_environment()
+        self.account_info = KiwoomAccountInfo(False, [], message=status.message)
+        self.storage.log("INFO", "계좌", status.message)
+        return status.message
+
     def refresh_account_connection(self) -> KiwoomAccountInfo:
         try:
             self.account_info = self.kiwoom_api.get_account_info()

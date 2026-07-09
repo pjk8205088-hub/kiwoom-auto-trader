@@ -48,7 +48,10 @@ class TraderApp(tk.Tk):
         )
         self.account_button = ttk.Button(header, text="키움 계좌 연결", command=self._connect_account)
         self.account_button.grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=2)
+        ttk.Button(header, text="연결환경 확인", command=self._check_account_environment).grid(
+            row=0, column=2, padx=(0, 8)
+        )
+        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=3)
 
         controls = ttk.LabelFrame(self, text="설정", padding=12)
         controls.grid(row=1, column=0, sticky="ew", padx=12)
@@ -163,6 +166,11 @@ class TraderApp(tk.Tk):
         else:
             self.account_button.configure(state="normal")
             self._refresh()
+
+    def _check_account_environment(self) -> None:
+        message = self.service.check_account_environment()
+        self.status_text.set(f"키움 연결환경: {message}")
+        self._refresh()
 
     def _schedule_account_poll(self) -> None:
         if self._account_after_id is None:

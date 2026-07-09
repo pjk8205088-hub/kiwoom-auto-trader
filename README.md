@@ -28,10 +28,25 @@ Windows EXE로 빌드 가능한 주식 자동매매 MVP입니다.
 - Windows PC
 - 키움 OpenAPI+ 설치
 - pywin32 설치
-- 키움 OpenAPI+ ActiveX와 실행 파일의 비트 수 호환
+- 32비트 실행 파일
 
 키움 OpenAPI+가 설치되어 있지 않거나 비트 수가 맞지 않으면 앱은 한글 오류
 메시지를 보여주고 실거래 기능은 실행하지 않습니다.
+
+## 키움 연결용 32비트 EXE 빌드
+
+키움 OpenAPI+는 32비트 ActiveX이므로 계좌 연결 버튼을 사용하려면 32비트 EXE를
+실행해야 합니다.
+
+```bat
+scripts\build_windows_exe_32bit.bat
+```
+
+실행 파일 생성 위치:
+
+```text
+dist\KiwoomAutoTrader-32bit.exe
+```
 
 ## 로컬 실행
 
