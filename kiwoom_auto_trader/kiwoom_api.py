@@ -16,12 +16,22 @@ class KiwoomOpenApiError(RuntimeError):
     pass
 
 
+KIWOOM_OPENAPI_PAGE = "https://www.kiwoom.com/h/customer/download/VOpenApiInfoView"
+KIWOOM_SETUP_GUIDE = (
+    "준비 순서: 1) 키움 OpenAPI+ 서비스 사용 등록, "
+    "2) OpenAPI+ 모듈 설치, 3) 공동인증서/HTS ID 준비, "
+    "4) 32비트 실행 파일로 다시 실행"
+)
+
+
 @dataclass(frozen=True)
 class KiwoomEnvironmentStatus:
+    process_bits: int
     is_32bit_process: bool
     pywin32_available: bool
     active_x_available: bool
     message: str
+    setup_guide: str = KIWOOM_SETUP_GUIDE
 
 
 @dataclass(frozen=True)
@@ -45,7 +55,8 @@ class KiwoomOpenApiClient:
         self._api: Any | None = None
 
     def check_environment(self) -> KiwoomEnvironmentStatus:
-        is_32bit = struct.calcsize("P") * 8 == 32
+        process_bits = struct.calcsize("P") * 8
+        is_32bit = process_bits == 32
         pywin32_available = self._dispatch_factory is not None or (
             pythoncom is not None and win32com is not None
         )
@@ -60,20 +71,31 @@ class KiwoomOpenApiClient:
 
         if not is_32bit and self._dispatch_factory is None:
             message = (
-                "현재 프로그램이 64비트로 실행 중입니다. "
-                "키움 OpenAPI+는 32비트 ActiveX이므로 32비트 EXE로 실행해야 합니다."
+                f"현재 프로그램이 {process_bits}비트로 실행 중입니다. "
+                "키움 OpenAPI+는 32비트 ActiveX이므로 KiwoomAutoTrader-32bit.exe로 실행해야 합니다. "
+                f"{KIWOOM_SETUP_GUIDE}"
             )
         elif not pywin32_available:
-            message = "pywin32가 설치되어 있지 않아 키움 OpenAPI+를 호출할 수 없습니다."
+            message = (
+                "pywin32가 설치되어 있지 않아 키움 OpenAPI+를 호출할 수 없습니다. "
+                f"{KIWOOM_SETUP_GUIDE}"
+            )
         elif not active_x_available:
             message = (
                 "키움 OpenAPI+ ActiveX를 찾을 수 없습니다. "
-                "키움 OpenAPI+ 모듈 설치, 서비스 사용 등록, 영웅문/공동인증서 준비를 확인해 주세요."
+                "키움 OpenAPI+ 모듈 설치와 서비스 사용 등록을 확인해 주세요. "
+                f"{KIWOOM_SETUP_GUIDE}"
             )
         else:
             message = "키움 OpenAPI+ 연결 환경이 준비되어 있습니다."
 
-        return KiwoomEnvironmentStatus(is_32bit, pywin32_available, active_x_available, message)
+        return KiwoomEnvironmentStatus(
+            process_bits,
+            is_32bit,
+            pywin32_available,
+            active_x_available,
+            message,
+        )
 
     def start_login(self) -> str:
         status = self.check_environment()

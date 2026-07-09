@@ -23,12 +23,18 @@ Windows EXE로 빌드 가능한 주식 자동매매 MVP입니다.
 `키움 계좌 연결` 버튼은 키움 OpenAPI+ ActiveX의 `CommConnect()`로 로그인 창을
 띄운 뒤 `GetLoginInfo("ACCNO")`로 계좌 목록을 조회합니다.
 
+공식 페이지:
+
+- https://www.kiwoom.com/h/customer/download/VOpenApiInfoView
+
 필요 조건:
 
 - Windows PC
 - 키움 OpenAPI+ 설치
 - pywin32 설치
 - 32비트 실행 파일
+- 키움 OpenAPI+ 서비스 사용 등록
+- HTS ID 및 공동인증서 준비
 
 키움 OpenAPI+가 설치되어 있지 않거나 비트 수가 맞지 않으면 앱은 한글 오류
 메시지를 보여주고 실거래 기능은 실행하지 않습니다.

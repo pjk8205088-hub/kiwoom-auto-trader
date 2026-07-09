@@ -45,6 +45,15 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(info.user_name, "테스트사용자")
         self.assertEqual(info.accounts, ["1234567890", "0987654321"])
 
+    def test_environment_check_uses_fake_dispatch(self):
+        fake = FakeKiwoomApi()
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        status = client.check_environment()
+
+        self.assertTrue(status.active_x_available)
+        self.assertIn("준비", status.setup_guide)
+
 
 if __name__ == "__main__":
     unittest.main()
