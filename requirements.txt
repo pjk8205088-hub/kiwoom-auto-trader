@@ -1,1 +1,1 @@
-# Runtime uses only Python standard library modules.
+pywin32>=306; platform_system=="Windows"

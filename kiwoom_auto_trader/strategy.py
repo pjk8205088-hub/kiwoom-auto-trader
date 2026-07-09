@@ -20,16 +20,16 @@ class StrategyEngine:
             if self._buy_blocked_by_cci(cci):
                 return TradeDecision(
                     "HOLD",
-                    "Bullish entry ignored because CCI is above the upper limit.",
+                    "CCI가 상단 기준 이상이라 강세 진입 매수를 보류했습니다.",
                     cci,
                     pattern_state,
                 )
-            return TradeDecision("BUY", "Bullish pattern entry.", cci, pattern_state)
+            return TradeDecision("BUY", "강세 패턴 진입 신호입니다.", cci, pattern_state)
 
         if exited_bullish:
-            return TradeDecision("SELL", "Bullish pattern exit.", cci, pattern_state)
+            return TradeDecision("SELL", "강세 패턴 이탈 신호입니다.", cci, pattern_state)
 
-        return TradeDecision("HOLD", "No actionable pattern transition.", cci, pattern_state)
+        return TradeDecision("HOLD", "실행할 패턴 전환이 없습니다.", cci, pattern_state)
 
     def calculate_cci(self, candles: list[Candle]) -> float | None:
         period = self.settings.cci_period

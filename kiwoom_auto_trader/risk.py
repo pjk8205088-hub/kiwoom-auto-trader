@@ -25,8 +25,8 @@ class RiskManager:
         current_quantity: int,
     ) -> RiskCheck:
         if current_quantity > 0:
-            return RiskCheck(False, 0, "Position already exists.")
+            return RiskCheck(False, 0, "이미 보유 포지션이 있어 추가 매수를 막았습니다.")
         quantity = self.calculate_quantity(max_capital, market_price)
         if quantity <= 0:
-            return RiskCheck(False, 0, "Max capital is below the current market price.")
-        return RiskCheck(True, quantity, "Approved.")
+            return RiskCheck(False, 0, "운용 한도가 현재가보다 낮아 주문할 수 없습니다.")
+        return RiskCheck(True, quantity, "주문 가능")

@@ -19,19 +19,19 @@ class OrderManager:
         result = self.broker.place_market_buy(symbol, quantity, price)
         self.storage.save_order_result(result)
         if result.success:
-            self.storage.log("INFO", "ORDER", f"Buy filled: {symbol} x {quantity}")
+            self.storage.log("INFO", "주문", f"매수 체결: {symbol} {quantity}주")
         else:
-            self.storage.log("WARN", "ORDER", f"Buy failed: {result.message}")
+            self.storage.log("WARN", "주문", f"매수 실패: {result.message}")
         return result
 
     def execute_sell(self, symbol: str, quantity: int, price: float) -> OrderResult:
         result = self.broker.place_market_sell(symbol, quantity, price)
         self.storage.save_order_result(result)
         if result.success:
-            self.storage.log("INFO", "ORDER", f"Sell filled: {symbol} x {result.quantity}")
+            self.storage.log("INFO", "주문", f"매도 체결: {symbol} {result.quantity}주")
             return result
 
-        self.storage.log("WARN", "ORDER", f"Sell failed, retrying: {result.message}")
+        self.storage.log("WARN", "주문", f"매도 실패, 재시도합니다: {result.message}")
         return self.retry_sell_until_resolved(symbol, price)
 
     def retry_sell_until_resolved(self, symbol: str, price: float) -> OrderResult:
@@ -41,21 +41,21 @@ class OrderManager:
                 break
             position = self.broker.get_position(symbol)
             if position.quantity <= 0:
-                self.storage.log("INFO", "ORDER", "Sell retry stopped: no position remains.")
+                self.storage.log("INFO", "주문", "보유 수량이 없어 매도 재시도를 종료했습니다.")
                 return last_result if last_result else self._no_position_result(symbol, price)
             last_result = self.broker.place_market_sell(symbol, position.quantity, price)
             self.storage.save_order_result(last_result)
             if last_result.success:
-                self.storage.log("INFO", "ORDER", f"Sell retry filled on attempt {attempt}.")
+                self.storage.log("INFO", "주문", f"{attempt}회차 매도 재시도 체결")
                 return last_result
-            self.storage.log("WARN", "ORDER", f"Sell retry attempt {attempt} failed.")
+            self.storage.log("WARN", "주문", f"{attempt}회차 매도 재시도 실패")
 
         if last_result is None:
             return self._no_position_result(symbol, price)
-        self.storage.log("ERROR", "ORDER", "Sell retry limit reached.")
+        self.storage.log("ERROR", "주문", "매도 재시도 한도에 도달했습니다.")
         return last_result
 
     def _no_position_result(self, symbol: str, price: float) -> OrderResult:
         from datetime import datetime
 
-        return OrderResult(symbol, "SELL", 0, price, True, "No position remains.", datetime.now())
+        return OrderResult(symbol, "SELL", 0, price, True, "보유 수량 없음", datetime.now())

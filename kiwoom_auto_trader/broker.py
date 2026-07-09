@@ -35,7 +35,7 @@ class MockBroker:
     def place_market_buy(self, symbol: str, quantity: int, price: float) -> OrderResult:
         if self.fail_next_buy:
             self.fail_next_buy = False
-            return self._result(symbol, "BUY", quantity, price, False, "Mock buy failure.")
+            return self._result(symbol, "BUY", quantity, price, False, "모의 매수 실패")
 
         current = self.get_position(symbol)
         new_quantity = current.quantity + quantity
@@ -45,12 +45,12 @@ class MockBroker:
             previous_value = current.quantity * current.average_price
             average_price = (previous_value + quantity * price) / new_quantity
         self.positions[symbol] = Position(symbol, new_quantity, average_price)
-        return self._result(symbol, "BUY", quantity, price, True, "Mock buy filled.")
+        return self._result(symbol, "BUY", quantity, price, True, "모의 매수 체결")
 
     def place_market_sell(self, symbol: str, quantity: int, price: float) -> OrderResult:
         if self.fail_next_sell:
             self.fail_next_sell = False
-            return self._result(symbol, "SELL", quantity, price, False, "Mock sell failure.")
+            return self._result(symbol, "SELL", quantity, price, False, "모의 매도 실패")
 
         current = self.get_position(symbol)
         sell_quantity = min(quantity, current.quantity)
@@ -59,7 +59,7 @@ class MockBroker:
             self.positions[symbol] = Position(symbol, remaining, current.average_price)
         else:
             self.positions.pop(symbol, None)
-        return self._result(symbol, "SELL", sell_quantity, price, True, "Mock sell filled.")
+        return self._result(symbol, "SELL", sell_quantity, price, True, "모의 매도 체결")
 
     def _result(
         self,
