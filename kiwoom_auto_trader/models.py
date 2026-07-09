@@ -6,6 +6,7 @@ from typing import Literal
 
 Action = Literal["BUY", "SELL", "HOLD"]
 PatternState = Literal["NONE", "BULLISH", "BEARISH"]
+OrderSide = Literal["BUY", "SELL"]
 
 
 @dataclass(frozen=True)
@@ -13,6 +14,9 @@ class Candle:
     high: float
     low: float
     close: float
+    open: float = 0.0
+    volume: int = 0
+    timestamp: str = ""
 
 
 @dataclass(frozen=True)
@@ -50,9 +54,66 @@ class Position:
 
 
 @dataclass(frozen=True)
+class MarketQuote:
+    symbol: str
+    name: str = ""
+    current_price: float = 0.0
+    change_rate: float = 0.0
+    volume: int = 0
+    timestamp: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class Holding:
+    symbol: str
+    name: str
+    quantity: int
+    average_price: float
+    current_price: float
+    profit_loss: float
+    profit_rate: float
+
+
+@dataclass(frozen=True)
+class BalanceSummary:
+    account: str
+    total_purchase: float = 0.0
+    total_evaluation: float = 0.0
+    total_profit_loss: float = 0.0
+    total_profit_rate: float = 0.0
+    estimated_assets: float = 0.0
+    holdings: tuple[Holding, ...] = ()
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class RealTimeQuote:
+    symbol: str
+    current_price: float = 0.0
+    change: float = 0.0
+    change_rate: float = 0.0
+    volume: int = 0
+    timestamp: str = ""
+
+
+@dataclass(frozen=True)
+class KiwoomOrderRequest:
+    account: str
+    symbol: str
+    side: OrderSide
+    quantity: int
+    price: int = 0
+    hoga: str = "03"
+    original_order_no: str = ""
+    allow_real_order: bool = False
+    require_mock_server: bool = True
+
+
+@dataclass(frozen=True)
 class OrderResult:
     symbol: str
-    side: Literal["BUY", "SELL"]
+    side: OrderSide
     quantity: int
     price: float
     success: bool

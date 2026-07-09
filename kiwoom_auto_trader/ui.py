@@ -4,7 +4,7 @@ import tempfile
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from .kiwoom_api import KIWOOM_OPENAPI_PAGE
 from .models import PatternState, StrategySettings
@@ -70,6 +70,10 @@ class TraderApp(tk.Tk):
         self.upper_var = tk.StringVar(value="100")
         self.pattern_var = tk.StringVar(value="없음")
         self.use_cci_var = tk.BooleanVar(value=True)
+        self.account_var = tk.StringVar(value="")
+        self.account_password_var = tk.StringVar(value="")
+        self.order_qty_var = tk.StringVar(value="1")
+        self.allow_real_order_var = tk.BooleanVar(value=False)
 
         self._field(controls, "종목 코드", self.symbol_var, 0)
         self._field(controls, "운용 한도", self.capital_var, 1)
@@ -97,6 +101,45 @@ class TraderApp(tk.Tk):
         ttk.Button(actions, text="운용 중지", command=self._stop).pack(side="left", padx=6)
         ttk.Button(actions, text="1틱 실행", command=self._run_tick).pack(side="left")
         ttk.Button(actions, text="매도 실패 모의", command=self._fail_sell).pack(side="left", padx=6)
+
+        kiwoom_controls = ttk.Frame(controls)
+        kiwoom_controls.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(12, 0))
+        ttk.Label(kiwoom_controls, text="계좌번호").pack(side="left")
+        ttk.Entry(kiwoom_controls, textvariable=self.account_var, width=14).pack(side="left", padx=(4, 8))
+        ttk.Label(kiwoom_controls, text="계좌비밀번호").pack(side="left")
+        ttk.Entry(
+            kiwoom_controls,
+            textvariable=self.account_password_var,
+            width=10,
+            show="*",
+        ).pack(side="left", padx=(4, 8))
+        ttk.Label(kiwoom_controls, text="주문수량").pack(side="left")
+        ttk.Entry(kiwoom_controls, textvariable=self.order_qty_var, width=6).pack(side="left", padx=(4, 8))
+        ttk.Checkbutton(
+            kiwoom_controls,
+            text="실거래 주문 잠금 해제",
+            variable=self.allow_real_order_var,
+        ).pack(side="left")
+
+        api_actions = ttk.Frame(controls)
+        api_actions.grid(row=4, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+        ttk.Button(api_actions, text="현재가 조회", command=self._request_current_price).pack(side="left")
+        ttk.Button(api_actions, text="3분봉 조회", command=self._request_three_minute).pack(side="left", padx=4)
+        ttk.Button(api_actions, text="잔고 조회", command=self._request_balance).pack(side="left", padx=4)
+        ttk.Button(api_actions, text="실시간 등록", command=self._register_real_time).pack(side="left", padx=4)
+        ttk.Button(api_actions, text="실시간 해제", command=self._unregister_real_time).pack(side="left", padx=4)
+        ttk.Button(api_actions, text="실제데이터 전략판단", command=self._evaluate_market_strategy).pack(
+            side="left",
+            padx=4,
+        )
+        ttk.Button(api_actions, text="SendOrder 매수", command=lambda: self._send_order("BUY")).pack(
+            side="left",
+            padx=(10, 4),
+        )
+        ttk.Button(api_actions, text="SendOrder 매도", command=lambda: self._send_order("SELL")).pack(
+            side="left",
+            padx=4,
+        )
 
         body = ttk.Frame(self, padding=12)
         body.grid(row=2, column=0, sticky="nsew")
@@ -190,6 +233,8 @@ class TraderApp(tk.Tk):
         self._account_after_id = None
         self._account_poll_count += 1
         account_info = self.service.refresh_account_connection()
+        if account_info.accounts and not self.account_var.get().strip():
+            self.account_var.set(account_info.accounts[0])
         self._refresh()
         if account_info.connected or self._account_poll_count >= 120:
             self.account_button.configure(state="normal")
@@ -208,6 +253,54 @@ class TraderApp(tk.Tk):
         self.service.step(pattern, float(self.price_var.get()))
         self._refresh()
 
+    def _request_current_price(self) -> None:
+        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.request_current_price(self.symbol_var.get())
+        self._refresh()
+
+    def _request_three_minute(self) -> None:
+        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.request_three_minute_candles(self.symbol_var.get())
+        self._refresh()
+
+    def _request_balance(self) -> None:
+        self.service.request_balance(self.account_var.get(), self.account_password_var.get())
+        self._refresh()
+
+    def _register_real_time(self) -> None:
+        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.register_real_time_price(self.symbol_var.get())
+        self._refresh()
+
+    def _unregister_real_time(self) -> None:
+        self.service.unregister_real_time()
+        self._refresh()
+
+    def _evaluate_market_strategy(self) -> None:
+        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.evaluate_strategy_with_market_data(self.symbol_var.get())
+        self._refresh()
+
+    def _send_order(self, side: str) -> None:
+        allow_real = self.allow_real_order_var.get()
+        if allow_real:
+            confirmed = messagebox.askyesno(
+                "실거래 주문 확인",
+                "실거래 주문 잠금이 해제되어 있습니다.\n"
+                "모의투자 서버가 아닌 경우 실제 주문이 전송될 수 있습니다.\n"
+                "계속하시겠습니까?",
+            )
+            if not confirmed:
+                return
+        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.send_kiwoom_order(
+            account=self.account_var.get(),
+            side=side,
+            quantity=max(1, int(float(self.order_qty_var.get()))),
+            allow_real_order=allow_real,
+        )
+        self._refresh()
+
     def _refresh(self) -> None:
         snapshot = self.service.snapshot()
         decision_key = snapshot.decision.action if snapshot.decision else "NONE"
@@ -220,6 +313,16 @@ class TraderApp(tk.Tk):
         account_detail = account.user_name or account.message
         if account.accounts:
             account_detail = f"{account_detail} {', '.join(account.accounts)}".strip()
+        quote = snapshot.real_time_quote or snapshot.market_quote
+        quote_label = ""
+        if quote:
+            quote_label = f" | 시세 {quote.symbol} {quote.current_price:,.0f}"
+        balance_label = ""
+        if snapshot.balance_summary:
+            balance_label = (
+                f" | 잔고 {len(snapshot.balance_summary.holdings)}종목 "
+                f"평가 {snapshot.balance_summary.total_evaluation:,.0f}"
+            )
         self.status_text.set(
             " | ".join(
                 [
@@ -232,7 +335,8 @@ class TraderApp(tk.Tk):
                     f"현재가 {snapshot.price:,.0f}",
                     f"보유 {snapshot.quantity}주",
                     f"평균 {snapshot.average_price:,.0f}",
-                    f"판단 {decision}{cci}",
+                    f"판단 {decision}{cci}{quote_label}{balance_label}",
+                    snapshot.last_api_message,
                 ]
             )
         )
@@ -278,3 +382,11 @@ class TraderApp(tk.Tk):
         for timestamp, level, category, message in rows:
             formatted.append((timestamp, LEVEL_LABELS.get(level, level), category, message))
         return formatted
+
+    def _settings(self) -> StrategySettings:
+        return StrategySettings(
+            cci_period=max(1, int(float(self.period_var.get()))),
+            cci_upper=float(self.upper_var.get()),
+            cci_lower=-abs(float(self.upper_var.get())),
+            use_cci_filter=self.use_cci_var.get(),
+        )
