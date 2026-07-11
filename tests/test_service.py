@@ -9,6 +9,17 @@ from kiwoom_auto_trader.service import AutoTradingService
 from kiwoom_auto_trader.storage import Storage
 
 
+def dmi_buy_transition_candles() -> list[Candle]:
+    return [
+        Candle(high=10, low=8, close=9, timestamp="20260711090000"),
+        Candle(high=9, low=7, close=8, timestamp="20260711090300"),
+        Candle(high=8, low=6, close=7, timestamp="20260711090600"),
+        Candle(high=7, low=5, close=6, timestamp="20260711090900"),
+        Candle(high=8, low=6, close=7, timestamp="20260711091200"),
+        Candle(high=9, low=7, close=8, timestamp="20260711091500"),
+    ]
+
+
 class FakeAccountApi:
     def __init__(
         self,
@@ -112,7 +123,7 @@ class AutoTradingServiceTests(unittest.TestCase):
         if db.exists():
             db.unlink()
         service = AutoTradingService(storage=Storage(db))
-        settings = StrategySettings(use_cci_filter=False)
+        settings = StrategySettings(dmi_period=3)
 
         service.configure("005930", 1_000_000, settings)
         service.strategy.previous_pattern = "BULLISH"
@@ -201,20 +212,45 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertFalse(service.rest_api.mock)
         self.assertEqual(info.server_type, "실거래")
 
-    def test_market_strategy_uses_explicit_pattern_with_real_candles(self):
+    def test_market_strategy_calculates_dmi_transitions_from_real_candles(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_pattern_test.sqlite3"
         if db.exists():
             db.unlink()
         service = AutoTradingService(storage=Storage(db))
-        service.configure("005930", 1_000_000, StrategySettings(use_cci_filter=False))
-        candles = [Candle(high=101, low=99, close=100) for _ in range(20)]
-        service.request_three_minute_candles = lambda _symbol=None: candles
+        service.configure("005930", 1_000_000, StrategySettings(dmi_period=3))
+        buy_candles = dmi_buy_transition_candles()
+        sell_candles = buy_candles + [
+            Candle(high=8, low=6, close=7, timestamp="20260711091800")
+        ]
+        service.request_three_minute_candles = lambda _symbol=None: list(reversed(buy_candles))
 
-        buy = service.evaluate_strategy_with_market_data("005930", "BULLISH")
-        sell = service.evaluate_strategy_with_market_data("005930", "BEARISH")
+        buy = service.evaluate_strategy_with_market_data("005930")
+        service.request_three_minute_candles = lambda _symbol=None: list(reversed(sell_candles))
+        sell = service.evaluate_strategy_with_market_data("005930")
 
         self.assertEqual(buy.action, "BUY")
         self.assertEqual(sell.action, "SELL")
+        self.assertIsNotNone(service.latest_dmi)
+
+    def test_dmi_buy_transition_sends_one_mock_order_per_candle(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_dmi_order_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+        service.configure("005930", 1_000_000, StrategySettings(dmi_period=3))
+        service.current_price = 100_000
+        candles = dmi_buy_transition_candles()
+        service.request_three_minute_candles = lambda _symbol=None: list(reversed(candles))
+
+        first = service.evaluate_and_send_order_with_market_data("1234567890", quantity=1)
+        duplicate = service.evaluate_and_send_order_with_market_data("1234567890", quantity=1)
+
+        self.assertEqual(first.action, "BUY")
+        self.assertEqual(duplicate.action, "HOLD")
+        self.assertEqual(fake_rest.order_calls, 1)
 
     def test_retries_mock_sell_request_but_not_buy(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_sell_retry_test.sqlite3"

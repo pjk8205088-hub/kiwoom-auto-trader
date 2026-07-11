@@ -9,6 +9,7 @@ from .kiwoom_api import KiwoomAccountInfo, KiwoomOpenApiClient, KiwoomOpenApiErr
 from .models import (
     BalanceSummary,
     Candle,
+    DmiPoint,
     KiwoomOrderRequest,
     MarketQuote,
     OrderResult,
@@ -40,6 +41,7 @@ class ServiceSnapshot:
     average_price: float
     decision: TradeDecision | None
     account_info: KiwoomAccountInfo
+    dmi: DmiPoint | None = None
     market_quote: MarketQuote | None = None
     balance_summary: BalanceSummary | None = None
     real_time_quote: RealTimeQuote | None = None
@@ -71,6 +73,7 @@ class AutoTradingService:
         self.current_price = 72_000.0
         self.pattern_state: PatternState = "NONE"
         self.candles: list[Candle] = []
+        self.latest_dmi: DmiPoint | None = None
         self.last_decision: TradeDecision | None = None
         self.market_quote: MarketQuote | None = None
         self.balance_summary: BalanceSummary | None = None
@@ -88,6 +91,8 @@ class AutoTradingService:
         next_symbol = normalize_symbol(symbol) or "005930"
         if next_symbol != previous_symbol or self.strategy.settings != settings:
             self.strategy = StrategyEngine(settings)
+            self.latest_dmi = None
+            self.pattern_state = "NONE"
         self.symbol = next_symbol
         fallback_name = known_symbol_name(self.symbol)
         if fallback_name:
@@ -285,6 +290,9 @@ class AutoTradingService:
         self.real_time_symbol = ""
         self.real_time_quote = None
         self.candles = []
+        self.latest_dmi = None
+        self.pattern_state = "NONE"
+        self.strategy.reset()
         self.last_decision = None
 
     def account_login_status(self) -> str:
@@ -351,12 +359,20 @@ class AutoTradingService:
         try:
             self.candles = api.request_minute_candles(target, interval=3, count=120)
             self.symbol = target
+            self.latest_dmi = None
+            self.pattern_state = "NONE"
             if self.candles:
                 self.current_price = self.candles[0].close
+                ordered_candles = list(reversed(self.candles))
+                self.latest_dmi = self.strategy.latest_dmi(ordered_candles)
+                if self.latest_dmi is not None:
+                    self.pattern_state = self.latest_dmi.pattern_state
             self.last_api_message = f"{target} 3분봉 {len(self.candles)}개 조회 완료"
             self.storage.log("INFO", "시세", self.last_api_message)
             return self.candles
         except API_ERRORS as exc:
+            self.latest_dmi = None
+            self.pattern_state = "NONE"
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "시세", self.last_api_message)
             return []
@@ -364,21 +380,23 @@ class AutoTradingService:
     def evaluate_strategy_with_market_data(
         self,
         symbol: str | None = None,
-        pattern_state: PatternState | None = None,
     ) -> TradeDecision | None:
         candles = self.request_three_minute_candles(symbol)
-        if len(candles) < 2:
-            self.last_api_message = "전략 판단에 필요한 3분봉 데이터가 부족합니다."
+        required = self.strategy.settings.dmi_period + 1
+        if len(candles) < required:
+            self.last_api_message = f"DMI 전략 판단에 필요한 3분봉이 부족합니다({len(candles)}/{required})."
             self.storage.log("WARN", "전략", self.last_api_message)
             return None
-        pattern = pattern_state or self.pattern_state
         ordered_candles = list(reversed(candles))
-        decision = self.strategy.evaluate(ordered_candles, pattern)
-        self.pattern_state = pattern
+        decision = self.strategy.evaluate(ordered_candles)
+        self.latest_dmi = self.strategy.last_dmi
+        self.pattern_state = decision.pattern_state
         self.last_decision = decision
+        adx_text = "계산 중" if decision.adx is None else f"{decision.adx:.2f}"
         self.last_api_message = (
-            f"강세/약세 입력과 실제 3분봉 CCI 기반 전략 판단: "
-            f"{decision.action} / {decision.reason}"
+            f"3분봉 DMI({self.strategy.settings.dmi_period}) 전략 판단: {decision.action} / "
+            f"+DI {decision.dmi_plus or 0.0:.2f}, -DI {decision.dmi_minus or 0.0:.2f}, "
+            f"ADX {adx_text} / {decision.reason}"
         )
         self.storage.log("INFO", "전략", self.last_api_message)
         return decision
@@ -540,9 +558,8 @@ class AutoTradingService:
         account: str,
         quantity: int,
         allow_real_order: bool = False,
-        pattern_state: PatternState | None = None,
     ) -> TradeDecision | None:
-        decision = self.evaluate_strategy_with_market_data(self.symbol, pattern_state)
+        decision = self.evaluate_strategy_with_market_data(self.symbol)
         if decision is None:
             return None
 
@@ -569,13 +586,14 @@ class AutoTradingService:
         )
         return decision
 
-    def step(self, pattern_state: PatternState, price: float | None = None) -> TradeDecision:
+    def step(self, price: float | None = None) -> TradeDecision:
         if price is not None and price > 0:
             self.current_price = price
-        self.pattern_state = pattern_state
         self._append_mock_candle(self.current_price)
 
-        decision = self.strategy.evaluate(self.candles, pattern_state)
+        decision = self.strategy.evaluate(self.candles)
+        self.latest_dmi = self.strategy.last_dmi
+        self.pattern_state = decision.pattern_state
         self.last_decision = decision
         self.storage.log("INFO", "전략", f"{decision.action}: {decision.reason}")
 
@@ -596,6 +614,7 @@ class AutoTradingService:
             average_price=position.average_price,
             decision=self.last_decision,
             account_info=self.account_info,
+            dmi=self.latest_dmi,
             market_quote=self.market_quote,
             balance_summary=self.balance_summary,
             real_time_quote=self.refresh_real_time_quote(),
@@ -620,7 +639,15 @@ class AutoTradingService:
         high = price + uniform(0, spread)
         low = max(1.0, price - uniform(0, spread))
         close = price
-        self.candles.append(Candle(high=high, low=low, close=close))
+        self.candles.append(
+            Candle(
+                high=high,
+                low=low,
+                close=close,
+                open=self.candles[-1].close if self.candles else close,
+                timestamp=datetime.now().strftime("%Y%m%d%H%M%S"),
+            )
+        )
         if len(self.candles) > 200:
             self.candles = self.candles[-200:]
 

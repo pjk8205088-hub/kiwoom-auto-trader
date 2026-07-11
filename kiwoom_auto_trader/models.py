@@ -21,10 +21,17 @@ class Candle:
 
 @dataclass(frozen=True)
 class StrategySettings:
-    cci_period: int = 20
-    cci_upper: float = 100.0
-    cci_lower: float = -100.0
-    use_cci_filter: bool = True
+    dmi_period: int = 14
+
+
+@dataclass(frozen=True)
+class DmiPoint:
+    index: int
+    timestamp: str
+    plus_di: float
+    minus_di: float
+    adx: float | None
+    pattern_state: PatternState
 
 
 @dataclass(frozen=True)
@@ -38,8 +45,11 @@ class SymbolConfig:
 class TradeDecision:
     action: Action
     reason: str
-    cci_value: float | None
     pattern_state: PatternState
+    dmi_plus: float | None = None
+    dmi_minus: float | None = None
+    adx: float | None = None
+    candle_timestamp: str = ""
 
 
 @dataclass

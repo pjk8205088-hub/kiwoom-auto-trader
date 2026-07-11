@@ -12,7 +12,7 @@ from .kiwoom_api import (
     KIWOOM_OPENAPI_INSTALLER,
     KIWOOM_OPENAPI_PAGE,
 )
-from .models import Candle, PatternState, StrategySettings
+from .models import Candle, DmiPoint, PatternState, StrategySettings
 from .rest_api import KIWOOM_REST_PORTAL
 from .service import AutoTradingService
 from .storage import Storage
@@ -24,12 +24,11 @@ from .symbols import (
 )
 
 
-PATTERN_LABEL_TO_VALUE: dict[str, PatternState] = {
-    "없음": "NONE",
-    "강세": "BULLISH",
-    "약세": "BEARISH",
+PATTERN_VALUE_TO_LABEL: dict[PatternState, str] = {
+    "NONE": "계산 전",
+    "BULLISH": "강세",
+    "BEARISH": "약세",
 }
-PATTERN_VALUE_TO_LABEL = {value: label for label, value in PATTERN_LABEL_TO_VALUE.items()}
 ACTION_LABELS = {"BUY": "매수", "SELL": "매도", "HOLD": "대기", "NONE": "없음"}
 SIDE_LABELS = {"BUY": "매수", "SELL": "매도"}
 LEVEL_LABELS = {"INFO": "정보", "WARN": "주의", "ERROR": "오류"}
@@ -368,17 +367,18 @@ class TraderApp(tk.Tk):
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
         controls.grid(row=1, column=0, sticky="ew", padx=12)
-        for idx in range(9):
+        for idx in range(10):
             controls.columnconfigure(idx, weight=1)
 
         self.symbol_var = tk.StringVar(value="005930")
         self.symbol_name_var = tk.StringVar(value="삼성전자")
         self.capital_var = tk.StringVar(value="1000000")
         self.price_var = tk.StringVar(value="72000")
-        self.period_var = tk.StringVar(value="20")
-        self.upper_var = tk.StringVar(value="100")
-        self.pattern_var = tk.StringVar(value="없음")
-        self.use_cci_var = tk.BooleanVar(value=True)
+        self.dmi_period_var = tk.StringVar(value="14")
+        self.dmi_state_var = tk.StringVar(value="계산 전")
+        self.dmi_plus_var = tk.StringVar(value="-")
+        self.dmi_minus_var = tk.StringVar(value="-")
+        self.adx_var = tk.StringVar(value="-")
         self.account_var = tk.StringVar(value="")
         self.account_first_var = tk.StringVar(value="")
         self.account_last_var = tk.StringVar(value="")
@@ -399,37 +399,37 @@ class TraderApp(tk.Tk):
         )
         self._field(controls, "종목별 운용 한도금액", self.capital_var, 2)
         self._field(controls, "모의 현재가(테스트용)", self.price_var, 3)
-        self._field(controls, "CCI 계산 기간", self.period_var, 4)
-        self._field(controls, "CCI 과매수 기준", self.upper_var, 5)
-
-        ttk.Label(controls, text="강세/약세 신호").grid(row=0, column=6, sticky="w")
-        ttk.Combobox(
+        self._field(controls, "DMI 계산 기간", self.dmi_period_var, 4)
+        ttk.Label(controls, text="DMI 강/약 상태").grid(row=0, column=5, sticky="w")
+        self.dmi_state_badge = tk.Label(
             controls,
-            textvariable=self.pattern_var,
-            values=tuple(PATTERN_LABEL_TO_VALUE.keys()),
-            state="readonly",
-            width=12,
-        ).grid(row=1, column=6, sticky="ew", padx=(0, 8))
-
-        ttk.Checkbutton(controls, text="CCI 필터로 잦은 매매 방지", variable=self.use_cci_var).grid(
-            row=1, column=7, sticky="w"
+            textvariable=self.dmi_state_var,
+            bg="#777777",
+            fg="white",
+            padx=8,
+            pady=3,
         )
-        ttk.Button(controls, text="설정 저장", command=self._save_settings).grid(row=1, column=8, sticky="ew")
+        self.dmi_state_badge.grid(row=1, column=5, sticky="ew", padx=(0, 8))
+        ttk.Label(controls, text="+DI").grid(row=0, column=6, sticky="w")
+        ttk.Label(controls, textvariable=self.dmi_plus_var).grid(row=1, column=6, sticky="w")
+        ttk.Label(controls, text="-DI").grid(row=0, column=7, sticky="w")
+        ttk.Label(controls, textvariable=self.dmi_minus_var).grid(row=1, column=7, sticky="w")
+        ttk.Label(controls, text="ADX").grid(row=0, column=8, sticky="w")
+        ttk.Label(controls, textvariable=self.adx_var).grid(row=1, column=8, sticky="w")
+        ttk.Button(controls, text="설정 저장", command=self._save_settings).grid(row=1, column=9, sticky="ew")
 
         actions = ttk.Frame(controls)
-        actions.grid(row=2, column=0, columnspan=9, sticky="ew", pady=(12, 0))
+        actions.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(12, 0))
         ttk.Button(actions, text="자동 운용 시작", command=self._start).pack(side="left")
         ttk.Button(actions, text="자동 운용 중지", command=self._stop).pack(side="left", padx=6)
-        ttk.Button(actions, text="모의 신호 1회 실행", command=self._run_tick).pack(side="left")
-        ttk.Button(actions, text="다음 매도 실패로 테스트", command=self._fail_sell).pack(side="left", padx=6)
         ttk.Checkbutton(
             actions,
-            text="자동운용 시 3분봉 전략을 키움 모의주문에 연결",
+            text="자동운용 시 3분봉 DMI 강약 전환을 키움 모의주문에 연결",
             variable=self.kiwoom_auto_order_var,
         ).pack(side="left", padx=(12, 0))
 
         kiwoom_controls = ttk.Frame(controls)
-        kiwoom_controls.grid(row=3, column=0, columnspan=9, sticky="ew", pady=(12, 0))
+        kiwoom_controls.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(12, 0))
         ttk.Label(kiwoom_controls, text="계좌번호(로그인 후 자동 표시)").pack(side="left")
         ttk.Entry(
             kiwoom_controls,
@@ -465,13 +465,13 @@ class TraderApp(tk.Tk):
         self.allow_real_order_checkbutton.pack(side="left")
 
         api_actions = ttk.Frame(controls)
-        api_actions.grid(row=4, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+        api_actions.grid(row=4, column=0, columnspan=10, sticky="ew", pady=(8, 0))
         ttk.Button(api_actions, text="현재가 불러오기", command=self._request_current_price).pack(side="left")
         ttk.Button(api_actions, text="3분봉 데이터 불러오기", command=self._request_three_minute).pack(side="left", padx=4)
         ttk.Button(api_actions, text="계좌잔고 불러오기", command=self._request_balance).pack(side="left", padx=4)
         ttk.Button(api_actions, text="실시간 시세 시작", command=self._register_real_time).pack(side="left", padx=4)
         ttk.Button(api_actions, text="실시간 시세 중지", command=self._unregister_real_time).pack(side="left", padx=4)
-        ttk.Button(api_actions, text="3분봉+CCI+강약 판단", command=self._evaluate_market_strategy).pack(
+        ttk.Button(api_actions, text="3분봉+DMI 강약 판단", command=self._evaluate_market_strategy).pack(
             side="left",
             padx=4,
         )
@@ -492,7 +492,7 @@ class TraderApp(tk.Tk):
             padx=4,
         )
         ready_row = ttk.Frame(controls)
-        ready_row.grid(row=5, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+        ready_row.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
         self.chart_button = ttk.Button(
             ready_row,
             text="3분봉 그래프 보기",
@@ -549,12 +549,7 @@ class TraderApp(tk.Tk):
         return table
 
     def _save_settings(self) -> None:
-        settings = StrategySettings(
-            cci_period=max(1, int(float(self.period_var.get()))),
-            cci_upper=float(self.upper_var.get()),
-            cci_lower=-abs(float(self.upper_var.get())),
-            use_cci_filter=self.use_cci_var.get(),
-        )
+        settings = StrategySettings(dmi_period=max(1, int(float(self.dmi_period_var.get()))))
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), settings)
         if self.symbol_var.get().strip() != self.service.symbol:
             self.symbol_var.set(self.service.symbol)
@@ -734,8 +729,7 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _run_tick(self) -> None:
-        pattern = PATTERN_LABEL_TO_VALUE.get(self.pattern_var.get(), "NONE")
-        self.service.step(pattern, float(self.price_var.get()))
+        self.service.step(float(self.price_var.get()))
         self._refresh()
 
     def _request_current_price(self) -> None:
@@ -775,8 +769,7 @@ class TraderApp(tk.Tk):
         if not self._require_live_connection():
             return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
-        pattern = PATTERN_LABEL_TO_VALUE.get(self.pattern_var.get(), "NONE")
-        self.service.evaluate_strategy_with_market_data(self.symbol_var.get(), pattern)
+        self.service.evaluate_strategy_with_market_data(self.symbol_var.get())
         self._refresh()
 
     def _show_candle_chart(self) -> None:
@@ -793,8 +786,8 @@ class TraderApp(tk.Tk):
         window = tk.Toplevel(self)
         self._candle_chart_window = window
         window.title(f"키움 3분봉 그래프 - {self.service.symbol} {self.service.symbol_name}")
-        window.geometry("920x520")
-        window.minsize(680, 420)
+        window.geometry("1040x680")
+        window.minsize(760, 520)
         window.transient(self)
         window.protocol("WM_DELETE_WINDOW", self._close_candle_chart)
 
@@ -802,7 +795,10 @@ class TraderApp(tk.Tk):
         body.pack(fill="both", expand=True)
         ttk.Label(
             body,
-            text=f"{self.service.symbol} {self.service.symbol_name} | 키움 opt10080 최근 3분봉",
+            text=(
+                f"{self.service.symbol} {self.service.symbol_name} | 키움 3분봉 | "
+                f"DMI({self.service.strategy.settings.dmi_period}) 강세·약세 전환"
+            ),
             font=("Malgun Gothic", 13, "bold"),
         ).pack(anchor="w", pady=(0, 8))
         canvas = tk.Canvas(
@@ -812,7 +808,7 @@ class TraderApp(tk.Tk):
             highlightbackground="#c8c8c8",
         )
         canvas.pack(fill="both", expand=True)
-        chronological = list(reversed(candles[:80]))
+        chronological = list(reversed(candles))
         canvas.bind(
             "<Configure>",
             lambda _event: self._draw_candle_chart(canvas, chronological),
@@ -829,38 +825,71 @@ class TraderApp(tk.Tk):
         if not candles:
             return
 
-        width = max(640, canvas.winfo_width())
-        height = max(340, canvas.winfo_height())
-        left_pad, right_pad, top_pad, bottom_pad = 70, 28, 24, 52
+        width = max(720, canvas.winfo_width())
+        height = max(460, canvas.winfo_height())
+        left_pad, right_pad, top_pad, bottom_pad = 70, 34, 28, 42
         plot_width = max(1, width - left_pad - right_pad)
-        plot_height = max(1, height - top_pad - bottom_pad)
-        lowest = min(min(candle.low, candle.open or candle.close, candle.close) for candle in candles)
-        highest = max(max(candle.high, candle.open or candle.close, candle.close) for candle in candles)
+        available_height = max(300, height - top_pad - bottom_pad)
+        indicator_height = max(110, int(available_height * 0.27))
+        pane_gap = 38
+        price_height = max(170, available_height - indicator_height - pane_gap)
+        price_bottom = top_pad + price_height
+        dmi_top = price_bottom + pane_gap
+        dmi_bottom = dmi_top + indicator_height
+
+        display_start = max(0, len(candles) - 100)
+        displayed = candles[display_start:]
+        dmi_series = self.service.strategy.calculate_dmi_series(candles)
+        dmi_by_index = {
+            point.index - display_start: point
+            for point in dmi_series
+            if point.index >= display_start
+        }
+        lowest = min(
+            min(candle.low, candle.open or candle.close, candle.close) for candle in displayed
+        )
+        highest = max(
+            max(candle.high, candle.open or candle.close, candle.close) for candle in displayed
+        )
         price_span = max(1.0, highest - lowest)
 
         def price_y(price: float) -> float:
-            return top_pad + ((highest - price) / price_span) * plot_height
+            return top_pad + ((highest - price) / price_span) * price_height
 
-        canvas.create_line(left_pad, top_pad, left_pad, top_pad + plot_height, fill="#808080")
+        def dmi_y(value: float) -> float:
+            bounded = max(0.0, min(100.0, value))
+            return dmi_top + ((100.0 - bounded) / 100.0) * indicator_height
+
+        step = plot_width / max(1, len(displayed))
+        for index, point in dmi_by_index.items():
+            if index < 0 or index >= len(displayed):
+                continue
+            fill = "#fde4e9" if point.pattern_state == "BULLISH" else "#e3f2fb"
+            if point.pattern_state == "NONE":
+                continue
+            x0 = left_pad + step * index
+            x1 = left_pad + step * (index + 1)
+            canvas.create_rectangle(x0, top_pad, x1, dmi_bottom, fill=fill, outline="")
+
+        canvas.create_line(left_pad, top_pad, left_pad, price_bottom, fill="#808080")
         canvas.create_line(
             left_pad,
-            top_pad + plot_height,
+            price_bottom,
             left_pad + plot_width,
-            top_pad + plot_height,
+            price_bottom,
             fill="#808080",
         )
         canvas.create_text(8, top_pad, text=f"{highest:,.0f}", anchor="w", fill="#333333")
         canvas.create_text(
             8,
-            top_pad + plot_height,
+            price_bottom,
             text=f"{lowest:,.0f}",
             anchor="w",
             fill="#333333",
         )
 
-        step = plot_width / max(1, len(candles))
         body_width = max(2.0, min(8.0, step * 0.58))
-        for index, candle in enumerate(candles):
+        for index, candle in enumerate(displayed):
             x = left_pad + step * (index + 0.5)
             open_price = candle.open or candle.close
             color = "#d64545" if candle.close >= open_price else "#2f62bd"
@@ -880,7 +909,23 @@ class TraderApp(tk.Tk):
                 outline=color,
             )
 
-        latest = candles[-1]
+        previous_point = None
+        for index in sorted(dmi_by_index):
+            point = dmi_by_index[index]
+            if index < 0 or index >= len(displayed):
+                continue
+            if previous_point is not None:
+                candle = displayed[index]
+                x = left_pad + step * (index + 0.5)
+                if previous_point.pattern_state == "BEARISH" and point.pattern_state == "BULLISH":
+                    marker_y = min(price_bottom - 10, price_y(candle.low) + 13)
+                    canvas.create_text(x, marker_y, text="▲ 매수", fill="#b51f63", font=("Malgun Gothic", 8, "bold"))
+                elif previous_point.pattern_state == "BULLISH" and point.pattern_state == "BEARISH":
+                    marker_y = max(top_pad + 10, price_y(candle.high) - 13)
+                    canvas.create_text(x, marker_y, text="▼ 매도", fill="#1769a7", font=("Malgun Gothic", 8, "bold"))
+            previous_point = point
+
+        latest = displayed[-1]
         latest_y = price_y(latest.close)
         canvas.create_line(
             left_pad,
@@ -898,15 +943,44 @@ class TraderApp(tk.Tk):
             fill="#222222",
         )
 
-        label_indexes = sorted({0, len(candles) // 2, len(candles) - 1})
+        canvas.create_line(left_pad, dmi_top, left_pad, dmi_bottom, fill="#808080")
+        canvas.create_line(left_pad, dmi_bottom, left_pad + plot_width, dmi_bottom, fill="#808080")
+        for level in (0, 25, 50, 75, 100):
+            y = dmi_y(float(level))
+            canvas.create_line(left_pad, y, left_pad + plot_width, y, fill="#d0d0d0", dash=(2, 3))
+            canvas.create_text(38, y, text=str(level), fill="#555555")
+
+        def draw_dmi_line(attribute: str, color: str, width_value: int = 2) -> None:
+            coordinates: list[float] = []
+            for index in sorted(dmi_by_index):
+                point = dmi_by_index[index]
+                value = getattr(point, attribute)
+                if value is None or index < 0 or index >= len(displayed):
+                    if len(coordinates) >= 4:
+                        canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
+                    coordinates = []
+                    continue
+                x = left_pad + step * (index + 0.5)
+                coordinates.extend((x, dmi_y(float(value))))
+            if len(coordinates) >= 4:
+                canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
+
+        draw_dmi_line("plus_di", "#d92787")
+        draw_dmi_line("minus_di", "#1686b8")
+        draw_dmi_line("adx", "#555555", 1)
+        canvas.create_text(left_pad, dmi_top - 20, text="+DI", anchor="w", fill="#d92787", font=("Malgun Gothic", 9, "bold"))
+        canvas.create_text(left_pad + 42, dmi_top - 20, text="-DI", anchor="w", fill="#1686b8", font=("Malgun Gothic", 9, "bold"))
+        canvas.create_text(left_pad + 84, dmi_top - 20, text="ADX", anchor="w", fill="#555555", font=("Malgun Gothic", 9, "bold"))
+
+        label_indexes = sorted({0, len(displayed) // 2, len(displayed) - 1})
         for index in label_indexes:
-            timestamp = candles[index].timestamp
+            timestamp = displayed[index].timestamp
             digits = "".join(char for char in timestamp if char.isdigit())
             label = f"{digits[-6:-4]}:{digits[-4:-2]}" if len(digits) >= 6 else timestamp[-8:]
             x = left_pad + step * (index + 0.5)
             canvas.create_text(
                 x,
-                top_pad + plot_height + 22,
+                dmi_bottom + 18,
                 text=label or f"{index + 1}",
                 anchor="n",
                 fill="#555555",
@@ -952,12 +1026,10 @@ class TraderApp(tk.Tk):
         if allow_real and not self._confirm_real_order("전략 판단 후 주문"):
             return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
-        pattern = PATTERN_LABEL_TO_VALUE.get(self.pattern_var.get(), "NONE")
         self.service.evaluate_and_send_order_with_market_data(
             account=self._account_for_api(),
             quantity=max(1, int(float(self.order_qty_var.get()))),
             allow_real_order=allow_real,
-            pattern_state=pattern,
         )
         self._refresh()
 
@@ -978,6 +1050,7 @@ class TraderApp(tk.Tk):
         self.account_password_entry.configure(state=password_state)
         real_order_state = "disabled" if connection_method == "REST API" else "normal"
         self.allow_real_order_checkbutton.configure(state=real_order_state)
+        self._update_dmi_display(snapshot.dmi)
         self.status_text.set(self._format_main_status(snapshot))
         if snapshot.symbol_name and self.symbol_name_var.get() != snapshot.symbol_name:
             self.symbol_name_var.set(snapshot.symbol_name)
@@ -990,6 +1063,27 @@ class TraderApp(tk.Tk):
         self._replace_rows(self.logs, self._format_logs(snapshot.logs))
         self._schedule_auto_tick()
 
+    def _update_dmi_display(self, dmi: DmiPoint | None) -> None:
+        if dmi is None:
+            self.dmi_state_var.set("계산 전")
+            self.dmi_plus_var.set("-")
+            self.dmi_minus_var.set("-")
+            self.adx_var.set("-")
+            self.dmi_state_badge.configure(bg="#777777", fg="white")
+            return
+        self.dmi_plus_var.set(f"{dmi.plus_di:.2f}")
+        self.dmi_minus_var.set(f"{dmi.minus_di:.2f}")
+        self.adx_var.set("계산 중" if dmi.adx is None else f"{dmi.adx:.2f}")
+        if dmi.pattern_state == "BULLISH":
+            self.dmi_state_var.set("강세")
+            self.dmi_state_badge.configure(bg="#d84f88", fg="white")
+        elif dmi.pattern_state == "BEARISH":
+            self.dmi_state_var.set("약세")
+            self.dmi_state_badge.configure(bg="#3a84c6", fg="white")
+        else:
+            self.dmi_state_var.set("중립")
+            self.dmi_state_badge.configure(bg="#777777", fg="white")
+
     @staticmethod
     def _format_main_status(snapshot) -> str:
         account = snapshot.account_info
@@ -999,9 +1093,10 @@ class TraderApp(tk.Tk):
             account_label = f"{account_label}({account.server_type})"
         decision_key = snapshot.decision.action if snapshot.decision else "NONE"
         decision = ACTION_LABELS.get(decision_key, decision_key)
-        cci = ""
-        if snapshot.decision and snapshot.decision.cci_value is not None:
-            cci = f" CCI {snapshot.decision.cci_value:.2f}"
+        dmi = ""
+        if snapshot.dmi is not None:
+            adx = "-" if snapshot.dmi.adx is None else f"{snapshot.dmi.adx:.2f}"
+            dmi = f" +DI {snapshot.dmi.plus_di:.2f} -DI {snapshot.dmi.minus_di:.2f} ADX {adx}"
         parts = [
             f"키움 계좌 {account_label}",
             f"운용 {'중' if snapshot.running else '중지'}",
@@ -1010,7 +1105,7 @@ class TraderApp(tk.Tk):
             f"현재가 {snapshot.price:,.0f}",
             f"보유 {snapshot.quantity}주",
             f"평균 {snapshot.average_price:,.0f}",
-            f"판단 {decision}{cci}",
+            f"판단 {decision}{dmi}",
         ]
         quote = snapshot.real_time_quote or snapshot.market_quote
         if quote:
@@ -1303,9 +1398,4 @@ class TraderApp(tk.Tk):
         self.account_var.set(mask_account_number(digits) if digits else "")
 
     def _settings(self) -> StrategySettings:
-        return StrategySettings(
-            cci_period=max(1, int(float(self.period_var.get()))),
-            cci_upper=float(self.upper_var.get()),
-            cci_lower=-abs(float(self.upper_var.get())),
-            use_cci_filter=self.use_cci_var.get(),
-        )
+        return StrategySettings(dmi_period=max(1, int(float(self.dmi_period_var.get()))))
