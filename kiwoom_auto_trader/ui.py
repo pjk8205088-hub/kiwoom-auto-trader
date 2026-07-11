@@ -24,6 +24,57 @@ SIDE_LABELS = {"BUY": "매수", "SELL": "매도"}
 LEVEL_LABELS = {"INFO": "정보", "WARN": "주의", "ERROR": "오류"}
 
 
+class KiwoomLoginDialog(tk.Toplevel):
+    def __init__(self, parent: tk.Tk, default_user_id: str = "pjk82050") -> None:
+        super().__init__(parent)
+        self.title("키움 ID 로그인")
+        self.resizable(False, False)
+        self.result: tuple[str, str] | None = None
+        self.user_id_var = tk.StringVar(value=default_user_id)
+        self.password_var = tk.StringVar(value="")
+
+        self.transient(parent)
+        self.grab_set()
+
+        body = ttk.Frame(self, padding=18)
+        body.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(body, text="키움증권 ID 로그인", font=("Malgun Gothic", 14, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
+        )
+        ttk.Label(body, text="ID").grid(row=1, column=0, sticky="w", pady=(0, 8))
+        user_entry = ttk.Entry(body, textvariable=self.user_id_var, width=28)
+        user_entry.grid(row=1, column=1, sticky="ew", pady=(0, 8))
+        ttk.Label(body, text="비밀번호").grid(row=2, column=0, sticky="w", pady=(0, 8))
+        password_entry = ttk.Entry(body, textvariable=self.password_var, width=28, show="*")
+        password_entry.grid(row=2, column=1, sticky="ew", pady=(0, 8))
+        ttk.Label(
+            body,
+            text="확인을 누르면 키움 OpenAPI+ 공식 로그인창이 열립니다. 비밀번호는 저장하지 않습니다.",
+            wraplength=360,
+            foreground="#555555",
+        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 14))
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e")
+        ttk.Button(buttons, text="취소", command=self._cancel).pack(side="right")
+        ttk.Button(buttons, text="로그인창 열기", command=self._submit).pack(side="right", padx=(0, 8))
+
+        password_entry.focus_set()
+        self.bind("<Return>", lambda _event: self._submit())
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _submit(self) -> None:
+        self.result = (self.user_id_var.get().strip(), self.password_var.get())
+        self.password_var.set("")
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.password_var.set("")
+        self.result = None
+        self.destroy()
+
+
 class TraderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -52,7 +103,7 @@ class TraderApp(tk.Tk):
         ttk.Label(header, text="키움 자동매매 - 계좌/시세/주문 준비", font=("Malgun Gothic", 16, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        self.account_button = ttk.Button(header, text="키움 로그인창 열기", command=self._connect_account)
+        self.account_button = ttk.Button(header, text="키움 ID 로그인", command=self._open_login_dialog)
         self.account_button.grid(row=0, column=1, padx=(0, 8))
         self.connection_badge = tk.Label(
             header,
@@ -278,6 +329,21 @@ class TraderApp(tk.Tk):
     def _emergency_stop(self) -> None:
         self.service.emergency_stop()
         self._refresh()
+
+    def _open_login_dialog(self) -> None:
+        dialog = KiwoomLoginDialog(self)
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        user_id, password = dialog.result
+        if not user_id:
+            messagebox.showwarning("로그인 ID 필요", "키움 ID를 입력해 주세요.")
+            return
+        if not password:
+            messagebox.showwarning("비밀번호 필요", "비밀번호를 입력해 주세요.")
+            return
+        self.service.storage.log("INFO", "계좌", f"키움 ID {user_id}로 OpenAPI 로그인창을 엽니다.")
+        self._connect_account()
 
     def _connect_account(self) -> None:
         self.account_button.configure(state="disabled")
