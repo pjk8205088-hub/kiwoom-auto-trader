@@ -40,8 +40,15 @@ Windows EXE로 빌드 가능한 주식 자동매매 MVP입니다.
 
 공식 페이지:
 
+- https://www1.kiwoom.com/h/main
 - https://www.kiwoom.com/h/customer/download/VOpenApiInfoView
 - https://download.kiwoom.com/web/openapi/OpenAPISetup.exe
+
+로그인 창의 `키움 홈페이지 열기` 버튼은 위 공식 홈페이지를 엽니다. 홈페이지의
+로그인 상태와 OpenAPI+ ActiveX 로그인 상태는 별도이므로, 홈페이지에 로그인한
+뒤에도 앱의 `로그인` 버튼을 눌러 OpenAPI+ 공식 로그인 절차를 완료해야 합니다.
+앱의 연결 표시는 `GetConnectState()`가 연결을 확인한 경우에만 `ON 연결됨`으로
+바뀝니다.
 
 필요 조건:
 

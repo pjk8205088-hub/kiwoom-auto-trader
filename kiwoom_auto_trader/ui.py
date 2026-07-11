@@ -6,7 +6,12 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from .kiwoom_api import KIWOOM_MULTI_LOGIN_HELP, KIWOOM_OPENAPI_INSTALLER, KIWOOM_OPENAPI_PAGE
+from .kiwoom_api import (
+    KIWOOM_HOME_PAGE,
+    KIWOOM_MULTI_LOGIN_HELP,
+    KIWOOM_OPENAPI_INSTALLER,
+    KIWOOM_OPENAPI_PAGE,
+)
 from .models import PatternState, StrategySettings
 from .service import AutoTradingService
 from .storage import Storage
@@ -55,9 +60,15 @@ class KiwoomLoginDialog(tk.Toplevel):
         ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 14))
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=4, column=0, columnspan=2, sticky="e")
-        ttk.Button(buttons, text="취소", command=self._cancel).pack(side="right")
-        ttk.Button(buttons, text="로그인", command=self._submit).pack(side="right", padx=(0, 8))
+        buttons.grid(row=4, column=0, columnspan=2, sticky="ew")
+        buttons.columnconfigure(0, weight=1)
+        ttk.Button(
+            buttons,
+            text="키움 홈페이지 열기",
+            command=lambda: webbrowser.open(KIWOOM_HOME_PAGE),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(buttons, text="로그인", command=self._submit).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(buttons, text="취소", command=self._cancel).grid(row=0, column=2, padx=(8, 0))
 
         password_entry.focus_set()
         self.bind("<Return>", lambda _event: self._submit())

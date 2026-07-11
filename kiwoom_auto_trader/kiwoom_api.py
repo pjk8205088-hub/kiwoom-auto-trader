@@ -21,6 +21,7 @@ class KiwoomOpenApiError(RuntimeError):
     pass
 
 
+KIWOOM_HOME_PAGE = "https://www1.kiwoom.com/h/main"
 KIWOOM_OPENAPI_PAGE = "https://www.kiwoom.com/h/customer/download/VOpenApiInfoView"
 KIWOOM_OPENAPI_INSTALLER = "https://download.kiwoom.com/web/openapi/OpenAPISetup.exe"
 KIWOOM_MULTI_LOGIN_HELP = "https://download.kiwoom.com/kiwoom_easy_help_new/1289.htm"
