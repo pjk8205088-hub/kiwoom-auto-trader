@@ -3,7 +3,15 @@ import unittest
 from pathlib import Path
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
-from kiwoom_auto_trader.models import Candle, RealTimeQuote, StrategySettings, WatchlistQuote
+from kiwoom_auto_trader.models import (
+    BalanceSummary,
+    Candle,
+    Holding,
+    RealTimeQuote,
+    StrategySettings,
+    TradeDecision,
+    WatchlistQuote,
+)
 from kiwoom_auto_trader.rest_api import KiwoomRestApiError
 from kiwoom_auto_trader.service import AutoTradingService
 from kiwoom_auto_trader.storage import Storage
@@ -66,6 +74,7 @@ class FakeRestApi:
         self.mock = True
         self.sell_failures_remaining = 0
         self.order_calls = 0
+        self.order_requests = []
         self.info = KiwoomAccountInfo(
             False,
             [],
@@ -111,6 +120,7 @@ class FakeRestApi:
 
     def send_order(self, request) -> str:
         self.order_calls += 1
+        self.order_requests.append(request)
         if request.side == "SELL" and self.sell_failures_remaining > 0:
             self.sell_failures_remaining -= 1
             raise KiwoomRestApiError("테스트용 모의 매도 요청 실패")
@@ -351,12 +361,13 @@ class AutoTradingServiceTests(unittest.TestCase):
         candles = dmi_buy_transition_candles()
         service.request_three_minute_candles = lambda _symbol=None: list(reversed(candles))
 
-        first = service.evaluate_and_send_order_with_market_data("1234567890", quantity=1)
-        duplicate = service.evaluate_and_send_order_with_market_data("1234567890", quantity=1)
+        first = service.evaluate_and_send_order_with_market_data("1234567890", quantity=3)
+        duplicate = service.evaluate_and_send_order_with_market_data("1234567890", quantity=3)
 
         self.assertEqual(first.action, "BUY")
         self.assertEqual(duplicate.action, "HOLD")
         self.assertEqual(fake_rest.order_calls, 1)
+        self.assertEqual(fake_rest.order_requests[0].quantity, 3)
 
     def test_retries_mock_sell_request_but_not_buy(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_sell_retry_test.sqlite3"
@@ -391,6 +402,48 @@ class AutoTradingServiceTests(unittest.TestCase):
 
         self.assertEqual(fake_rest.order_calls, 0)
         self.assertIn("최대 5주", message)
+
+    def test_blocks_zero_share_order_before_api_call(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_zero_qty_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+
+        message = service.send_kiwoom_order("1234567890", "BUY", 0)
+
+        self.assertEqual(fake_rest.order_calls, 0)
+        self.assertIn("1주 이상", message)
+
+    def test_strategy_sell_uses_selected_share_quantity(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_sell_qty_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+        service.symbol = "005930"
+        service.balance_summary = BalanceSummary(
+            account="1234567890",
+            holdings=(Holding("005930", "삼성전자", 10, 70000, 72000, 20000, 2.8),),
+        )
+        service.evaluate_strategy_with_market_data = lambda _symbol: TradeDecision(
+            "SELL",
+            "테스트 매도",
+            "BEARISH",
+        )
+
+        decision = service.evaluate_and_send_order_with_market_data(
+            "1234567890",
+            quantity=3,
+        )
+
+        self.assertEqual(decision.action, "SELL")
+        self.assertEqual(fake_rest.order_calls, 1)
+        self.assertEqual(fake_rest.order_requests[0].quantity, 3)
 
 
 if __name__ == "__main__":

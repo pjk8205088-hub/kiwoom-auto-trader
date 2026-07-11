@@ -658,6 +658,8 @@ class AutoTradingService:
                 raise KiwoomOpenApiError("주문할 계좌번호를 입력해 주세요.")
             if not self.symbol:
                 raise KiwoomOpenApiError("주문할 종목번호를 입력해 주세요.")
+            if quantity <= 0:
+                raise KiwoomOpenApiError("주문 수량은 1주 이상 선택해 주세요.")
             holding_quantity = self._holding_quantity(self.symbol)
             if result_side == "BUY":
                 risk_check = self.risk.approve_buy(
@@ -739,6 +741,10 @@ class AutoTradingService:
         quantity: int,
         allow_real_order: bool = False,
     ) -> TradeDecision | None:
+        if quantity <= 0:
+            self.last_api_message = "주문 수량은 1주 이상 선택해 주세요."
+            self.storage.log("WARN", "주문", self.last_api_message)
+            return None
         decision = self.evaluate_strategy_with_market_data(self.symbol)
         if decision is None:
             return None
@@ -754,9 +760,9 @@ class AutoTradingService:
                 self.last_api_message = check.reason
                 self.storage.log("WARN", "위험관리", check.reason)
                 return decision
-            order_quantity = min(max(1, quantity), check.quantity)
+            order_quantity = quantity
         else:
-            order_quantity = self._holding_quantity(self.symbol) or max(1, quantity)
+            order_quantity = quantity
 
         self.send_kiwoom_order(
             account=account,

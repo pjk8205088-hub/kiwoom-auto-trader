@@ -39,6 +39,15 @@ def _account_password_input_allowed(value: str) -> bool:
     return not value or (value.isdigit() and len(value) <= 8)
 
 
+def _order_quantity_input_allowed(value: str) -> bool:
+    return not value or value.isdigit()
+
+
+def _parse_order_quantity(value: str) -> int:
+    text = str(value or "").strip()
+    return int(text) if text.isdigit() else 0
+
+
 class KiwoomLoginDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, default_user_id: str = "") -> None:
         super().__init__(parent)
@@ -370,12 +379,7 @@ class TraderApp(tk.Tk):
             column=6,
             padx=(0, 8),
         )
-        ttk.Button(
-            header,
-            text="REST API 안내",
-            command=lambda: webbrowser.open(KIWOOM_REST_PORTAL),
-        ).grid(row=0, column=7, padx=(0, 8))
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=8)
+        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=7)
         self._update_connection_badge(False)
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
@@ -396,7 +400,7 @@ class TraderApp(tk.Tk):
         self.account_first_var = tk.StringVar(value="")
         self.account_last_var = tk.StringVar(value="")
         self.account_password_var = tk.StringVar(value="")
-        self.order_qty_var = tk.StringVar(value="1")
+        self.order_qty_var = tk.StringVar(value="0")
         self.allow_real_order_var = tk.BooleanVar(value=False)
         self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
         self.account_summary_var = tk.StringVar(
@@ -469,8 +473,28 @@ class TraderApp(tk.Tk):
             validatecommand=(self.register(_account_password_input_allowed), "%P"),
         )
         self.account_password_entry.pack(side="left", padx=(4, 8))
-        ttk.Label(kiwoom_controls, text="시장가 주문 수량").pack(side="left")
-        ttk.Entry(kiwoom_controls, textvariable=self.order_qty_var, width=6).pack(side="left", padx=(4, 8))
+        ttk.Label(kiwoom_controls, text="주문 수량").pack(side="left")
+        ttk.Button(
+            kiwoom_controls,
+            text="-",
+            width=3,
+            command=lambda: self._change_order_quantity(-1),
+        ).pack(side="left", padx=(4, 2))
+        ttk.Entry(
+            kiwoom_controls,
+            textvariable=self.order_qty_var,
+            width=6,
+            justify="center",
+            validate="key",
+            validatecommand=(self.register(_order_quantity_input_allowed), "%P"),
+        ).pack(side="left")
+        ttk.Label(kiwoom_controls, text="주").pack(side="left", padx=(2, 2))
+        ttk.Button(
+            kiwoom_controls,
+            text="+",
+            width=3,
+            command=lambda: self._change_order_quantity(1),
+        ).pack(side="left", padx=(0, 8))
         self.allow_real_order_checkbutton = ttk.Checkbutton(
             kiwoom_controls,
             text="실거래 주문 허용(위험)",
@@ -1733,7 +1757,7 @@ class TraderApp(tk.Tk):
         self.service.send_kiwoom_order(
             account=self._account_for_api(),
             side=side,
-            quantity=max(1, int(float(self.order_qty_var.get()))),
+            quantity=self._order_quantity(),
             allow_real_order=allow_real,
         )
         self._refresh()
@@ -1762,7 +1786,7 @@ class TraderApp(tk.Tk):
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.evaluate_and_send_order_with_market_data(
             account=self._account_for_api(),
-            quantity=max(1, int(float(self.order_qty_var.get()))),
+            quantity=self._order_quantity(),
             allow_real_order=allow_real,
         )
         self._refresh()
@@ -1771,6 +1795,7 @@ class TraderApp(tk.Tk):
         return messagebox.askyesno(
             "실거래 주문 최종 확인",
             f"{title}을 실행하려고 합니다.\n"
+            f"종목 {self.symbol_var.get()} / 주문수량 {self._order_quantity()}주\n"
             "실거래 주문 허용이 켜져 있어 모의투자 서버가 아닌 경우 실제 주문이 전송될 수 있습니다.\n"
             "계좌, 종목, 수량을 다시 확인했습니다. 계속하시겠습니까?",
         )
@@ -1998,7 +2023,7 @@ class TraderApp(tk.Tk):
             order_mode = "모의주문" if snapshot.account_info.server_type == "모의투자" else "실거래 주문"
             return (
                 f"거래 준비 완료: {snapshot.symbol} {name} | 계좌 {mask_account_number(account)} | "
-                f"{self.order_qty_var.get()}주 시장가 매수/매도 및 전략 판단 후 {order_mode} 가능"
+                f"{self._order_quantity()}주 시장가 매수/매도 및 전략 판단 후 {order_mode} 가능"
             )
         missing = []
         if not snapshot.account_info.connected:
@@ -2032,10 +2057,15 @@ class TraderApp(tk.Tk):
         )
 
     def _order_quantity_valid(self) -> bool:
-        try:
-            return int(float(self.order_qty_var.get())) > 0
-        except ValueError:
-            return False
+        return self._order_quantity() > 0
+
+    def _order_quantity(self) -> int:
+        return _parse_order_quantity(self.order_qty_var.get())
+
+    def _change_order_quantity(self, delta: int) -> None:
+        quantity = max(0, self._order_quantity() + int(delta))
+        self.order_qty_var.set(str(quantity))
+        self._refresh()
 
     def _update_trade_buttons(self) -> None:
         state = "normal" if self._trading_ready() else "disabled"
