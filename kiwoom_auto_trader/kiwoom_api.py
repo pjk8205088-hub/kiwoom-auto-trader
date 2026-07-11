@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -21,12 +22,52 @@ class KiwoomOpenApiError(RuntimeError):
 
 
 KIWOOM_OPENAPI_PAGE = "https://www.kiwoom.com/h/customer/download/VOpenApiInfoView"
+KIWOOM_OPENAPI_INSTALLER = "https://download.kiwoom.com/web/openapi/OpenAPISetup.exe"
 KIWOOM_SETUP_GUIDE = (
     "준비 순서: 1) 키움 OpenAPI+ 서비스 사용 등록, "
     "2) OpenAPI+ 모듈 설치, 3) 공동인증서/HTS ID 준비, "
     "4) 32비트 실행 파일로 다시 실행"
 )
 DEFAULT_TR_TIMEOUT_SECONDS = 10.0
+KIWOOM_LOGIN_ERRORS = {
+    0: "로그인에 성공했습니다.",
+    -100: "사용자 정보 교환에 실패했습니다.",
+    -101: "키움 서버에 연결할 수 없습니다.",
+    -102: "버전 정보가 맞지 않습니다. OpenAPI+ 모듈을 업데이트해 주세요.",
+}
+
+
+class KiwoomRequestLimiter:
+    """키움 공식 TR 제한을 넘기기 전에 호출을 잠시 대기시킨다."""
+
+    limits = ((1.0, 5), (60.0, 100), (3600.0, 1000))
+
+    def __init__(
+        self,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._clock = clock
+        self._sleep = sleeper
+        self._requests: deque[float] = deque()
+
+    def acquire(self) -> None:
+        while True:
+            now = self._clock()
+            while self._requests and now - self._requests[0] >= 3600.0:
+                self._requests.popleft()
+
+            delay = 0.0
+            request_times = tuple(self._requests)
+            for window, maximum in self.limits:
+                recent = [requested_at for requested_at in request_times if now - requested_at < window]
+                if len(recent) >= maximum:
+                    delay = max(delay, window - (now - recent[0]) + 0.001)
+
+            if delay <= 0:
+                self._requests.append(now)
+                return
+            self._sleep(delay)
 
 
 def _to_number(value: Any) -> float:
@@ -91,6 +132,7 @@ class KiwoomAccountInfo:
     accounts: list[str]
     user_id: str = ""
     user_name: str = ""
+    server_type: str = ""
     message: str = ""
 
     @property
@@ -101,7 +143,11 @@ class KiwoomAccountInfo:
 class KiwoomOpenApiClient:
     control_id = "KHOPENAPI.KHOpenAPICtrl.1"
 
-    def __init__(self, dispatch_factory: Callable[[], Any] | None = None) -> None:
+    def __init__(
+        self,
+        dispatch_factory: Callable[[], Any] | None = None,
+        request_limiter: KiwoomRequestLimiter | None = None,
+    ) -> None:
         self._dispatch_factory = dispatch_factory
         self._api: Any | None = None
         self._screen_no = 1000
@@ -109,6 +155,7 @@ class KiwoomOpenApiClient:
         self._tr_parsers: dict[str, Callable[[str, str, str], Any]] = {}
         self._real_quotes: dict[str, RealTimeQuote] = {}
         self._last_login_error: int | None = None
+        self._request_limiter = request_limiter or KiwoomRequestLimiter()
 
     def check_environment(self) -> KiwoomEnvironmentStatus:
         process_bits = struct.calcsize("P") * 8
@@ -162,6 +209,7 @@ class KiwoomOpenApiClient:
         if self.is_connected():
             return "이미 키움 OpenAPI에 연결되어 있습니다."
 
+        self._last_login_error = None
         result = api.CommConnect()
         if result not in (0, None):
             raise KiwoomOpenApiError(f"CommConnect 호출 실패: {result}")
@@ -185,12 +233,17 @@ class KiwoomOpenApiClient:
             raw_accounts = str(api.GetLoginInfo("ACCLIST") or "")
 
         accounts = [account.strip() for account in raw_accounts.split(";") if account.strip()]
+        server_type = self.get_server_name()
+        message = f"계좌 연결이 완료되었습니다. 접속 서버: {server_type}"
+        if not accounts:
+            message = f"{server_type} 로그인은 완료되었지만 조회 가능한 계좌가 없습니다."
         return KiwoomAccountInfo(
             connected=True,
             accounts=accounts,
             user_id=str(api.GetLoginInfo("USER_ID") or ""),
             user_name=str(api.GetLoginInfo("USER_NAME") or ""),
-            message="계좌 연결이 완료되었습니다.",
+            server_type=server_type,
+            message=message,
         )
 
     def get_server_gubun(self) -> str:
@@ -200,6 +253,25 @@ class KiwoomOpenApiClient:
 
     def is_mock_server(self) -> bool:
         return self.get_server_gubun() == "1"
+
+    def get_server_name(self) -> str:
+        return "모의투자" if self.is_mock_server() else "실거래"
+
+    @property
+    def last_login_error(self) -> int | None:
+        return self._last_login_error
+
+    def login_status_message(self) -> str:
+        self.pump_messages()
+        if self.is_connected():
+            return f"키움 로그인 완료 ({self.get_server_name()} 서버)"
+        if self._last_login_error is None:
+            return "키움 로그인 진행 중입니다. 로그인 창에서 인증을 완료해 주세요."
+        detail = KIWOOM_LOGIN_ERRORS.get(
+            self._last_login_error,
+            "알 수 없는 로그인 오류가 발생했습니다.",
+        )
+        return f"키움 로그인 실패: {detail} (오류코드 {self._last_login_error})"
 
     def request_current_price(self, symbol: str) -> MarketQuote:
         symbol = normalize_symbol(symbol)
@@ -298,6 +370,7 @@ class KiwoomOpenApiClient:
         order_type = 1 if request.side == "BUY" else 2
         rqname = "모의매수주문" if request.side == "BUY" else "모의매도주문"
         symbol = normalize_symbol(request.symbol)
+        self._request_limiter.acquire()
         result = api.SendOrder(
             rqname,
             self._next_screen_no(),
@@ -332,6 +405,7 @@ class KiwoomOpenApiClient:
         if not self.is_connected():
             raise KiwoomOpenApiError("키움 OpenAPI 로그인 후 조회할 수 있습니다.")
 
+        self._request_limiter.acquire()
         request_id = f"{rqname}-{int(time.time() * 1000)}"
         self._tr_results[request_id] = None
         self._tr_parsers[request_id] = parser
@@ -383,7 +457,10 @@ class KiwoomOpenApiClient:
         change_rate = _to_number(self._get_real_data(code, 12))
         volume = _to_int(self._get_real_data(code, 13))
         timestamp = str(self._get_real_data(code, 20) or "").strip()
-        self._real_quotes[code] = RealTimeQuote(code, current, change, change_rate, volume, timestamp)
+        symbol = normalize_symbol(code)
+        self._real_quotes[symbol] = RealTimeQuote(
+            symbol, current, change, change_rate, volume, timestamp
+        )
 
     def _parse_current_price(self, trcode: str, rqname: str, record_name: str) -> MarketQuote:
         return MarketQuote(

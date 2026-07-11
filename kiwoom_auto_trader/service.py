@@ -121,10 +121,22 @@ class AutoTradingService:
     def refresh_account_connection(self) -> KiwoomAccountInfo:
         try:
             self.account_info = self.kiwoom_api.get_account_info()
+            if not self.account_info.connected:
+                self.account_info = KiwoomAccountInfo(
+                    False,
+                    [],
+                    message=self.kiwoom_api.login_status_message(),
+                )
         except KiwoomOpenApiError as exc:
             self.account_info = KiwoomAccountInfo(False, [], message=str(exc))
         self.storage.log("INFO", "계좌", self.account_info.message)
         return self.account_info
+
+    def account_login_status(self) -> str:
+        try:
+            return self.kiwoom_api.login_status_message()
+        except KiwoomOpenApiError as exc:
+            return str(exc)
 
     def lookup_symbol_name(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)

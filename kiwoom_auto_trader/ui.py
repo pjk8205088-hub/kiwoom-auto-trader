@@ -6,7 +6,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from .kiwoom_api import KIWOOM_OPENAPI_PAGE
+from .kiwoom_api import KIWOOM_OPENAPI_INSTALLER, KIWOOM_OPENAPI_PAGE
 from .models import PatternState, StrategySettings
 from .service import AutoTradingService
 from .storage import Storage
@@ -56,10 +56,13 @@ class TraderApp(tk.Tk):
         ttk.Button(header, text="연결 준비상태 확인", command=self._check_account_environment).grid(
             row=0, column=2, padx=(0, 8)
         )
-        ttk.Button(header, text="키움 OpenAPI 설치 페이지", command=self._open_kiwoom_openapi_page).grid(
+        ttk.Button(header, text="OpenAPI+ 설치파일 받기", command=self._open_kiwoom_installer).grid(
             row=0, column=3, padx=(0, 8)
         )
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=4)
+        ttk.Button(header, text="키움 공식 안내", command=self._open_kiwoom_openapi_page).grid(
+            row=0, column=4, padx=(0, 8)
+        )
+        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=5)
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
         controls.grid(row=1, column=0, sticky="ew", padx=12)
@@ -138,6 +141,7 @@ class TraderApp(tk.Tk):
             kiwoom_controls,
             text="실거래 주문 허용(위험)",
             variable=self.allow_real_order_var,
+            command=self._refresh,
         ).pack(side="left")
 
         api_actions = ttk.Frame(controls)
@@ -269,6 +273,11 @@ class TraderApp(tk.Tk):
         self.service.storage.log("INFO", "계좌", "키움 OpenAPI+ 설치 페이지를 열었습니다.")
         self._refresh()
 
+    def _open_kiwoom_installer(self) -> None:
+        webbrowser.open(KIWOOM_OPENAPI_INSTALLER)
+        self.service.storage.log("INFO", "계좌", "키움 공식 OpenAPI+ 설치파일 다운로드를 열었습니다.")
+        self._refresh()
+
     def _on_symbol_input_changed(self, *_args: object) -> None:
         if self._symbol_lookup_after_id is not None:
             self.after_cancel(self._symbol_lookup_after_id)
@@ -306,7 +315,8 @@ class TraderApp(tk.Tk):
             if self._account_for_api():
                 self.service.request_balance(self._account_for_api(), self.account_password_var.get())
         self._refresh()
-        if account_info.connected or self._account_poll_count >= 120:
+        login_failed = self.service.kiwoom_api.last_login_error not in (None, 0)
+        if account_info.connected or login_failed or self._account_poll_count >= 120:
             self.account_button.configure(state="normal")
             return
         self._schedule_account_poll()
@@ -408,6 +418,8 @@ class TraderApp(tk.Tk):
             cci = f" | CCI {snapshot.decision.cci_value:.2f}"
         account = snapshot.account_info
         account_label = "연결됨" if account.connected else "미연결"
+        if account.connected and account.server_type:
+            account_label = f"{account_label}({account.server_type})"
         account_detail = account.user_name or account.message
         if account.accounts:
             masked_accounts = ", ".join(mask_account_number(account_number) for account_number in account.accounts)
@@ -427,7 +439,7 @@ class TraderApp(tk.Tk):
                 [
                     f"키움 계좌 {account_label}",
                     account_detail,
-                    f"모의 연결 {snapshot.connection}",
+                    f"내부 테스트 {snapshot.connection}",
                     f"운용 {'중' if snapshot.running else '중지'}",
                     f"종목 {snapshot.symbol} {snapshot.symbol_name}".strip(),
                     f"패턴 {PATTERN_VALUE_TO_LABEL.get(snapshot.pattern, snapshot.pattern)}",
@@ -520,12 +532,13 @@ class TraderApp(tk.Tk):
             )
         if not snapshot.balance_summary:
             return (
-                f"계좌 창: 연결됨 | 선택 계좌 {selected_label} | "
+                f"계좌 창: 연결됨({snapshot.account_info.server_type}) | 선택 계좌 {selected_label} | "
                 "계좌 비밀번호 입력 후 '계좌잔고 불러오기'를 누르면 잔고가 표시됩니다."
             )
         balance = snapshot.balance_summary
         return (
-            f"계좌 창: 연결됨 | 선택 계좌 {mask_account_number(balance.account)} | "
+            f"계좌 창: 연결됨({snapshot.account_info.server_type}) | "
+            f"선택 계좌 {mask_account_number(balance.account)} | "
             f"보유 {len(balance.holdings)}종목 | 추정예탁자산 {balance.estimated_assets:,.0f} | "
             f"평가금액 {balance.total_evaluation:,.0f} | 평가손익 {balance.total_profit_loss:,.0f} | "
             f"수익률 {balance.total_profit_rate:.2f}%"
@@ -535,10 +548,14 @@ class TraderApp(tk.Tk):
         account = clean_account_number(self._account_for_api())
         name = snapshot.symbol_name or self.symbol_name_var.get().strip()
         quantity_ok = self._order_quantity_valid()
-        if snapshot.account_info.connected and account and name and quantity_ok:
+        server_ready = (
+            snapshot.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
+        )
+        if snapshot.account_info.connected and account and name and quantity_ok and server_ready:
+            order_mode = "모의주문" if snapshot.account_info.server_type == "모의투자" else "실거래 주문"
             return (
                 f"거래 준비 완료: {snapshot.symbol} {name} | 계좌 {mask_account_number(account)} | "
-                f"{self.order_qty_var.get()}주 시장가 매수/매도 및 전략 판단 후 모의주문 가능"
+                f"{self.order_qty_var.get()}주 시장가 매수/매도 및 전략 판단 후 {order_mode} 가능"
             )
         missing = []
         if not snapshot.account_info.connected:
@@ -549,17 +566,23 @@ class TraderApp(tk.Tk):
             missing.append("회사명")
         if not quantity_ok:
             missing.append("주문수량")
+        if snapshot.account_info.server_type == "실거래" and not self.allow_real_order_var.get():
+            missing.append("실거래 주문 잠금 해제")
         return f"거래 준비: {', '.join(missing)} 확인이 필요합니다."
 
     def _trading_ready(self) -> bool:
         account = clean_account_number(self._account_for_api())
         name = self.symbol_name_var.get().strip()
+        server_ready = (
+            self.service.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
+        )
         return bool(
             self.service.account_info.connected
             and account
             and name
             and name != "키움 로그인 후 조회 필요"
             and self._order_quantity_valid()
+            and server_ready
         )
 
     def _order_quantity_valid(self) -> bool:

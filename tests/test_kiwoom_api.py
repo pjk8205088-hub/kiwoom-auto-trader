@@ -1,6 +1,19 @@
 import unittest
 
-from kiwoom_auto_trader.kiwoom_api import KiwoomOpenApiClient
+from kiwoom_auto_trader.kiwoom_api import KiwoomOpenApiClient, KiwoomRequestLimiter
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+        self.sleeps = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
 
 
 class FakeKiwoomApi:
@@ -99,6 +112,7 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertTrue(info.connected)
         self.assertEqual(info.user_name, "테스트사용자")
         self.assertEqual(info.accounts, ["1234567890", "0987654321"])
+        self.assertEqual(info.server_type, "모의투자")
 
     def test_environment_check_uses_fake_dispatch(self):
         fake = FakeKiwoomApi()
@@ -169,6 +183,26 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertIn("전송", message)
         self.assertEqual(fake.order_calls[0][2], 1)
         self.assertEqual(fake.order_calls[0][4], 1)
+
+    def test_reports_login_error_from_event(self):
+        fake = FakeKiwoomApi()
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+        client._last_login_error = -101
+
+        message = client.login_status_message()
+
+        self.assertIn("서버에 연결할 수 없습니다", message)
+        self.assertIn("-101", message)
+
+    def test_rate_limiter_waits_after_five_requests_per_second(self):
+        clock = FakeClock()
+        limiter = KiwoomRequestLimiter(clock=clock, sleeper=clock.sleep)
+
+        for _ in range(6):
+            limiter.acquire()
+
+        self.assertEqual(len(clock.sleeps), 1)
+        self.assertGreaterEqual(clock.now, 1.0)
 
 
 if __name__ == "__main__":
