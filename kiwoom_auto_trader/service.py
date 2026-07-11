@@ -114,9 +114,18 @@ class AutoTradingService:
 
     def check_account_environment(self) -> str:
         status = self.kiwoom_api.check_environment()
-        self.account_info = KiwoomAccountInfo(False, [], message=status.message)
-        self.storage.log("INFO", "계좌", status.message)
-        return status.message
+        message = status.message
+        if status.active_x_available:
+            try:
+                self.account_info = self.kiwoom_api.get_account_info()
+                message = self.account_info.message
+            except KiwoomOpenApiError as exc:
+                self.account_info = KiwoomAccountInfo(False, [], message=str(exc))
+                message = str(exc)
+        else:
+            self.account_info = KiwoomAccountInfo(False, [], message=message)
+        self.storage.log("INFO", "계좌", message)
+        return message
 
     def refresh_account_connection(self) -> KiwoomAccountInfo:
         try:

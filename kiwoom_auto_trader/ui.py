@@ -44,6 +44,7 @@ class TraderApp(tk.Tk):
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
+        self.connection_state_var = tk.StringVar(value="OFF 연결 안됨")
 
         header = ttk.Frame(self, padding=12)
         header.grid(row=0, column=0, sticky="ew")
@@ -51,18 +52,28 @@ class TraderApp(tk.Tk):
         ttk.Label(header, text="키움 자동매매 - 계좌/시세/주문 준비", font=("Malgun Gothic", 16, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        self.account_button = ttk.Button(header, text="키움 로그인/계좌 불러오기", command=self._connect_account)
+        self.account_button = ttk.Button(header, text="키움 로그인창 열기", command=self._connect_account)
         self.account_button.grid(row=0, column=1, padx=(0, 8))
-        ttk.Button(header, text="연결 준비상태 확인", command=self._check_account_environment).grid(
-            row=0, column=2, padx=(0, 8)
+        self.connection_badge = tk.Label(
+            header,
+            textvariable=self.connection_state_var,
+            bg="#7a7a7a",
+            fg="white",
+            font=("Malgun Gothic", 10, "bold"),
+            padx=12,
+            pady=4,
         )
-        ttk.Button(header, text="OpenAPI+ 설치파일 받기", command=self._open_kiwoom_installer).grid(
+        self.connection_badge.grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(header, text="연결 상태 확인", command=self._check_account_environment).grid(
             row=0, column=3, padx=(0, 8)
         )
-        ttk.Button(header, text="키움 공식 안내", command=self._open_kiwoom_openapi_page).grid(
+        ttk.Button(header, text="OpenAPI+ 설치파일 받기", command=self._open_kiwoom_installer).grid(
             row=0, column=4, padx=(0, 8)
         )
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=5)
+        ttk.Button(header, text="키움 공식 안내", command=self._open_kiwoom_openapi_page).grid(
+            row=0, column=5, padx=(0, 8)
+        )
+        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=6)
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
         controls.grid(row=1, column=0, sticky="ew", padx=12)
@@ -437,6 +448,7 @@ class TraderApp(tk.Tk):
         account_label = "연결됨" if account.connected else "미연결"
         if account.connected and account.server_type:
             account_label = f"{account_label}({account.server_type})"
+        self._update_connection_badge(account.connected)
         account_detail = account.user_name or account.message
         if account.accounts:
             masked_accounts = ", ".join(mask_account_number(account_number) for account_number in account.accounts)
@@ -613,6 +625,14 @@ class TraderApp(tk.Tk):
         self.buy_button.configure(state=state)
         self.sell_button.configure(state=state)
         self.strategy_order_button.configure(state=state)
+
+    def _update_connection_badge(self, connected: bool) -> None:
+        if connected:
+            self.connection_state_var.set("ON 키움 연결됨")
+            self.connection_badge.configure(bg="#16833a", fg="white")
+        else:
+            self.connection_state_var.set("OFF 연결 안됨")
+            self.connection_badge.configure(bg="#7a7a7a", fg="white")
 
     def _account_for_api(self) -> str:
         entered = clean_account_number(self.account_var.get())
