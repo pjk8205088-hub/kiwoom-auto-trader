@@ -6,7 +6,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from .kiwoom_api import KIWOOM_OPENAPI_INSTALLER, KIWOOM_OPENAPI_PAGE
+from .kiwoom_api import KIWOOM_MULTI_LOGIN_HELP, KIWOOM_OPENAPI_INSTALLER, KIWOOM_OPENAPI_PAGE
 from .models import PatternState, StrategySettings
 from .service import AutoTradingService
 from .storage import Storage
@@ -49,7 +49,7 @@ class KiwoomLoginDialog(tk.Toplevel):
         password_entry.grid(row=2, column=1, sticky="ew", pady=(0, 8))
         ttk.Label(
             body,
-            text="확인을 누르면 키움 OpenAPI+ 공식 로그인창이 열립니다. 비밀번호는 저장하지 않습니다.",
+            text="로그인을 누르면 키움 OpenAPI+ 공식 로그인 절차를 시작합니다. 홈페이지 로그인과 별도이며, 비밀번호는 저장하지 않습니다.",
             wraplength=360,
             foreground="#555555",
         ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 14))
@@ -106,6 +106,16 @@ class TraderApp(tk.Tk):
         )
         self.account_button = ttk.Button(header, text="키움 로그인", command=self._open_login_dialog)
         self.account_button.grid(row=0, column=1, padx=(0, 8))
+        self.connection_light = tk.Canvas(header, width=18, height=18, highlightthickness=0, bd=0)
+        self.connection_light.grid(row=0, column=2, padx=(0, 6))
+        self._connection_light_id = self.connection_light.create_oval(
+            2,
+            2,
+            16,
+            16,
+            fill="#b0b0b0",
+            outline="#808080",
+        )
         self.connection_badge = tk.Label(
             header,
             textvariable=self.connection_state_var,
@@ -115,17 +125,21 @@ class TraderApp(tk.Tk):
             padx=12,
             pady=4,
         )
-        self.connection_badge.grid(row=0, column=2, padx=(0, 8))
+        self.connection_badge.grid(row=0, column=3, padx=(0, 8))
         ttk.Button(header, text="연결 상태 확인", command=self._check_account_environment).grid(
-            row=0, column=3, padx=(0, 8)
-        )
-        ttk.Button(header, text="OpenAPI+ 설치파일 받기", command=self._open_kiwoom_installer).grid(
             row=0, column=4, padx=(0, 8)
         )
-        ttk.Button(header, text="키움 공식 안내", command=self._open_kiwoom_openapi_page).grid(
+        ttk.Button(header, text="OpenAPI+ 설치파일 받기", command=self._open_kiwoom_installer).grid(
             row=0, column=5, padx=(0, 8)
         )
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=6)
+        ttk.Button(header, text="키움 공식 안내", command=self._open_kiwoom_openapi_page).grid(
+            row=0, column=6, padx=(0, 8)
+        )
+        ttk.Button(header, text="멀티로그인 안내", command=self._open_multi_login_help).grid(
+            row=0, column=7, padx=(0, 8)
+        )
+        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=8)
+        self._update_connection_badge(False)
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
         controls.grid(row=1, column=0, sticky="ew", padx=12)
@@ -348,6 +362,7 @@ class TraderApp(tk.Tk):
 
     def _connect_account(self) -> None:
         self.account_button.configure(state="disabled")
+        self._update_connection_badge(False)
         self._account_poll_count = 0
         message = self.service.start_account_connection()
         self.status_text.set(f"키움 계좌 연결: {message}")
@@ -376,6 +391,11 @@ class TraderApp(tk.Tk):
     def _open_kiwoom_installer(self) -> None:
         webbrowser.open(KIWOOM_OPENAPI_INSTALLER)
         self.service.storage.log("INFO", "계좌", "키움 공식 OpenAPI+ 설치파일 다운로드를 열었습니다.")
+        self._refresh()
+
+    def _open_multi_login_help(self) -> None:
+        webbrowser.open(KIWOOM_MULTI_LOGIN_HELP)
+        self.service.storage.log("INFO", "계좌", "키움 멀티로그인 안내 페이지를 열었습니다.")
         self._refresh()
 
     def _on_symbol_input_changed(self, *_args: object) -> None:
@@ -706,9 +726,19 @@ class TraderApp(tk.Tk):
         if connected:
             self.connection_state_var.set("ON 연결됨")
             self.connection_badge.configure(bg="#16833a", fg="white")
+            self.connection_light.itemconfigure(
+                self._connection_light_id,
+                fill="#2ecc71",
+                outline="#1e8449",
+            )
         else:
             self.connection_state_var.set("OFF 연결 안됨")
             self.connection_badge.configure(bg="#7a7a7a", fg="white")
+            self.connection_light.itemconfigure(
+                self._connection_light_id,
+                fill="#b0b0b0",
+                outline="#808080",
+            )
 
     def _show_account_info_window(self) -> None:
         snapshot = self.service.snapshot()
