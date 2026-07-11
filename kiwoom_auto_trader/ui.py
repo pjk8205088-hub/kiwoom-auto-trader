@@ -447,6 +447,8 @@ class TraderApp(tk.Tk):
         if account_info.connected:
             self._update_connection_badge(True)
             self.service.lookup_symbol_name(self.symbol_var.get())
+            self.service.request_current_price(self.symbol_var.get())
+            self.service.register_real_time_price(self.symbol_var.get())
             if self._account_for_api():
                 self.service.request_balance(self._account_for_api(), self.account_password_var.get())
         self._refresh()
@@ -816,7 +818,7 @@ class TraderApp(tk.Tk):
         window = tk.Toplevel(self)
         self._account_info_window = window
         window.title("키움 계좌정보")
-        window.geometry("420x260")
+        window.geometry("470x340")
         window.resizable(False, False)
         window.transient(self)
         window.protocol("WM_DELETE_WINDOW", window.destroy)
@@ -826,13 +828,26 @@ class TraderApp(tk.Tk):
         ttk.Label(body, text="계좌정보", font=("Malgun Gothic", 15, "bold")).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
         )
+        login_event = (
+            "성공 (0)"
+            if account_info.login_event_code == 0
+            else "기존 연결 확인"
+            if account_info.login_event_code is None
+            else f"오류 ({account_info.login_event_code})"
+        )
         rows = [
             ("연결 상태", "ON 연결됨"),
+            ("로그인 이벤트", login_event),
+            ("정보 수신", "완료" if account_info.login_data_received else "확인 필요"),
             ("접속 서버", account_info.server_type or "확인 필요"),
             ("고객명", account_info.user_name or "확인 필요"),
             ("사용자 ID", account_info.user_id or "확인 필요"),
             ("선택 계좌", mask_account_number(self._account_for_api() or self._selected_account_full)),
-            ("계좌 수", f"{len(account_info.accounts)}개"),
+            (
+                "계좌 수",
+                f"{len(account_info.accounts)}개 (키움 보고 {account_info.reported_account_count}개)",
+            ),
+            ("정보 활용", "계좌 선택 / 현재가 / 실시간 시세 / 잔고"),
         ]
         if snapshot.balance_summary:
             rows.extend(

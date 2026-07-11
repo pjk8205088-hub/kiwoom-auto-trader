@@ -9,9 +9,15 @@ from kiwoom_auto_trader.storage import Storage
 
 
 class FakeAccountApi:
-    def __init__(self, user_id: str, connected: bool = True) -> None:
+    def __init__(
+        self,
+        user_id: str,
+        connected: bool = True,
+        reported_account_count: int = 1,
+    ) -> None:
         self.user_id = user_id
         self.connected = connected
+        self.reported_account_count = reported_account_count
 
     def start_login(self) -> str:
         return "이미 키움 OpenAPI에 연결되어 있습니다."
@@ -19,13 +25,20 @@ class FakeAccountApi:
     def get_account_info(self) -> KiwoomAccountInfo:
         if not self.connected:
             return KiwoomAccountInfo(False, [], message="키움 OpenAPI에 연결되지 않았습니다.")
+        message = (
+            "모의투자 계좌 1개를 불러왔습니다."
+            if self.reported_account_count == 1
+            else "키움 로그인 정보 수신 확인에 실패했습니다."
+        )
         return KiwoomAccountInfo(
             True,
             ["1234567890"],
             user_id=self.user_id,
             user_name="테스트사용자",
             server_type="모의투자",
-            message="모의투자 계좌 1개를 불러왔습니다.",
+            message=message,
+            reported_account_count=self.reported_account_count,
+            login_event_code=0,
         )
 
     def login_status_message(self) -> str:
@@ -83,6 +96,20 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertFalse(service.running)
         self.assertTrue(service.order_manager.stop_requested)
         self.assertIn("주문을 중지", service.account_info.message)
+
+    def test_rejects_connected_session_with_incomplete_account_data(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_account_count_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        service.kiwoom_api = FakeAccountApi("expected-user", reported_account_count=2)
+
+        service.start_account_connection("expected-user")
+        info = service.refresh_account_connection()
+
+        self.assertFalse(info.connected)
+        self.assertEqual(info.accounts, [])
+        self.assertIn("수신 확인", info.message)
 
 
 if __name__ == "__main__":

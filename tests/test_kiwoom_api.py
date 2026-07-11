@@ -34,6 +34,7 @@ class FakeKiwoomApi:
     def GetLoginInfo(self, tag):
         values = {
             "ACCNO": "1234567890;0987654321;",
+            "ACCOUNT_CNT": "2",
             "USER_ID": "test-user",
             "USER_NAME": "테스트사용자",
             "GetServerGubun": "1",
@@ -113,6 +114,27 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(info.user_name, "테스트사용자")
         self.assertEqual(info.accounts, ["1234567890", "0987654321"])
         self.assertEqual(info.server_type, "모의투자")
+        self.assertEqual(info.reported_account_count, 2)
+        self.assertTrue(info.login_data_received)
+
+    def test_detects_incomplete_login_account_data(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        original_get_login_info = fake.GetLoginInfo
+
+        def mismatched_account_count(tag):
+            if tag == "ACCOUNT_CNT":
+                return "3"
+            return original_get_login_info(tag)
+
+        fake.GetLoginInfo = mismatched_account_count
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        info = client.get_account_info()
+
+        self.assertTrue(info.connected)
+        self.assertFalse(info.login_data_received)
+        self.assertIn("일치하지 않습니다", info.message)
 
     def test_retries_rejected_com_connection_state(self):
         fake = FakeKiwoomApi()

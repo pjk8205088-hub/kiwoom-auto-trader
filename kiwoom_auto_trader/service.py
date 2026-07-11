@@ -176,6 +176,17 @@ class AutoTradingService:
     def _verify_account_info(self, info: KiwoomAccountInfo) -> KiwoomAccountInfo:
         if not info.connected:
             return info
+        if not info.login_data_received:
+            return KiwoomAccountInfo(
+                False,
+                [],
+                user_id=info.user_id,
+                user_name=info.user_name,
+                server_type=info.server_type,
+                message=info.message or "키움 로그인 정보 수신 확인에 실패했습니다.",
+                reported_account_count=info.reported_account_count,
+                login_event_code=info.login_event_code,
+            )
         expected = self.expected_user_id.casefold()
         actual = info.user_id.strip().casefold()
         if not expected:
@@ -186,6 +197,8 @@ class AutoTradingService:
                 user_name=info.user_name,
                 server_type=info.server_type,
                 message="앱에서 확인할 키움 ID를 입력한 뒤 OpenAPI+ 로그인을 시작해 주세요.",
+                reported_account_count=info.reported_account_count,
+                login_event_code=info.login_event_code,
             )
         if not actual or actual != expected:
             return KiwoomAccountInfo(
@@ -195,6 +208,8 @@ class AutoTradingService:
                 user_name=info.user_name,
                 server_type=info.server_type,
                 message="OpenAPI+ 로그인 ID가 앱에서 입력한 ID와 일치하지 않아 연결을 차단했습니다.",
+                reported_account_count=info.reported_account_count,
+                login_event_code=info.login_event_code,
             )
         return info
 

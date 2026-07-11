@@ -138,10 +138,21 @@ class KiwoomAccountInfo:
     user_name: str = ""
     server_type: str = ""
     message: str = ""
+    reported_account_count: int = 0
+    login_event_code: int | None = None
 
     @property
     def account_count(self) -> int:
         return len(self.accounts)
+
+    @property
+    def login_data_received(self) -> bool:
+        return bool(
+            self.connected
+            and self.user_id.strip()
+            and self.accounts
+            and self.reported_account_count == len(self.accounts)
+        )
 
 
 class KiwoomOpenApiClient:
@@ -236,17 +247,34 @@ class KiwoomOpenApiClient:
             raw_accounts = str(self._call_api(lambda: api.GetLoginInfo("ACCLIST")) or "")
 
         accounts = [account.strip() for account in raw_accounts.split(";") if account.strip()]
+        raw_account_count = str(self._call_api(lambda: api.GetLoginInfo("ACCOUNT_CNT")) or "").strip()
+        try:
+            reported_account_count = max(0, int(raw_account_count))
+        except ValueError:
+            reported_account_count = 0
+        user_id = str(self._call_api(lambda: api.GetLoginInfo("USER_ID")) or "").strip()
+        user_name = str(self._call_api(lambda: api.GetLoginInfo("USER_NAME")) or "").strip()
         server_type = self.get_server_name()
-        message = f"계좌 연결이 완료되었습니다. 접속 서버: {server_type}"
-        if not accounts:
-            message = f"{server_type} 로그인은 완료되었지만 조회 가능한 계좌가 없습니다."
+        if not user_id:
+            message = "OpenAPI+ 연결은 되었지만 USER_ID 정보가 수신되지 않았습니다."
+        elif not accounts:
+            message = f"{server_type} 로그인은 완료되었지만 ACCNO 계좌 정보가 수신되지 않았습니다."
+        elif reported_account_count != len(accounts):
+            message = (
+                "키움 계좌 개수 정보가 일치하지 않습니다. "
+                f"ACCOUNT_CNT {reported_account_count}개 / ACCNO {len(accounts)}개"
+            )
+        else:
+            message = f"키움 로그인 정보 수신 완료: {server_type}, 계좌 {len(accounts)}개"
         return KiwoomAccountInfo(
             connected=True,
             accounts=accounts,
-            user_id=str(self._call_api(lambda: api.GetLoginInfo("USER_ID")) or ""),
-            user_name=str(self._call_api(lambda: api.GetLoginInfo("USER_NAME")) or ""),
+            user_id=user_id,
+            user_name=user_name,
             server_type=server_type,
             message=message,
+            reported_account_count=reported_account_count,
+            login_event_code=self._last_login_error,
         )
 
     def get_server_gubun(self) -> str:
