@@ -4,7 +4,7 @@ import tempfile
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
@@ -16,7 +16,12 @@ from .models import Candle, PatternState, StrategySettings
 from .rest_api import KIWOOM_REST_PORTAL
 from .service import AutoTradingService
 from .storage import Storage
-from .symbols import clean_account_number, mask_account_number, normalize_symbol
+from .symbols import (
+    clean_account_number,
+    display_account_number,
+    mask_account_number,
+    normalize_symbol,
+)
 
 
 PATTERN_LABEL_TO_VALUE: dict[str, PatternState] = {
@@ -28,6 +33,8 @@ PATTERN_VALUE_TO_LABEL = {value: label for label, value in PATTERN_LABEL_TO_VALU
 ACTION_LABELS = {"BUY": "매수", "SELL": "매도", "HOLD": "대기", "NONE": "없음"}
 SIDE_LABELS = {"BUY": "매수", "SELL": "매도"}
 LEVEL_LABELS = {"INFO": "정보", "WARN": "주의", "ERROR": "오류"}
+REST_LIVE_LABEL = "실전투자 (조회 전용)"
+REST_MOCK_LABEL = "모의투자"
 
 
 class KiwoomLoginDialog(tk.Toplevel):
@@ -91,9 +98,14 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("키움 REST API 연결")
         self.resizable(False, False)
-        self.result: tuple[str, str] | None = None
+        self.result: tuple[str, str, bool] | None = None
         self.app_key_var = tk.StringVar(value="")
         self.secret_key_var = tk.StringVar(value="")
+        self.environment_var = tk.StringVar(value=REST_LIVE_LABEL)
+        self.heading_var = tk.StringVar()
+        self.help_var = tk.StringVar()
+        self.connect_button_var = tk.StringVar()
+        self.key_status_var = tk.StringVar(value="키 파일을 선택하거나 다운로드 폴더에서 자동으로 찾을 수 있습니다.")
 
         self.transient(parent)
         self.grab_set()
@@ -101,51 +113,156 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         body = ttk.Frame(self, padding=18)
         body.grid(row=0, column=0, sticky="nsew")
         body.columnconfigure(1, weight=1)
-        ttk.Label(body, text="키움 REST API 모의투자 연결", font=("Malgun Gothic", 14, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
+        ttk.Label(body, textvariable=self.heading_var, font=("Malgun Gothic", 14, "bold")).grid(
+            row=0, column=0, columnspan=3, sticky="w", pady=(0, 14)
         )
-        ttk.Label(body, text="AppKey").grid(row=1, column=0, sticky="w", pady=(0, 8))
-        app_key_entry = ttk.Entry(body, textvariable=self.app_key_var, width=42)
-        app_key_entry.grid(row=1, column=1, sticky="ew", pady=(0, 8))
-        ttk.Label(body, text="SecretKey").grid(row=2, column=0, sticky="w", pady=(0, 8))
+        ttk.Label(body, text="연결 환경").grid(row=1, column=0, sticky="w", pady=(0, 8))
+        environment = ttk.Combobox(
+            body,
+            textvariable=self.environment_var,
+            values=(REST_LIVE_LABEL, REST_MOCK_LABEL),
+            state="readonly",
+            width=28,
+        )
+        environment.grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 8))
+        environment.bind("<<ComboboxSelected>>", self._sync_environment_text)
+
+        ttk.Label(body, text="AppKey").grid(row=2, column=0, sticky="w", pady=(0, 8))
+        app_key_entry = ttk.Entry(body, textvariable=self.app_key_var, width=42, show="*")
+        app_key_entry.grid(row=2, column=1, sticky="ew", pady=(0, 8))
+        ttk.Button(
+            body,
+            text="파일 선택",
+            command=lambda: self._choose_key_file(self.app_key_var, "AppKey"),
+        ).grid(row=2, column=2, padx=(8, 0), pady=(0, 8))
+
+        ttk.Label(body, text="SecretKey").grid(row=3, column=0, sticky="w", pady=(0, 8))
         ttk.Entry(body, textvariable=self.secret_key_var, width=42, show="*").grid(
-            row=2, column=1, sticky="ew", pady=(0, 8)
+            row=3, column=1, sticky="ew", pady=(0, 8)
+        )
+        ttk.Button(
+            body,
+            text="파일 선택",
+            command=lambda: self._choose_key_file(self.secret_key_var, "SecretKey"),
+        ).grid(row=3, column=2, padx=(8, 0), pady=(0, 8))
+
+        ttk.Button(
+            body,
+            text="다운로드 키 2개 자동 찾기",
+            command=self._auto_load_key_files,
+        ).grid(row=4, column=1, sticky="w", pady=(0, 6))
+        ttk.Label(
+            body,
+            textvariable=self.key_status_var,
+            foreground="#555555",
+            wraplength=520,
+        ).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=(0, 10)
         )
         ttk.Label(
             body,
-            text=(
-                "키움 REST API 포털에서 발급한 모의투자용 키를 입력하세요. "
-                "키와 접근토큰은 파일, 데이터베이스, 로그에 저장하지 않습니다. "
-                "이 버전의 REST 실거래 주문은 항상 잠겨 있습니다."
-            ),
-            wraplength=460,
+            textvariable=self.help_var,
+            wraplength=520,
             foreground="#555555",
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 14))
+        ).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(2, 14))
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=4, column=0, columnspan=2, sticky="ew")
+        buttons.grid(row=7, column=0, columnspan=3, sticky="ew")
         buttons.columnconfigure(0, weight=1)
         ttk.Button(
             buttons,
             text="REST API 포털 열기",
             command=lambda: webbrowser.open(KIWOOM_REST_PORTAL),
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(buttons, text="모의투자 연결", command=self._submit).grid(
+        ttk.Button(buttons, textvariable=self.connect_button_var, command=self._submit).grid(
             row=0, column=1, padx=(8, 0)
         )
         ttk.Button(buttons, text="취소", command=self._cancel).grid(row=0, column=2, padx=(8, 0))
 
+        self._sync_environment_text()
         app_key_entry.focus_set()
         self.bind("<Return>", lambda _event: self._submit())
         self.bind("<Escape>", lambda _event: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
+    def _sync_environment_text(self, _event: object | None = None) -> None:
+        if self.environment_var.get() == REST_MOCK_LABEL:
+            self.heading_var.set("키움 REST API 모의투자 연결")
+            self.connect_button_var.set("모의투자 연결")
+            self.help_var.set(
+                "모의투자 AppKey와 SecretKey를 사용하세요. 연결 후 현재가, 3분봉, "
+                "실시간 시세, 잔고 및 모의주문을 사용할 수 있습니다."
+            )
+            return
+        self.heading_var.set("키움 REST API 실전투자 연결")
+        self.connect_button_var.set("실전 조회 연결")
+        self.help_var.set(
+            "실전투자 AppKey와 SecretKey를 사용하세요. 키움 포털에 현재 공인 IP가 "
+            "등록되어 있어야 합니다. 실전 계좌·잔고·시세 조회만 활성화되며 실제 주문은 잠겨 있습니다."
+        )
+
+    def _choose_key_file(self, target: tk.StringVar, key_name: str) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title=f"{key_name} 파일 선택",
+            initialdir=str(Path.home() / "Downloads"),
+            filetypes=(("텍스트 파일", "*.txt"), ("모든 파일", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            target.set(self._read_key_file(Path(path)))
+            self.key_status_var.set(f"{key_name} 파일을 불러왔습니다.")
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("키 파일 오류", str(exc), parent=self)
+
+    def _auto_load_key_files(self) -> None:
+        downloads = Path.home() / "Downloads"
+        app_key_files = sorted(
+            downloads.glob("*_appkey.txt"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for app_key_path in app_key_files:
+            prefix = app_key_path.stem[: -len("_appkey")]
+            candidates = (
+                downloads / f"{prefix}_secretkey.txt",
+                downloads / f"{prefix}_appsecret.txt",
+            )
+            secret_key_path = next((path for path in candidates if path.exists()), None)
+            if secret_key_path is None:
+                continue
+            try:
+                self.app_key_var.set(self._read_key_file(app_key_path))
+                self.secret_key_var.set(self._read_key_file(secret_key_path))
+                self.key_status_var.set("다운로드 폴더에서 키 파일 2개를 불러왔습니다.")
+                return
+            except (OSError, ValueError) as exc:
+                messagebox.showerror("키 파일 오류", str(exc), parent=self)
+                return
+        messagebox.showwarning(
+            "키 파일 없음",
+            "다운로드 폴더에서 계좌번호_appkey.txt와 SecretKey 파일을 찾지 못했습니다.",
+            parent=self,
+        )
+
+    @staticmethod
+    def _read_key_file(path: Path) -> str:
+        try:
+            value = path.read_text(encoding="utf-8-sig").strip()
+        except UnicodeDecodeError:
+            value = path.read_text(encoding="cp949").strip()
+        if not value or any(character.isspace() for character in value):
+            raise ValueError("키 파일 형식이 올바르지 않습니다.")
+        return value
+
     def _submit(self) -> None:
         app_key = self.app_key_var.get().strip()
         secret_key = self.secret_key_var.get().strip()
+        mock = self.environment_var.get() == REST_MOCK_LABEL
         self.app_key_var.set("")
         self.secret_key_var.set("")
-        self.result = (app_key, secret_key)
+        self.result = (app_key, secret_key, mock)
         self.destroy()
 
     def _cancel(self) -> None:
@@ -480,25 +597,26 @@ class TraderApp(tk.Tk):
         self.wait_window(dialog)
         if dialog.result is None:
             return
-        app_key, secret_key = dialog.result
+        app_key, secret_key, mock = dialog.result
         dialog.result = None
         if not app_key or not secret_key:
             app_key = ""
             secret_key = ""
             messagebox.showwarning("REST API 키 필요", "AppKey와 SecretKey를 모두 입력해 주세요.")
             return
-        self._connect_rest_account(app_key, secret_key)
+        self._connect_rest_account(app_key, secret_key, mock)
         app_key = ""
         secret_key = ""
 
-    def _connect_rest_account(self, app_key: str, secret_key: str) -> None:
+    def _connect_rest_account(self, app_key: str, secret_key: str, mock: bool) -> None:
         self._set_login_buttons_state("disabled")
         self._update_connection_badge(False)
         self.account_password_var.set("")
         self.allow_real_order_var.set(False)
-        self.status_text.set("키움 REST API 모의투자 토큰과 계좌를 확인하고 있습니다.")
+        server_type = "모의투자" if mock else "실전투자 조회 전용"
+        self.status_text.set(f"키움 REST API {server_type} 토큰과 계좌를 확인하고 있습니다.")
         self.update_idletasks()
-        account_info = self.service.start_rest_connection(app_key, secret_key)
+        account_info = self.service.start_rest_connection(app_key, secret_key, mock=mock)
         app_key = ""
         secret_key = ""
         if account_info.connected and account_info.accounts:
@@ -1020,7 +1138,10 @@ class TraderApp(tk.Tk):
         if not quantity_ok:
             missing.append("주문수량")
         if snapshot.account_info.server_type == "실거래" and not self.allow_real_order_var.get():
-            missing.append("실거래 주문 잠금 해제")
+            if snapshot.account_info.connection_method == "REST API":
+                missing.append("REST 실전 조회 전용(주문 잠금)")
+            else:
+                missing.append("실거래 주문 잠금 해제")
         return f"거래 준비: {', '.join(missing)} 확인이 필요합니다."
 
     def _trading_ready(self) -> bool:
@@ -1103,7 +1224,7 @@ class TraderApp(tk.Tk):
         window = tk.Toplevel(self)
         self._account_info_window = window
         window.title("키움 계좌정보")
-        window.geometry("500x390")
+        window.geometry("650x390")
         window.resizable(False, False)
         window.transient(self)
         window.protocol("WM_DELETE_WINDOW", window.destroy)
@@ -1135,12 +1256,7 @@ class TraderApp(tk.Tk):
                 "계좌 수",
                 f"{len(account_info.accounts)}개 (키움 보고 {account_info.reported_account_count}개)",
             ),
-            (
-                "정보 활용",
-                "계좌 / 현재가 / 0B 실시간 / 3분봉 / 잔고 / 모의주문"
-                if account_info.connection_method == "REST API"
-                else "계좌 / 현재가 / 실시간 시세 / 3분봉 / 잔고 / 모의주문",
-            ),
+            ("정보 활용", self._account_capability_label(account_info)),
         ]
         if snapshot.balance_summary:
             rows.extend(
@@ -1152,11 +1268,19 @@ class TraderApp(tk.Tk):
 
         for row_index, (label, value) in enumerate(rows, start=1):
             ttk.Label(body, text=label, width=14).grid(row=row_index, column=0, sticky="w", pady=3)
-            ttk.Label(body, text=value, width=28).grid(row=row_index, column=1, sticky="w", pady=3)
+            ttk.Label(body, text=value, width=48).grid(row=row_index, column=1, sticky="w", pady=3)
 
         ttk.Button(body, text="닫기", command=window.destroy).grid(
             row=len(rows) + 1, column=0, columnspan=2, sticky="e", pady=(14, 0)
         )
+
+    @staticmethod
+    def _account_capability_label(account_info) -> str:
+        if account_info.connection_method == "REST API" and account_info.server_type == "실거래":
+            return "계좌 / 현재가 / 0B 실시간 / 3분봉 / 잔고 (주문 잠금)"
+        if account_info.connection_method == "REST API":
+            return "계좌 / 현재가 / 0B 실시간 / 3분봉 / 잔고 / 모의주문"
+        return "계좌 / 현재가 / 실시간 시세 / 3분봉 / 잔고 / 모의주문"
 
     def _account_for_api(self) -> str:
         entered = clean_account_number(self.account_var.get())
@@ -1166,9 +1290,9 @@ class TraderApp(tk.Tk):
         return entered or selected
 
     def _set_account_display(self, account: str) -> None:
-        digits = clean_account_number(account)
+        digits = display_account_number(account)
         self.account_first_var.set(digits[:4] if len(digits) >= 4 else "")
-        self.account_last_var.set(digits[-4:] if len(digits) >= 4 else "")
+        self.account_last_var.set(digits[4:8] if len(digits) >= 8 else "")
         self.account_var.set(mask_account_number(digits) if digits else "")
 
     def _settings(self) -> StrategySettings:

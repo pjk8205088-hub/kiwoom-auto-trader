@@ -129,14 +129,25 @@ class AutoTradingService:
             self.storage.log("ERROR", "계좌", message)
             return message
 
-    def start_rest_connection(self, app_key: str, secret_key: str) -> KiwoomAccountInfo:
+    def start_rest_connection(
+        self,
+        app_key: str,
+        secret_key: str,
+        mock: bool = True,
+    ) -> KiwoomAccountInfo:
         self.connection_mode = "REST"
         self.expected_user_id = ""
+        if isinstance(self.rest_api, KiwoomRestApiClient) and self.rest_api.mock != mock:
+            self.rest_api.clear_session()
+            self.rest_api = KiwoomRestApiClient(mock=mock)
+        elif hasattr(self.rest_api, "mock"):
+            self.rest_api.mock = mock
+        server_type = "모의투자" if mock else "실거래"
         self.account_info = KiwoomAccountInfo(
             False,
             [],
-            server_type="모의투자",
-            message="키움 REST API 모의투자 토큰과 계좌를 확인하고 있습니다.",
+            server_type=server_type,
+            message=f"키움 REST API {server_type} 토큰과 계좌를 확인하고 있습니다.",
             connection_method="REST API",
         )
         self._clear_live_trading_state()
@@ -148,7 +159,7 @@ class AutoTradingService:
             self.account_info = KiwoomAccountInfo(
                 False,
                 [],
-                server_type="모의투자",
+                server_type=server_type,
                 message=message,
                 connection_method="REST API",
             )

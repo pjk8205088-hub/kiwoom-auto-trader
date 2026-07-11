@@ -31,8 +31,15 @@ def clean_account_number(account: str) -> str:
     return "".join(ch for ch in str(account or "") if ch.isdigit())
 
 
-def mask_account_number(account: str) -> str:
+def display_account_number(account: str) -> str:
     digits = clean_account_number(account)
     if len(digits) >= 8:
-        return f"{digits[:4]}-{digits[-4:]}"
+        return digits[:8]
+    return digits
+
+
+def mask_account_number(account: str) -> str:
+    digits = display_account_number(account)
+    if len(digits) >= 8:
+        return f"{digits[:4]}-{digits[4:8]}"
     return digits or "미선택"

@@ -242,6 +242,55 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         with self.assertRaisesRegex(KiwoomRestApiError, "모의투자용 AppKey"):
             client.connect("app-key", "secret-key")
 
+    def test_live_client_uses_production_domain_and_blocks_orders(self):
+        requester = FakeRequester(
+            [
+                response({"token": "live-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+
+        info = client.connect("app-key", "secret-key")
+
+        self.assertEqual(info.server_type, "실거래")
+        self.assertTrue(requester.calls[0][1].startswith("https://api.kiwoom.com/"))
+        with self.assertRaisesRegex(KiwoomRestApiError, "실거래 주문.*잠겨"):
+            client.send_order(
+                KiwoomOrderRequest(
+                    account="1234567890",
+                    symbol="005930",
+                    side="BUY",
+                    quantity=1,
+                )
+            )
+
+    def test_explains_registered_ip_mismatch(self):
+        requester = FakeRequester(
+            [
+                RestResponse(
+                    200,
+                    {},
+                    {
+                        "return_code": 8010,
+                        "return_msg": "토큰 발급 IP와 요청 IP가 동일하지 않습니다.",
+                    },
+                )
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+
+        with self.assertRaisesRegex(KiwoomRestApiError, "등록 현황.*공인 IP"):
+            client.connect("app-key", "secret-key")
+
 
 if __name__ == "__main__":
     unittest.main()

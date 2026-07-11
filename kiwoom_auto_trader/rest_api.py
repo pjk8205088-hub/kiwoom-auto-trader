@@ -523,9 +523,15 @@ class KiwoomRestApiClient:
         if response.status_code >= 400 or normalized_code != 0:
             message = str(response_body.get("return_msg") or "키움 REST API 요청이 실패했습니다.")
             if normalized_code in (8030, 8031):
+                key_type = "모의투자용" if self.mock else "실전투자용"
                 message = (
-                    f"{message} 현재 앱은 모의투자 서버에 연결하므로 "
-                    "키움 REST API 포털에서 발급한 모의투자용 AppKey를 사용해 주세요."
+                    f"{message} 현재 선택한 서버에 맞는 {key_type} AppKey와 "
+                    "SecretKey를 사용해 주세요."
+                )
+            elif normalized_code == 8010:
+                message = (
+                    f"{message} 키움 REST API 포털의 IP 등록 현황과 "
+                    "현재 인터넷 공인 IP가 같은지 확인해 주세요."
                 )
             raise KiwoomRestApiError(f"{api_id} 오류 {normalized_code}: {message}")
         return response_body

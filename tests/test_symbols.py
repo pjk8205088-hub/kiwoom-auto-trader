@@ -8,8 +8,9 @@ class SymbolHelperTests(unittest.TestCase):
         self.assertEqual(normalize_symbol("00915"), "009150")
         self.assertEqual(known_symbol_name("00915"), "삼성전기")
 
-    def test_masks_account_with_first_four_and_last_four_digits(self):
-        self.assertEqual(mask_account_number("1234567890"), "1234-7890")
+    def test_masks_eight_digit_base_account_without_product_suffix(self):
+        self.assertEqual(mask_account_number("1234567890"), "1234-5678")
+        self.assertEqual(mask_account_number("12345678"), "1234-5678")
 
 
 if __name__ == "__main__":

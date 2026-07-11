@@ -52,6 +52,7 @@ class FakeAccountApi:
 class FakeRestApi:
     def __init__(self) -> None:
         self.connected = False
+        self.mock = True
         self.sell_failures_remaining = 0
         self.order_calls = 0
         self.info = KiwoomAccountInfo(
@@ -65,12 +66,13 @@ class FakeRestApi:
         if app_key != "app-key" or secret_key != "secret-key":
             raise AssertionError("테스트 키가 전달되지 않았습니다.")
         self.connected = True
+        server_type = "모의투자" if self.mock else "실거래"
         self.info = KiwoomAccountInfo(
             True,
             ["1234567890"],
             user_id="REST API 토큰 인증",
-            server_type="모의투자",
-            message="REST API 모의투자 연결 완료",
+            server_type=server_type,
+            message=f"REST API {server_type} 연결 완료",
             reported_account_count=1,
             login_event_code=0,
             connection_method="REST API",
@@ -91,7 +93,7 @@ class FakeRestApi:
         self.info = KiwoomAccountInfo(
             False,
             [],
-            server_type="모의투자",
+            server_type="모의투자" if self.mock else "실거래",
             message="REST API 세션 종료",
             connection_method="REST API",
         )
@@ -185,6 +187,19 @@ class AutoTradingServiceTests(unittest.TestCase):
         service.rest_api.connected = False
         self.assertFalse(service.sync_account_connection())
         self.assertFalse(service.account_info.connected)
+
+    def test_connects_rest_live_account_in_read_only_server_mode(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_rest_live_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        service.rest_api = FakeRestApi()
+
+        info = service.start_rest_connection("app-key", "secret-key", mock=False)
+
+        self.assertTrue(info.connected)
+        self.assertFalse(service.rest_api.mock)
+        self.assertEqual(info.server_type, "실거래")
 
     def test_market_strategy_uses_explicit_pattern_with_real_candles(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_pattern_test.sqlite3"
