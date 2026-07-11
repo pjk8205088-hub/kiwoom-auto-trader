@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
+from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import KiwoomRestLoginDialog, TraderApp
 
 
@@ -61,6 +62,35 @@ class UiHelperTests(unittest.TestCase):
         label = TraderApp._account_capability_label(info)
 
         self.assertIn("주문 잠금", label)
+
+    def test_main_status_hides_internal_mock_state_and_account_details(self):
+        snapshot = ServiceSnapshot(
+            connection="MOCK_CONNECTED",
+            running=False,
+            symbol="002880",
+            symbol_name="디와이아이",
+            pattern="NONE",
+            price=1_234,
+            quantity=0,
+            average_price=0,
+            decision=None,
+            account_info=KiwoomAccountInfo(
+                True,
+                ["1234567890"],
+                server_type="실거래",
+                message="연결 완료 1234-5678",
+                connection_method="REST API",
+            ),
+            last_api_message="계좌 1234-5678 조회 완료",
+        )
+
+        status = TraderApp._format_main_status(snapshot)
+
+        self.assertIn("REST API 연결됨(실거래)", status)
+        self.assertIn("종목 002880 디와이아이", status)
+        self.assertNotIn("MOCK_CONNECTED", status)
+        self.assertNotIn("내부 테스트", status)
+        self.assertNotIn("1234-5678", status)
 
 
 if __name__ == "__main__":

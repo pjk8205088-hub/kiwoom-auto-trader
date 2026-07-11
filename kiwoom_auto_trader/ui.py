@@ -506,14 +506,11 @@ class TraderApp(tk.Tk):
         body.columnconfigure(0, weight=1)
         body.columnconfigure(1, weight=1)
         body.columnconfigure(2, weight=1)
-        body.rowconfigure(2, weight=1)
+        body.rowconfigure(1, weight=1)
 
         self.status_text = tk.StringVar(value="")
-        ttk.Label(body, textvariable=self.status_text, font=("Malgun Gothic", 11)).grid(
-            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8)
-        )
         ttk.Label(body, textvariable=self.account_summary_var, font=("Malgun Gothic", 10)).grid(
-            row=1, column=0, columnspan=3, sticky="ew", pady=(0, 12)
+            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12)
         )
 
         self.holdings = self._table(
@@ -538,7 +535,7 @@ class TraderApp(tk.Tk):
 
     def _table(self, parent: ttk.Frame, title: str, columns: tuple[str, ...], column: int) -> ttk.Treeview:
         frame = ttk.LabelFrame(parent, text=title, padding=8)
-        frame.grid(row=2, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0))
+        frame.grid(row=1, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0))
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
         table = ttk.Treeview(frame, columns=columns, show="headings", height=16)
@@ -974,52 +971,14 @@ class TraderApp(tk.Tk):
 
     def _refresh(self) -> None:
         snapshot = self.service.snapshot()
-        decision_key = snapshot.decision.action if snapshot.decision else "NONE"
-        decision = ACTION_LABELS.get(decision_key, decision_key)
-        cci = ""
-        if snapshot.decision and snapshot.decision.cci_value is not None:
-            cci = f" | CCI {snapshot.decision.cci_value:.2f}"
         account = snapshot.account_info
         connection_method = account.connection_method or "OpenAPI+"
-        account_label = f"{connection_method} 연결됨" if account.connected else "미연결"
-        if account.connected and account.server_type:
-            account_label = f"{account_label}({account.server_type})"
         self._update_connection_badge(account.connected, connection_method)
         password_state = "disabled" if account.connected and connection_method == "REST API" else "normal"
         self.account_password_entry.configure(state=password_state)
         real_order_state = "disabled" if connection_method == "REST API" else "normal"
         self.allow_real_order_checkbutton.configure(state=real_order_state)
-        account_detail = account.user_name or account.message
-        if account.accounts:
-            masked_accounts = ", ".join(mask_account_number(account_number) for account_number in account.accounts)
-            account_detail = f"{account_detail} {masked_accounts}".strip()
-        quote = snapshot.real_time_quote or snapshot.market_quote
-        quote_label = ""
-        if quote:
-            quote_label = f" | 시세 {quote.symbol} {quote.current_price:,.0f}"
-        balance_label = ""
-        if snapshot.balance_summary:
-            balance_label = (
-                f" | 잔고 {len(snapshot.balance_summary.holdings)}종목 "
-                f"평가 {snapshot.balance_summary.total_evaluation:,.0f}"
-            )
-        self.status_text.set(
-            " | ".join(
-                [
-                    f"키움 계좌 {account_label}",
-                    account_detail,
-                    f"내부 테스트 {snapshot.connection}",
-                    f"운용 {'중' if snapshot.running else '중지'}",
-                    f"종목 {snapshot.symbol} {snapshot.symbol_name}".strip(),
-                    f"패턴 {PATTERN_VALUE_TO_LABEL.get(snapshot.pattern, snapshot.pattern)}",
-                    f"현재가 {snapshot.price:,.0f}",
-                    f"보유 {snapshot.quantity}주",
-                    f"평균 {snapshot.average_price:,.0f}",
-                    f"판단 {decision}{cci}{quote_label}{balance_label}",
-                    snapshot.last_api_message,
-                ]
-            )
-        )
+        self.status_text.set(self._format_main_status(snapshot))
         if snapshot.symbol_name and self.symbol_name_var.get() != snapshot.symbol_name:
             self.symbol_name_var.set(snapshot.symbol_name)
         self.account_summary_var.set(self._format_account_summary(snapshot))
@@ -1030,6 +989,38 @@ class TraderApp(tk.Tk):
         self._replace_rows(self.orders, self._format_orders(snapshot.orders))
         self._replace_rows(self.logs, self._format_logs(snapshot.logs))
         self._schedule_auto_tick()
+
+    @staticmethod
+    def _format_main_status(snapshot) -> str:
+        account = snapshot.account_info
+        connection_method = account.connection_method or "OpenAPI+"
+        account_label = f"{connection_method} 연결됨" if account.connected else "미연결"
+        if account.connected and account.server_type:
+            account_label = f"{account_label}({account.server_type})"
+        decision_key = snapshot.decision.action if snapshot.decision else "NONE"
+        decision = ACTION_LABELS.get(decision_key, decision_key)
+        cci = ""
+        if snapshot.decision and snapshot.decision.cci_value is not None:
+            cci = f" CCI {snapshot.decision.cci_value:.2f}"
+        parts = [
+            f"키움 계좌 {account_label}",
+            f"운용 {'중' if snapshot.running else '중지'}",
+            f"종목 {snapshot.symbol} {snapshot.symbol_name}".strip(),
+            f"패턴 {PATTERN_VALUE_TO_LABEL.get(snapshot.pattern, snapshot.pattern)}",
+            f"현재가 {snapshot.price:,.0f}",
+            f"보유 {snapshot.quantity}주",
+            f"평균 {snapshot.average_price:,.0f}",
+            f"판단 {decision}{cci}",
+        ]
+        quote = snapshot.real_time_quote or snapshot.market_quote
+        if quote:
+            parts.append(f"시세 {quote.symbol} {quote.current_price:,.0f}")
+        if snapshot.balance_summary:
+            parts.append(
+                f"잔고 {len(snapshot.balance_summary.holdings)}종목 "
+                f"평가 {snapshot.balance_summary.total_evaluation:,.0f}"
+            )
+        return " | ".join(parts)
 
     def _auto_tick(self) -> None:
         self._refresh_after_id = None
