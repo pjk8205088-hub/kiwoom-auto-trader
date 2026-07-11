@@ -9,9 +9,6 @@ from tkinter import filedialog, messagebox, ttk
 from .charting import moving_average, timeframe_label
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
-    KIWOOM_MULTI_LOGIN_HELP,
-    KIWOOM_OPENAPI_INSTALLER,
-    KIWOOM_OPENAPI_PAGE,
 )
 from .models import Candle, DmiPoint, PatternState, StrategySettings, WatchlistQuote
 from .rest_api import KIWOOM_REST_PORTAL
@@ -328,7 +325,7 @@ class TraderApp(tk.Tk):
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
         ttk.Label(header, text="키움 자동매매 - 계좌/시세/주문 준비", font=("Malgun Gothic", 16, "bold")).grid(
-            row=0, column=0, rowspan=2, sticky="w"
+            row=0, column=0, sticky="w"
         )
         self.account_button = ttk.Button(header, text="OpenAPI+ 로그인", command=self._open_login_dialog)
         self.account_button.grid(row=0, column=1, padx=(0, 8))
@@ -338,8 +335,13 @@ class TraderApp(tk.Tk):
             command=self._open_rest_login_dialog,
         )
         self.rest_account_button.grid(row=0, column=2, padx=(0, 8))
+        ttk.Button(header, text="연결 상태 확인", command=self._check_account_environment).grid(
+            row=0,
+            column=3,
+            padx=(0, 8),
+        )
         self.connection_light = tk.Canvas(header, width=18, height=18, highlightthickness=0, bd=0)
-        self.connection_light.grid(row=0, column=3, padx=(0, 6))
+        self.connection_light.grid(row=0, column=4, padx=(0, 6))
         self._connection_light_id = self.connection_light.create_oval(
             2,
             2,
@@ -357,30 +359,18 @@ class TraderApp(tk.Tk):
             padx=12,
             pady=4,
         )
-        self.connection_badge.grid(row=0, column=4, padx=(0, 8))
+        self.connection_badge.grid(row=0, column=5, padx=(0, 8))
         ttk.Button(header, text="관심종목", command=self._open_watchlist_window).grid(
             row=0,
-            column=5,
+            column=6,
             padx=(0, 8),
-        )
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=6)
-        ttk.Button(header, text="연결 상태 확인", command=self._check_account_environment).grid(
-            row=1, column=1, padx=(0, 8), pady=(6, 0)
-        )
-        ttk.Button(header, text="OpenAPI+ 설치파일 받기", command=self._open_kiwoom_installer).grid(
-            row=1, column=2, padx=(0, 8), pady=(6, 0)
-        )
-        ttk.Button(header, text="키움 공식 안내", command=self._open_kiwoom_openapi_page).grid(
-            row=1, column=3, padx=(0, 8), pady=(6, 0)
-        )
-        ttk.Button(header, text="멀티로그인 안내", command=self._open_multi_login_help).grid(
-            row=1, column=4, padx=(0, 8), pady=(6, 0)
         )
         ttk.Button(
             header,
             text="REST API 안내",
             command=lambda: webbrowser.open(KIWOOM_REST_PORTAL),
-        ).grid(row=1, column=5, pady=(6, 0))
+        ).grid(row=0, column=7, padx=(0, 8))
+        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=8)
         self._update_connection_badge(False)
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
@@ -840,21 +830,6 @@ class TraderApp(tk.Tk):
         self._refresh()
         if self.service.account_info.connected:
             self._show_account_info_window()
-
-    def _open_kiwoom_openapi_page(self) -> None:
-        webbrowser.open(KIWOOM_OPENAPI_PAGE)
-        self.service.storage.log("INFO", "계좌", "키움 OpenAPI+ 설치 페이지를 열었습니다.")
-        self._refresh()
-
-    def _open_kiwoom_installer(self) -> None:
-        webbrowser.open(KIWOOM_OPENAPI_INSTALLER)
-        self.service.storage.log("INFO", "계좌", "키움 공식 OpenAPI+ 설치파일 다운로드를 열었습니다.")
-        self._refresh()
-
-    def _open_multi_login_help(self) -> None:
-        webbrowser.open(KIWOOM_MULTI_LOGIN_HELP)
-        self.service.storage.log("INFO", "계좌", "키움 멀티로그인 안내 페이지를 열었습니다.")
-        self._refresh()
 
     def _open_watchlist_window(self) -> None:
         if self._watchlist_window is not None and self._watchlist_window.winfo_exists():

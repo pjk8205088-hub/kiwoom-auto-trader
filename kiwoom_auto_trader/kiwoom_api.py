@@ -33,9 +33,6 @@ class KiwoomOpenApiError(RuntimeError):
 
 
 KIWOOM_HOME_PAGE = "https://www1.kiwoom.com/h/main"
-KIWOOM_OPENAPI_PAGE = "https://www.kiwoom.com/h/customer/download/VOpenApiInfoView"
-KIWOOM_OPENAPI_INSTALLER = "https://download.kiwoom.com/web/openapi/OpenAPISetup.exe"
-KIWOOM_MULTI_LOGIN_HELP = "https://download.kiwoom.com/kiwoom_easy_help_new/1289.htm"
 KIWOOM_SETUP_GUIDE = (
     "준비 순서: 1) 키움 OpenAPI+ 서비스 사용 등록, "
     "2) OpenAPI+ 모듈 설치, 3) 공동인증서/HTS ID 준비, "
