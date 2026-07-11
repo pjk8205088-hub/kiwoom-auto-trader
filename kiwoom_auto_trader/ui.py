@@ -78,6 +78,8 @@ class TraderApp(tk.Tk):
         self.pattern_var = tk.StringVar(value="없음")
         self.use_cci_var = tk.BooleanVar(value=True)
         self.account_var = tk.StringVar(value="")
+        self.account_first_var = tk.StringVar(value="")
+        self.account_last_var = tk.StringVar(value="")
         self.account_password_var = tk.StringVar(value="")
         self.order_qty_var = tk.StringVar(value="1")
         self.allow_real_order_var = tk.BooleanVar(value=False)
@@ -126,8 +128,22 @@ class TraderApp(tk.Tk):
 
         kiwoom_controls = ttk.Frame(controls)
         kiwoom_controls.grid(row=3, column=0, columnspan=9, sticky="ew", pady=(12, 0))
-        ttk.Label(kiwoom_controls, text="계좌번호(화면표시: 앞4+뒤4)").pack(side="left")
-        ttk.Entry(kiwoom_controls, textvariable=self.account_var, width=16).pack(side="left", padx=(4, 8))
+        ttk.Label(kiwoom_controls, text="계좌번호(로그인 후 자동 표시)").pack(side="left")
+        ttk.Entry(
+            kiwoom_controls,
+            textvariable=self.account_first_var,
+            width=6,
+            justify="center",
+            state="readonly",
+        ).pack(side="left", padx=(4, 2))
+        ttk.Label(kiwoom_controls, text="-").pack(side="left")
+        ttk.Entry(
+            kiwoom_controls,
+            textvariable=self.account_last_var,
+            width=6,
+            justify="center",
+            state="readonly",
+        ).pack(side="left", padx=(2, 8))
         ttk.Label(kiwoom_controls, text="계좌 비밀번호(저장 안 함)").pack(side="left")
         ttk.Entry(
             kiwoom_controls,
@@ -307,9 +323,10 @@ class TraderApp(tk.Tk):
         self._account_after_id = None
         self._account_poll_count += 1
         account_info = self.service.refresh_account_connection()
-        if account_info.accounts and not self.account_var.get().strip():
-            self._selected_account_full = account_info.accounts[0]
-            self.account_var.set(mask_account_number(self._selected_account_full))
+        if account_info.accounts:
+            if self._selected_account_full not in account_info.accounts:
+                self._selected_account_full = account_info.accounts[0]
+            self._set_account_display(self._selected_account_full)
         if account_info.connected:
             self.service.lookup_symbol_name(self.symbol_var.get())
             if self._account_for_api():
@@ -603,6 +620,12 @@ class TraderApp(tk.Tk):
         if selected and entered == clean_account_number(mask_account_number(selected)):
             return selected
         return entered or selected
+
+    def _set_account_display(self, account: str) -> None:
+        digits = clean_account_number(account)
+        self.account_first_var.set(digits[:4] if len(digits) >= 4 else "")
+        self.account_last_var.set(digits[-4:] if len(digits) >= 4 else "")
+        self.account_var.set(mask_account_number(digits) if digits else "")
 
     def _settings(self) -> StrategySettings:
         return StrategySettings(
