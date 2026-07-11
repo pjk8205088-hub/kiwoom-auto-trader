@@ -19,6 +19,7 @@ from .models import (
     KiwoomOrderRequest,
     MarketQuote,
     RealTimeQuote,
+    WatchlistQuote,
 )
 from .symbols import clean_account_number, normalize_symbol
 
@@ -228,11 +229,57 @@ class KiwoomRestApiClient:
             symbol=normalize_symbol(body.get("stk_cd")) or symbol,
             name=str(body.get("stk_nm") or "").strip(),
             current_price=_price(body.get("cur_prc")),
+            change=_number(body.get("pred_pre")),
             change_rate=_number(body.get("flu_rt")),
             volume=_integer(body.get("trde_qty")),
             timestamp=datetime.now().strftime("%Y%m%d%H%M%S"),
             message="REST API 현재가 조회 완료",
         )
+
+    def request_watchlist_quotes(self, symbols: list[str]) -> list[WatchlistQuote]:
+        normalized = list(
+            dict.fromkeys(
+                symbol
+                for symbol in (normalize_symbol(value) for value in symbols)
+                if symbol
+            )
+        )
+        if not normalized:
+            raise KiwoomRestApiError("관심종목 코드를 한 개 이상 등록해 주세요.")
+        body = self._post(
+            "ka10095",
+            "/api/dostk/stkinfo",
+            {"stk_cd": "|".join(normalized[:100])},
+        )
+        rows = body.get("atn_stk_infr") or []
+        if not isinstance(rows, list):
+            raise KiwoomRestApiError("REST API 관심종목 응답 형식이 올바르지 않습니다.")
+
+        quotes: list[WatchlistQuote] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_symbol = str(row.get("stk_cd") or "").strip()
+            market = "NXT" if "_NX" in raw_symbol else "SOR" if "_AL" in raw_symbol else "KRX"
+            quotes.append(
+                WatchlistQuote(
+                    symbol=normalize_symbol(raw_symbol),
+                    name=str(row.get("stk_nm") or "").strip(),
+                    market=market,
+                    current_price=_price(row.get("cur_prc")),
+                    change=_number(row.get("pred_pre")),
+                    change_rate=_number(row.get("flu_rt")),
+                    volume=_integer(row.get("trde_qty")),
+                    trade_value=_number(row.get("trde_prica")),
+                    open_price=_price(row.get("open_pric")),
+                    high_price=_price(row.get("high_pric")),
+                    low_price=_price(row.get("low_pric")),
+                    ask_price=_price(row.get("sel_bid")),
+                    bid_price=_price(row.get("buy_bid")),
+                    timestamp=str(row.get("cntr_tm") or row.get("bid_tm") or "").strip(),
+                )
+            )
+        return quotes
 
     def request_minute_candles(
         self,

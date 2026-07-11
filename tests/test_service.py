@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
-from kiwoom_auto_trader.models import Candle, RealTimeQuote, StrategySettings
+from kiwoom_auto_trader.models import Candle, RealTimeQuote, StrategySettings, WatchlistQuote
 from kiwoom_auto_trader.rest_api import KiwoomRestApiError
 from kiwoom_auto_trader.service import AutoTradingService
 from kiwoom_auto_trader.storage import Storage
@@ -156,7 +156,39 @@ class FakeRealtimeApi:
         return RealTimeQuote(symbol, 103, volume=3, timestamp="20260711101530")
 
 
+class FakeWatchlistApi:
+    def request_watchlist_quotes(self, symbols):
+        return [
+            WatchlistQuote(
+                symbol=symbol,
+                name="삼성전자" if symbol == "005930" else "삼성전기",
+                current_price=72000,
+                change=500,
+                change_rate=0.7,
+                volume=123456,
+            )
+            for symbol in symbols
+        ]
+
+
 class AutoTradingServiceTests(unittest.TestCase):
+    def test_persists_normalized_watchlist_symbol_and_refreshes_quotes(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_watchlist_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        service.add_watchlist_symbol("00915")
+        service.add_watchlist_symbol("005930")
+
+        reloaded = AutoTradingService(storage=Storage(db))
+        reloaded.kiwoom_api = FakeWatchlistApi()
+        rows = reloaded.refresh_watchlist_quotes()
+
+        self.assertEqual([row.symbol for row in rows], ["009150", "005930"])
+        self.assertEqual(rows[0].name, "삼성전기")
+        self.assertEqual(rows[1].current_price, 72000)
+        self.assertEqual(reloaded.watchlist_items()[1], ("005930", "삼성전자"))
+
     def test_builds_selected_second_chart_from_drained_realtime_trades(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_second_chart_test.sqlite3"
         if db.exists():

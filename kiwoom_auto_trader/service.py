@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from random import uniform
 
@@ -23,6 +23,7 @@ from .models import (
     RealTimeQuote,
     StrategySettings,
     TradeDecision,
+    WatchlistQuote,
 )
 from .order_manager import OrderManager
 from .rest_api import KiwoomRestApiClient, KiwoomRestApiError
@@ -93,6 +94,7 @@ class AutoTradingService:
         self.balance_summary: BalanceSummary | None = None
         self.real_time_symbol = ""
         self.real_time_quote: RealTimeQuote | None = None
+        self.watchlist_quotes: dict[str, WatchlistQuote] = {}
         self.last_api_message = ""
 
     def configure(
@@ -307,6 +309,7 @@ class AutoTradingService:
         self.balance_summary = None
         self.real_time_symbol = ""
         self.real_time_quote = None
+        self.watchlist_quotes = {}
         self.candles = []
         self.chart_candles = []
         self.chart_timeframe = "3m"
@@ -368,6 +371,16 @@ class AutoTradingService:
                 self.symbol_name = self.market_quote.name
             if self.market_quote.current_price > 0:
                 self.current_price = self.market_quote.current_price
+            existing_watch = self.watchlist_quotes.get(self.symbol)
+            if existing_watch is not None:
+                self.watchlist_quotes[self.symbol] = replace(
+                    existing_watch,
+                    name=self.market_quote.name or existing_watch.name,
+                    current_price=self.market_quote.current_price,
+                    change=self.market_quote.change,
+                    change_rate=self.market_quote.change_rate,
+                    timestamp=self.market_quote.timestamp,
+                )
             self.last_api_message = self.market_quote.message
             self.storage.log("INFO", "시세", f"{target} 현재가 {self.current_price:,.0f}")
             return self.market_quote
@@ -375,6 +388,72 @@ class AutoTradingService:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "시세", self.last_api_message)
             return None
+
+    def add_watchlist_symbol(self, symbol: str) -> str:
+        normalized = normalize_symbol(symbol)
+        if not normalized:
+            self.last_api_message = "등록할 관심종목 코드를 입력해 주세요."
+            return ""
+        existing = {value for value, _name in self.storage.watchlist_symbols()}
+        if normalized not in existing and len(existing) >= 20:
+            self.last_api_message = "관심종목은 최대 20개까지 등록할 수 있습니다."
+            self.storage.log("WARN", "관심종목", self.last_api_message)
+            return ""
+        name = known_symbol_name(normalized)
+        if self.account_info.connected:
+            try:
+                name = self._active_api().lookup_symbol_name(normalized) or name
+            except API_ERRORS:
+                pass
+        self.storage.add_watchlist_symbol(normalized, name)
+        self.last_api_message = f"관심종목 {normalized} {name} 등록 완료".strip()
+        self.storage.log("INFO", "관심종목", self.last_api_message)
+        return normalized
+
+    def remove_watchlist_symbol(self, symbol: str) -> None:
+        normalized = normalize_symbol(symbol)
+        if not normalized:
+            return
+        self.storage.remove_watchlist_symbol(normalized)
+        self.watchlist_quotes.pop(normalized, None)
+        self.last_api_message = f"관심종목 {normalized} 삭제 완료"
+        self.storage.log("INFO", "관심종목", self.last_api_message)
+
+    def watchlist_items(self) -> list[tuple[str, str]]:
+        return self.storage.watchlist_symbols()
+
+    def watchlist_rows(self) -> list[WatchlistQuote]:
+        return [
+            self.watchlist_quotes.get(symbol, WatchlistQuote(symbol=symbol, name=name))
+            for symbol, name in self.watchlist_items()
+        ]
+
+    def refresh_watchlist_quotes(self) -> list[WatchlistQuote]:
+        items = self.watchlist_items()
+        symbols = [symbol for symbol, _name in items]
+        if not symbols:
+            self.watchlist_quotes = {}
+            self.last_api_message = "등록된 관심종목이 없습니다."
+            return []
+        api = self._active_api()
+        try:
+            quotes = api.request_watchlist_quotes(symbols)
+            self.watchlist_quotes = {quote.symbol: quote for quote in quotes if quote.symbol}
+            for quote in quotes:
+                if quote.symbol and quote.name:
+                    self.storage.add_watchlist_symbol(quote.symbol, quote.name)
+            selected = self.watchlist_quotes.get(self.symbol)
+            if selected is not None:
+                self.symbol_name = selected.name or self.symbol_name
+                if selected.current_price > 0:
+                    self.current_price = selected.current_price
+            self.last_api_message = f"관심종목 {len(quotes)}개 시세 조회 완료"
+            self.storage.log("INFO", "관심종목", self.last_api_message)
+            return self.watchlist_rows()
+        except API_ERRORS as exc:
+            self.last_api_message = str(exc)
+            self.storage.log("ERROR", "관심종목", self.last_api_message)
+            return self.watchlist_rows()
 
     def request_three_minute_candles(self, symbol: str | None = None) -> list[Candle]:
         target = normalize_symbol(symbol or self.symbol)
@@ -540,6 +619,15 @@ class AutoTradingService:
             self._last_aggregated_quote_key = self._real_time_quote_key(quote)
         if self.real_time_quote and self.real_time_quote.current_price > 0:
             self.current_price = self.real_time_quote.current_price
+            existing_watch = self.watchlist_quotes.get(self.real_time_quote.symbol)
+            if existing_watch is not None:
+                self.watchlist_quotes[self.real_time_quote.symbol] = replace(
+                    existing_watch,
+                    current_price=self.real_time_quote.current_price,
+                    change=self.real_time_quote.change,
+                    change_rate=self.real_time_quote.change_rate,
+                    timestamp=self.real_time_quote.timestamp,
+                )
         return self.real_time_quote
 
     def unregister_real_time(self) -> str:

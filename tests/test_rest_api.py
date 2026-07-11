@@ -196,6 +196,52 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertEqual(requester.calls[-1][2]["api-id"], "ka10080")
         self.assertEqual(requester.calls[-1][3]["tic_scope"], "60")
 
+    def test_requests_and_parses_official_watchlist_information(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "atn_stk_infr": [
+                            {
+                                "stk_cd": "005930",
+                                "stk_nm": "삼성전자",
+                                "cur_prc": "+72000",
+                                "pred_pre": "+500",
+                                "flu_rt": "+0.70",
+                                "trde_qty": "123456",
+                                "trde_prica": "8880000",
+                                "open_pric": "+71500",
+                                "high_pric": "+72500",
+                                "low_pric": "+71000",
+                                "sel_bid": "+72100",
+                                "buy_bid": "+72000",
+                                "cntr_tm": "101530",
+                            }
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=True,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        quotes = client.request_watchlist_quotes(["005930", "000660"])
+
+        self.assertEqual(requester.calls[-1][2]["api-id"], "ka10095")
+        self.assertEqual(requester.calls[-1][3]["stk_cd"], "005930|000660")
+        self.assertEqual(quotes[0].name, "삼성전자")
+        self.assertEqual(quotes[0].current_price, 72000)
+        self.assertEqual(quotes[0].change, 500)
+        self.assertEqual(quotes[0].change_rate, 0.7)
+        self.assertEqual(quotes[0].volume, 123456)
+        self.assertEqual(quotes[0].ask_price, 72100)
+
     def test_mock_limiter_waits_for_same_api_id(self):
         clock = FakeClock()
         limiter = KiwoomRestRateLimiter(mock=True, clock=clock, sleeper=clock.sleep)

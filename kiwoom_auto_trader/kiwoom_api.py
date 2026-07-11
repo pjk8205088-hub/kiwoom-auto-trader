@@ -9,7 +9,15 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .charting import SUPPORTED_MINUTE_INTERVALS
-from .models import BalanceSummary, Candle, Holding, KiwoomOrderRequest, MarketQuote, RealTimeQuote
+from .models import (
+    BalanceSummary,
+    Candle,
+    Holding,
+    KiwoomOrderRequest,
+    MarketQuote,
+    RealTimeQuote,
+    WatchlistQuote,
+)
 from .symbols import normalize_symbol
 
 try:
@@ -365,6 +373,30 @@ class KiwoomOpenApiClient:
             self._parse_current_price,
         )
 
+    def request_watchlist_quotes(self, symbols: list[str]) -> list[WatchlistQuote]:
+        normalized = list(
+            dict.fromkeys(
+                symbol
+                for symbol in (normalize_symbol(value) for value in symbols)
+                if symbol
+            )
+        )
+        quotes: list[WatchlistQuote] = []
+        for symbol in normalized[:20]:
+            quote = self.request_current_price(symbol)
+            quotes.append(
+                WatchlistQuote(
+                    symbol=normalize_symbol(quote.symbol) or symbol,
+                    name=quote.name,
+                    current_price=quote.current_price,
+                    change=quote.change,
+                    change_rate=quote.change_rate,
+                    volume=quote.volume,
+                    timestamp=quote.timestamp,
+                )
+            )
+        return quotes
+
     def request_minute_candles(self, symbol: str, interval: int = 3, count: int = 60) -> list[Candle]:
         symbol = normalize_symbol(symbol)
         if not symbol:
@@ -678,6 +710,7 @@ class KiwoomOpenApiClient:
             symbol=str(self._get_comm_data(trcode, record_name, 0, "종목코드")).strip(),
             name=str(self._get_comm_data(trcode, record_name, 0, "종목명")).strip(),
             current_price=_to_price(self._get_comm_data(trcode, record_name, 0, "현재가")),
+            change=_to_number(self._get_comm_data(trcode, record_name, 0, "전일대비")),
             change_rate=_to_number(
                 self._get_comm_data(trcode, record_name, 0, "등락율")
                 or self._get_comm_data(trcode, record_name, 0, "등락률")

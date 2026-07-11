@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -13,7 +15,7 @@ class Storage:
         self._init_db()
 
     def save_order_result(self, result: OrderResult) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 insert into orders
@@ -32,7 +34,7 @@ class Storage:
             )
 
     def save_log(self, log: SystemLog) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 insert into logs (timestamp, level, category, message)
@@ -57,7 +59,7 @@ class Storage:
         )
 
     def recent_orders(self, limit: int = 20) -> list[tuple]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             return list(
                 conn.execute(
                     """
@@ -71,7 +73,7 @@ class Storage:
             )
 
     def recent_logs(self, limit: int = 20) -> list[tuple]:
-        with self._connect() as conn:
+        with self._connection() as conn:
             return list(
                 conn.execute(
                     """
@@ -84,11 +86,47 @@ class Storage:
                 )
             )
 
+    def add_watchlist_symbol(self, symbol: str, name: str = "") -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                insert or ignore into watchlist (symbol, name, created_at)
+                values (?, ?, ?)
+                """,
+                (symbol, name, datetime.now().isoformat(timespec="seconds")),
+            )
+            if name:
+                conn.execute(
+                    "update watchlist set name = ? where symbol = ?",
+                    (name, symbol),
+                )
+
+    def remove_watchlist_symbol(self, symbol: str) -> None:
+        with self._connection() as conn:
+            conn.execute("delete from watchlist where symbol = ?", (symbol,))
+
+    def watchlist_symbols(self) -> list[tuple[str, str]]:
+        with self._connection() as conn:
+            return list(
+                conn.execute(
+                    "select symbol, name from watchlist order by id",
+                )
+            )
+
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
 
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        conn = self._connect()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 create table if not exists orders (
@@ -111,6 +149,16 @@ class Storage:
                     level text not null,
                     category text not null,
                     message text not null
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists watchlist (
+                    id integer primary key autoincrement,
+                    symbol text not null unique,
+                    name text not null default '',
+                    created_at text not null
                 )
                 """
             )

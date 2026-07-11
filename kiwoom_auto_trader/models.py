@@ -68,10 +68,29 @@ class MarketQuote:
     symbol: str
     name: str = ""
     current_price: float = 0.0
+    change: float = 0.0
     change_rate: float = 0.0
     volume: int = 0
     timestamp: str = ""
     message: str = ""
+
+
+@dataclass(frozen=True)
+class WatchlistQuote:
+    symbol: str
+    name: str = ""
+    market: str = "KRX"
+    current_price: float = 0.0
+    change: float = 0.0
+    change_rate: float = 0.0
+    volume: int = 0
+    trade_value: float = 0.0
+    open_price: float = 0.0
+    high_price: float = 0.0
+    low_price: float = 0.0
+    ask_price: float = 0.0
+    bid_price: float = 0.0
+    timestamp: str = ""
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,7 @@ from .kiwoom_api import (
     KIWOOM_OPENAPI_INSTALLER,
     KIWOOM_OPENAPI_PAGE,
 )
-from .models import Candle, DmiPoint, PatternState, StrategySettings
+from .models import Candle, DmiPoint, PatternState, StrategySettings, WatchlistQuote
 from .rest_api import KIWOOM_REST_PORTAL
 from .service import AutoTradingService
 from .storage import Storage
@@ -306,6 +306,14 @@ class TraderApp(tk.Tk):
         self._account_info_window: tk.Toplevel | None = None
         self._candle_chart_window: tk.Toplevel | None = None
         self._candle_chart_canvas: tk.Canvas | None = None
+        self._watchlist_window: tk.Toplevel | None = None
+        self._watchlist_table: ttk.Treeview | None = None
+        self._watchlist_link_after_id: str | None = None
+        self._watchlist_suppress_auto_connect = False
+        self.watchlist_symbol_var: tk.StringVar | None = None
+        self.watchlist_auto_link_var: tk.BooleanVar | None = None
+        self.watchlist_status_var: tk.StringVar | None = None
+        self.watchlist_detail_vars: dict[str, tk.StringVar] = {}
         self._chart_render_state: dict[tk.Canvas, dict] = {}
         self._chart_visible_count = 100
         self._build_ui()
@@ -350,7 +358,12 @@ class TraderApp(tk.Tk):
             pady=4,
         )
         self.connection_badge.grid(row=0, column=4, padx=(0, 8))
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=5)
+        ttk.Button(header, text="관심종목", command=self._open_watchlist_window).grid(
+            row=0,
+            column=5,
+            padx=(0, 8),
+        )
+        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=6)
         ttk.Button(header, text="연결 상태 확인", command=self._check_account_environment).grid(
             row=1, column=1, padx=(0, 8), pady=(6, 0)
         )
@@ -842,6 +855,325 @@ class TraderApp(tk.Tk):
         webbrowser.open(KIWOOM_MULTI_LOGIN_HELP)
         self.service.storage.log("INFO", "계좌", "키움 멀티로그인 안내 페이지를 열었습니다.")
         self._refresh()
+
+    def _open_watchlist_window(self) -> None:
+        if self._watchlist_window is not None and self._watchlist_window.winfo_exists():
+            self._watchlist_window.deiconify()
+            self._watchlist_window.lift()
+            self._render_watchlist_rows()
+            return
+
+        window = tk.Toplevel(self)
+        self._watchlist_window = window
+        window.title("키움 관심종목")
+        window.geometry("980x520")
+        window.minsize(820, 420)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", self._close_watchlist_window)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+
+        self.watchlist_symbol_var = tk.StringVar(value=self.symbol_var.get())
+        self.watchlist_auto_link_var = tk.BooleanVar(value=True)
+        self.watchlist_status_var = tk.StringVar(value="관심종목을 선택하면 메인 차트와 자동 연결됩니다.")
+        self.watchlist_detail_vars = {
+            key: tk.StringVar(value="-")
+            for key in (
+                "종목",
+                "현재가",
+                "전일대비",
+                "등락률",
+                "거래량",
+                "거래대금",
+                "시가",
+                "고가",
+                "저가",
+                "매도호가",
+                "매수호가",
+                "체결시간",
+            )
+        }
+
+        toolbar = ttk.Frame(window, padding=(12, 12, 12, 8))
+        toolbar.grid(row=0, column=0, sticky="ew")
+        ttk.Label(toolbar, text="종목코드").pack(side="left")
+        entry = ttk.Entry(toolbar, textvariable=self.watchlist_symbol_var, width=10)
+        entry.pack(side="left", padx=(5, 5))
+        entry.bind("<Return>", lambda _event: self._register_watchlist_symbol())
+        ttk.Button(toolbar, text="등록", command=self._register_watchlist_symbol).pack(side="left")
+        ttk.Button(toolbar, text="삭제", command=self._remove_watchlist_symbol).pack(
+            side="left",
+            padx=(5, 0),
+        )
+        ttk.Button(toolbar, text="새로고침", command=self._refresh_watchlist_quotes).pack(
+            side="left",
+            padx=(5, 0),
+        )
+        ttk.Button(toolbar, text="선택 연결", command=self._activate_watchlist_selection).pack(
+            side="left",
+            padx=(5, 0),
+        )
+        ttk.Checkbutton(
+            toolbar,
+            text="선택 시 차트 자동 연결",
+            variable=self.watchlist_auto_link_var,
+        ).pack(side="left", padx=(12, 0))
+        ttk.Button(toolbar, text="닫기", command=self._close_watchlist_window).pack(side="right")
+
+        body = ttk.Frame(window, padding=(12, 0, 12, 8))
+        body.grid(row=1, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=3)
+        body.columnconfigure(1, weight=1)
+        body.rowconfigure(0, weight=1)
+
+        table_frame = ttk.Frame(body)
+        table_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        columns = ("시장", "종목코드", "종목명", "현재가", "대비", "등락률", "거래량")
+        table = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+        )
+        self._watchlist_table = table
+        widths = (55, 76, 140, 94, 82, 76, 110)
+        for column, width in zip(columns, widths):
+            table.heading(column, text=column)
+            table.column(column, width=width, minwidth=50, anchor="e" if column not in ("시장", "종목코드", "종목명") else "center")
+        table.tag_configure("up", foreground="#c92f3c")
+        table.tag_configure("down", foreground="#245db5")
+        table.tag_configure("flat", foreground="#343a40")
+        table.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        table.configure(yscrollcommand=scrollbar.set)
+        table.bind("<<TreeviewSelect>>", self._on_watchlist_row_selected)
+        table.bind("<Double-1>", lambda _event: self._activate_watchlist_selection())
+
+        detail_panel = ttk.LabelFrame(body, text="선택 종목 정보", padding=12)
+        detail_panel.grid(row=0, column=1, sticky="nsew")
+        detail_panel.columnconfigure(1, weight=1)
+        for row, key in enumerate(self.watchlist_detail_vars):
+            ttk.Label(detail_panel, text=key).grid(row=row, column=0, sticky="w", pady=4)
+            ttk.Label(
+                detail_panel,
+                textvariable=self.watchlist_detail_vars[key],
+                anchor="e",
+                font=("Malgun Gothic", 9, "bold") if key in ("종목", "현재가") else None,
+            ).grid(row=row, column=1, sticky="ew", padx=(12, 0), pady=4)
+
+        ttk.Label(
+            window,
+            textvariable=self.watchlist_status_var,
+            padding=(12, 4, 12, 10),
+        ).grid(row=2, column=0, sticky="ew")
+
+        self._render_watchlist_rows()
+        entry.focus_set()
+        if self.service.account_info.connected:
+            window.after_idle(self._refresh_watchlist_quotes)
+
+    def _close_watchlist_window(self) -> None:
+        if self._watchlist_link_after_id is not None:
+            self.after_cancel(self._watchlist_link_after_id)
+            self._watchlist_link_after_id = None
+        if self._watchlist_window is not None and self._watchlist_window.winfo_exists():
+            self._watchlist_window.destroy()
+        self._watchlist_window = None
+        self._watchlist_table = None
+        self.watchlist_symbol_var = None
+        self.watchlist_auto_link_var = None
+        self.watchlist_status_var = None
+        self.watchlist_detail_vars = {}
+
+    def _register_watchlist_symbol(self) -> None:
+        if self.watchlist_symbol_var is None:
+            return
+        symbol = self.service.add_watchlist_symbol(self.watchlist_symbol_var.get())
+        if self.watchlist_status_var is not None:
+            self.watchlist_status_var.set(self.service.last_api_message)
+        if not symbol:
+            return
+        self.watchlist_symbol_var.set("")
+        if self.service.account_info.connected:
+            self._refresh_watchlist_quotes(select_symbol=symbol)
+        else:
+            self._render_watchlist_rows(select_symbol=symbol)
+
+    def _remove_watchlist_symbol(self) -> None:
+        symbol = self._selected_watchlist_symbol()
+        if not symbol:
+            messagebox.showwarning("관심종목 선택", "삭제할 관심종목을 선택해 주세요.")
+            return
+        if not messagebox.askyesno("관심종목 삭제", f"{symbol} 종목을 관심목록에서 삭제할까요?"):
+            return
+        self.service.remove_watchlist_symbol(symbol)
+        if self.watchlist_status_var is not None:
+            self.watchlist_status_var.set(self.service.last_api_message)
+        self._render_watchlist_rows()
+
+    def _refresh_watchlist_quotes(self, select_symbol: str = "") -> None:
+        if self.service.account_info.connected:
+            self.service.refresh_watchlist_quotes()
+        elif self.watchlist_status_var is not None:
+            self.watchlist_status_var.set("키움 API 연결 후 현재가와 거래 정보를 불러올 수 있습니다.")
+        if self.watchlist_status_var is not None and self.service.account_info.connected:
+            self.watchlist_status_var.set(self.service.last_api_message)
+        self._render_watchlist_rows(select_symbol=select_symbol)
+
+    def _render_watchlist_rows(self, select_symbol: str = "") -> None:
+        table = self._watchlist_table
+        if table is None or not table.winfo_exists():
+            return
+        current_selection = select_symbol or self._selected_watchlist_symbol()
+        self._watchlist_suppress_auto_connect = True
+        for item in table.get_children():
+            table.delete(item)
+        for quote in self.service.watchlist_rows():
+            table.insert(
+                "",
+                "end",
+                iid=quote.symbol,
+                values=self._watchlist_values(quote),
+                tags=(self._watchlist_tag(quote),),
+            )
+        if current_selection and table.exists(current_selection):
+            table.selection_set(current_selection)
+            table.focus(current_selection)
+            table.see(current_selection)
+            self._show_watchlist_details(self._watchlist_quote(current_selection))
+        else:
+            self._clear_watchlist_details()
+        self.after(120, self._allow_watchlist_auto_connect)
+
+    def _allow_watchlist_auto_connect(self) -> None:
+        self._watchlist_suppress_auto_connect = False
+
+    def _on_watchlist_row_selected(self, _event: tk.Event | None = None) -> None:
+        symbol = self._selected_watchlist_symbol()
+        self._show_watchlist_details(self._watchlist_quote(symbol))
+        if self._watchlist_suppress_auto_connect:
+            return
+        if self.watchlist_auto_link_var is None or not self.watchlist_auto_link_var.get():
+            return
+        if not self.service.account_info.connected:
+            return
+        if self._watchlist_link_after_id is not None:
+            self.after_cancel(self._watchlist_link_after_id)
+        self._watchlist_link_after_id = self.after(350, self._activate_watchlist_selection)
+
+    def _activate_watchlist_selection(self) -> None:
+        self._watchlist_link_after_id = None
+        symbol = self._selected_watchlist_symbol()
+        if not symbol:
+            messagebox.showwarning("관심종목 선택", "메인 차트와 연결할 관심종목을 선택해 주세요.")
+            return
+        if not self.service.account_info.connected:
+            if self.watchlist_status_var is not None:
+                self.watchlist_status_var.set("키움 API 연결 후 관심종목을 차트와 연결할 수 있습니다.")
+            return
+
+        self.symbol_var.set(symbol)
+        self.service.configure(symbol, float(self.capital_var.get()), self._settings())
+        self.service.request_current_price(symbol)
+        timeframe = self.chart_timeframe_var.get()
+        if timeframe.endswith("s"):
+            self.service.register_real_time_price(symbol)
+            self.service.select_realtime_chart(int(timeframe[:-1]))
+        else:
+            self.service.request_chart_candles(int(timeframe[:-1]), symbol)
+            self.service.register_real_time_price(symbol)
+        self.symbol_name_var.set(self.service.symbol_name)
+        self._refresh()
+        self._render_watchlist_rows(select_symbol=symbol)
+        self.main_notebook.select(self.dmi_chart_tab)
+        if self.watchlist_status_var is not None:
+            self.watchlist_status_var.set(
+                f"{symbol} {self.service.symbol_name} 시세·실시간·차트를 자동 연결했습니다."
+            )
+
+    def _selected_watchlist_symbol(self) -> str:
+        table = self._watchlist_table
+        if table is None or not table.winfo_exists():
+            return ""
+        selected = table.selection()
+        return normalize_symbol(selected[0]) if selected else ""
+
+    def _watchlist_quote(self, symbol: str) -> WatchlistQuote | None:
+        normalized = normalize_symbol(symbol)
+        return next(
+            (quote for quote in self.service.watchlist_rows() if quote.symbol == normalized),
+            None,
+        )
+
+    def _show_watchlist_details(self, quote: WatchlistQuote | None) -> None:
+        if quote is None or not self.watchlist_detail_vars:
+            self._clear_watchlist_details()
+            return
+        has_price = quote.current_price > 0
+        values = {
+            "종목": f"{quote.symbol} {quote.name or '미조회'}",
+            "현재가": f"{quote.current_price:,.0f}원" if has_price else "-",
+            "전일대비": self._format_watchlist_change(quote.change) if has_price else "-",
+            "등락률": f"{quote.change_rate:+.2f}%" if has_price else "-",
+            "거래량": f"{quote.volume:,}주" if has_price else "-",
+            "거래대금": f"{quote.trade_value:,.0f}원" if quote.trade_value else "-",
+            "시가": f"{quote.open_price:,.0f}원" if quote.open_price else "-",
+            "고가": f"{quote.high_price:,.0f}원" if quote.high_price else "-",
+            "저가": f"{quote.low_price:,.0f}원" if quote.low_price else "-",
+            "매도호가": f"{quote.ask_price:,.0f}원" if quote.ask_price else "-",
+            "매수호가": f"{quote.bid_price:,.0f}원" if quote.bid_price else "-",
+            "체결시간": quote.timestamp or "-",
+        }
+        for key, value in values.items():
+            self.watchlist_detail_vars[key].set(value)
+
+    def _clear_watchlist_details(self) -> None:
+        for variable in self.watchlist_detail_vars.values():
+            variable.set("-")
+
+    def _update_watchlist_live_row(self) -> None:
+        table = self._watchlist_table
+        quote = self.service.real_time_quote
+        if table is None or quote is None or not table.winfo_exists() or not table.exists(quote.symbol):
+            return
+        watch_quote = self._watchlist_quote(quote.symbol)
+        if watch_quote is None:
+            return
+        table.item(
+            quote.symbol,
+            values=self._watchlist_values(watch_quote),
+            tags=(self._watchlist_tag(watch_quote),),
+        )
+        if self._selected_watchlist_symbol() == quote.symbol:
+            self._show_watchlist_details(watch_quote)
+
+    @staticmethod
+    def _watchlist_values(quote: WatchlistQuote) -> tuple:
+        has_price = quote.current_price > 0
+        return (
+            quote.market,
+            quote.symbol,
+            quote.name or "미조회",
+            f"{quote.current_price:,.0f}" if has_price else "-",
+            TraderApp._format_watchlist_change(quote.change) if has_price else "-",
+            f"{quote.change_rate:+.2f}%" if has_price else "-",
+            f"{quote.volume:,}" if has_price else "-",
+        )
+
+    @staticmethod
+    def _format_watchlist_change(value: float) -> str:
+        return f"{value:+,.0f}"
+
+    @staticmethod
+    def _watchlist_tag(quote: WatchlistQuote) -> str:
+        if quote.change_rate > 0:
+            return "up"
+        if quote.change_rate < 0:
+            return "down"
+        return "flat"
 
     def _on_symbol_input_changed(self, *_args: object) -> None:
         if self._symbol_lookup_after_id is not None:
@@ -1461,6 +1793,8 @@ class TraderApp(tk.Tk):
         self._replace_rows(self.holdings, self._format_holdings(holdings))
         self._replace_rows(self.orders, self._format_orders(snapshot.orders))
         self._replace_rows(self.logs, self._format_logs(snapshot.logs))
+        if self._watchlist_window is not None and self._watchlist_window.winfo_exists():
+            self._render_watchlist_rows()
         self.after_idle(self._draw_main_dmi_chart)
         self._schedule_auto_tick()
         self._schedule_chart_refresh()
@@ -1554,6 +1888,7 @@ class TraderApp(tk.Tk):
         self._chart_refresh_after_id = None
         if self.service.real_time_symbol:
             self.service.refresh_real_time_quote()
+            self._update_watchlist_live_row()
             if self.service.chart_timeframe.endswith("s"):
                 candles = self.service.chart_candles_for_display()
                 label = timeframe_label(self.service.chart_timeframe)

@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
-from kiwoom_auto_trader.models import Candle
+from kiwoom_auto_trader.models import Candle, WatchlistQuote
 from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import KiwoomRestLoginDialog, TraderApp
 
@@ -106,6 +106,21 @@ class UiHelperTests(unittest.TestCase):
             [candle.timestamp for candle in ordered],
             ["20260711120000", "20260711120300", "20260711120600"],
         )
+
+    def test_formats_watchlist_price_fields_and_direction(self):
+        quote = WatchlistQuote(
+            symbol="005930",
+            name="삼성전자",
+            current_price=72000,
+            change=500,
+            change_rate=0.7,
+            volume=123456,
+        )
+
+        values = TraderApp._watchlist_values(quote)
+
+        self.assertEqual(values[3:], ("72,000", "+500", "+0.70%", "123,456"))
+        self.assertEqual(TraderApp._watchlist_tag(quote), "up")
 
 
 if __name__ == "__main__":

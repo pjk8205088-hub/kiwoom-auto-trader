@@ -1,5 +1,6 @@
 import unittest
 
+from kiwoom_auto_trader.models import MarketQuote
 from kiwoom_auto_trader.kiwoom_api import (
     KiwoomOpenApiClient,
     KiwoomOpenApiError,
@@ -241,6 +242,22 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(quote.current_price, 72000)
         self.assertEqual(events, [quote])
         self.assertEqual(client.drain_real_time_quotes("005930"), [])
+
+    def test_builds_watchlist_rows_from_rate_limited_openapi_quotes(self):
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: FakeKiwoomApi())
+        client.request_current_price = lambda symbol: MarketQuote(
+            symbol=symbol,
+            name="삼성전자" if symbol == "005930" else "SK하이닉스",
+            current_price=72000,
+            change=500,
+            change_rate=0.7,
+            volume=123,
+        )
+
+        quotes = client.request_watchlist_quotes(["005930", "000660"])
+
+        self.assertEqual([quote.symbol for quote in quotes], ["005930", "000660"])
+        self.assertEqual(quotes[0].change, 500)
 
     def test_looks_up_symbol_name(self):
         fake = FakeKiwoomApi()
