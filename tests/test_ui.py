@@ -24,6 +24,32 @@ class UiHelperTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "형식"):
                 KiwoomRestLoginDialog._read_key_file(path)
 
+    def test_reads_matching_key_pair_from_download_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            (downloads / "account_appkey.txt").write_text("test-app-key\n", encoding="utf-8")
+            (downloads / "account_secretkey.txt").write_text(
+                "test-secret-key\n",
+                encoding="utf-8",
+            )
+
+            key_pair = KiwoomRestLoginDialog._read_latest_key_pair(downloads)
+
+        self.assertEqual(key_pair, ("test-app-key", "test-secret-key"))
+
+    def test_does_not_pair_keys_with_different_prefixes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            downloads = Path(directory)
+            (downloads / "first_appkey.txt").write_text("test-app-key\n", encoding="utf-8")
+            (downloads / "second_secretkey.txt").write_text(
+                "test-secret-key\n",
+                encoding="utf-8",
+            )
+
+            key_pair = KiwoomRestLoginDialog._read_latest_key_pair(downloads)
+
+        self.assertIsNone(key_pair)
+
     def test_labels_live_rest_account_as_order_locked(self):
         info = KiwoomAccountInfo(
             True,

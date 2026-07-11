@@ -180,6 +180,7 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         ttk.Button(buttons, text="취소", command=self._cancel).grid(row=0, column=2, padx=(8, 0))
 
         self._sync_environment_text()
+        self._load_key_files_from_downloads(show_missing_warning=False)
         app_key_entry.focus_set()
         self.bind("<Return>", lambda _event: self._submit())
         self.bind("<Escape>", lambda _event: self._cancel())
@@ -217,7 +218,33 @@ class KiwoomRestLoginDialog(tk.Toplevel):
             messagebox.showerror("키 파일 오류", str(exc), parent=self)
 
     def _auto_load_key_files(self) -> None:
+        self._load_key_files_from_downloads(show_missing_warning=True)
+
+    def _load_key_files_from_downloads(self, show_missing_warning: bool) -> None:
         downloads = Path.home() / "Downloads"
+        try:
+            key_pair = self._read_latest_key_pair(downloads)
+        except (OSError, ValueError) as exc:
+            self.key_status_var.set("키 파일 자동 불러오기에 실패했습니다. 파일을 다시 확인해 주세요.")
+            if show_missing_warning:
+                messagebox.showerror("키 파일 오류", str(exc), parent=self)
+            return
+        if key_pair is not None:
+            app_key, secret_key = key_pair
+            self.app_key_var.set(app_key)
+            self.secret_key_var.set(secret_key)
+            self.key_status_var.set("다운로드 폴더에서 키 파일 2개를 자동으로 불러왔습니다.")
+            return
+        self.key_status_var.set("다운로드 폴더에서 서로 짝이 맞는 키 파일을 찾지 못했습니다.")
+        if show_missing_warning:
+            messagebox.showwarning(
+                "키 파일 없음",
+                "다운로드 폴더에서 계좌번호_appkey.txt와 SecretKey 파일을 찾지 못했습니다.",
+                parent=self,
+            )
+
+    @classmethod
+    def _read_latest_key_pair(cls, downloads: Path) -> tuple[str, str] | None:
         app_key_files = sorted(
             downloads.glob("*_appkey.txt"),
             key=lambda path: path.stat().st_mtime,
@@ -232,19 +259,8 @@ class KiwoomRestLoginDialog(tk.Toplevel):
             secret_key_path = next((path for path in candidates if path.exists()), None)
             if secret_key_path is None:
                 continue
-            try:
-                self.app_key_var.set(self._read_key_file(app_key_path))
-                self.secret_key_var.set(self._read_key_file(secret_key_path))
-                self.key_status_var.set("다운로드 폴더에서 키 파일 2개를 불러왔습니다.")
-                return
-            except (OSError, ValueError) as exc:
-                messagebox.showerror("키 파일 오류", str(exc), parent=self)
-                return
-        messagebox.showwarning(
-            "키 파일 없음",
-            "다운로드 폴더에서 계좌번호_appkey.txt와 SecretKey 파일을 찾지 못했습니다.",
-            parent=self,
-        )
+            return cls._read_key_file(app_key_path), cls._read_key_file(secret_key_path)
+        return None
 
     @staticmethod
     def _read_key_file(path: Path) -> str:
