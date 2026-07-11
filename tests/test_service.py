@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
-from kiwoom_auto_trader.models import Candle, StrategySettings
+from kiwoom_auto_trader.models import Candle, RealTimeQuote, StrategySettings
 from kiwoom_auto_trader.rest_api import KiwoomRestApiError
 from kiwoom_auto_trader.service import AutoTradingService
 from kiwoom_auto_trader.storage import Storage
@@ -117,7 +117,81 @@ class FakeRestApi:
         return "REST 모의 주문 접수 완료"
 
 
+class FakeChartApi:
+    def __init__(self) -> None:
+        self.intervals = []
+
+    def request_minute_candles(self, symbol, interval=3, count=120):
+        self.intervals.append((symbol, interval, count))
+        return [
+            Candle(
+                high=105,
+                low=95,
+                close=102,
+                open=100,
+                volume=10,
+                timestamp="20260711100000",
+            )
+        ]
+
+
+class FakeRealtimeApi:
+    def __init__(self) -> None:
+        self.quotes = [
+            RealTimeQuote("005930", 100, volume=2, timestamp="20260711101530"),
+            RealTimeQuote("005930", 103, volume=3, timestamp="20260711101530"),
+        ]
+
+    def pump_messages(self):
+        return
+
+    def drain_real_time_quotes(self, symbol):
+        quotes = [quote for quote in self.quotes if quote.symbol == symbol]
+        self.quotes = []
+        return quotes
+
+    def latest_real_time_quote(self, symbol):
+        if self.quotes and self.quotes[-1].symbol == symbol:
+            return self.quotes[-1]
+        return RealTimeQuote(symbol, 103, volume=3, timestamp="20260711101530")
+
+
 class AutoTradingServiceTests(unittest.TestCase):
+    def test_builds_selected_second_chart_from_drained_realtime_trades(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_second_chart_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        service.kiwoom_api = FakeRealtimeApi()
+        service.real_time_symbol = "005930"
+        service.select_realtime_chart(1)
+
+        service.refresh_real_time_quote()
+        candles = service.chart_candles_for_display()
+
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(candles[0].open, 100)
+        self.assertEqual(candles[0].high, 103)
+        self.assertEqual(candles[0].close, 103)
+        self.assertEqual(candles[0].volume, 5)
+
+    def test_hour_chart_uses_sixty_minute_api_without_changing_strategy_candles(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_chart_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        chart_api = FakeChartApi()
+        service.kiwoom_api = chart_api
+        strategy_candles = dmi_buy_transition_candles()
+        service.candles = list(strategy_candles)
+
+        chart_candles = service.request_chart_candles(60, "005930")
+
+        self.assertEqual(chart_api.intervals, [("005930", 60, 200)])
+        self.assertEqual(service.chart_timeframe, "60m")
+        self.assertEqual(chart_candles[0].close, 102)
+        self.assertEqual(service.candles, strategy_candles)
+
     def test_configure_preserves_strategy_state_when_settings_do_not_change(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_test.sqlite3"
         if db.exists():

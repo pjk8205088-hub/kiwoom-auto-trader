@@ -10,6 +10,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .charting import SUPPORTED_MINUTE_INTERVALS
 from .kiwoom_api import KiwoomAccountInfo
 from .models import (
     BalanceSummary,
@@ -126,6 +127,7 @@ class KiwoomRestApiClient:
         )
         self._real_time_symbol = ""
         self._real_time_quote: RealTimeQuote | None = None
+        self._real_quote_events: deque[RealTimeQuote] = deque(maxlen=5000)
         self._websocket_thread: threading.Thread | None = None
         self._websocket = None
         self._websocket_stop = threading.Event()
@@ -182,7 +184,9 @@ class KiwoomRestApiClient:
         self._token_expires_at = 0.0
         self._account = ""
         self._real_time_symbol = ""
-        self._real_time_quote = None
+        with self._websocket_lock:
+            self._real_time_quote = None
+            self._real_quote_events.clear()
         self._websocket_error = ""
         self._account_info = KiwoomAccountInfo(
             False,
@@ -239,6 +243,10 @@ class KiwoomRestApiClient:
         symbol = normalize_symbol(symbol)
         if not symbol:
             raise KiwoomRestApiError("종목코드를 입력해 주세요.")
+        interval = int(interval)
+        if interval not in SUPPORTED_MINUTE_INTERVALS:
+            supported = ", ".join(str(value) for value in SUPPORTED_MINUTE_INTERVALS)
+            raise KiwoomRestApiError(f"분봉 간격은 {supported}분만 지원합니다.")
         body = self._post(
             "ka10080",
             "/api/dostk/chart",
@@ -250,7 +258,7 @@ class KiwoomRestApiClient:
         )
         rows = body.get("stk_min_pole_chart_qry") or []
         if not isinstance(rows, list):
-            raise KiwoomRestApiError("REST API 3분봉 응답 형식이 올바르지 않습니다.")
+            raise KiwoomRestApiError(f"REST API {interval}분봉 응답 형식이 올바르지 않습니다.")
         candles = [
             Candle(
                 high=_price(row.get("high_pric")),
@@ -312,7 +320,9 @@ class KiwoomRestApiClient:
             raise KiwoomRestApiError("실시간 조회 종목코드를 입력해 주세요.")
         self._stop_websocket()
         self._real_time_symbol = symbol
-        self._real_time_quote = None
+        with self._websocket_lock:
+            self._real_time_quote = None
+            self._real_quote_events.clear()
         self._websocket_error = ""
         stop_event = threading.Event()
         self._websocket_stop = stop_event
@@ -331,7 +341,9 @@ class KiwoomRestApiClient:
         symbol = self._real_time_symbol
         self._stop_websocket()
         self._real_time_symbol = ""
-        self._real_time_quote = None
+        with self._websocket_lock:
+            self._real_time_quote = None
+            self._real_quote_events.clear()
         self._websocket_error = ""
         return f"{symbol or 'REST'} WebSocket 실시간 시세를 중지했습니다."
 
@@ -343,6 +355,13 @@ class KiwoomRestApiClient:
             raise KiwoomRestApiError(self._websocket_error)
         with self._websocket_lock:
             return self._real_time_quote
+
+    def drain_real_time_quotes(self, symbol: str) -> list[RealTimeQuote]:
+        target = normalize_symbol(symbol)
+        with self._websocket_lock:
+            quotes = [quote for quote in self._real_quote_events if quote.symbol == target]
+            self._real_quote_events.clear()
+        return quotes
 
     def send_order(self, request: KiwoomOrderRequest) -> str:
         if not self.is_connected():
@@ -445,20 +464,23 @@ class KiwoomRestApiClient:
             if symbol != self._real_time_symbol or not isinstance(values, dict):
                 continue
             trade_time = str(values.get("20") or "").strip()
-            timestamp = (
-                f"{datetime.now():%Y%m%d}{trade_time}"
-                if trade_time
-                else f"{datetime.now():%Y%m%d%H%M%S}"
-            )
+            time_digits = "".join(character for character in trade_time if character.isdigit())
+            if len(time_digits) >= 14:
+                timestamp = time_digits[:14]
+            elif len(time_digits) >= 6:
+                timestamp = f"{datetime.now():%Y%m%d}{time_digits[-6:]}"
+            else:
+                timestamp = f"{datetime.now():%Y%m%d%H%M%S}"
             quote = RealTimeQuote(
                 symbol=symbol,
                 current_price=_price(values.get("10")),
                 change_rate=_number(values.get("12")),
-                volume=_integer(values.get("13")),
+                volume=_integer(values.get("15")),
                 timestamp=timestamp,
             )
             with self._websocket_lock:
                 self._real_time_quote = quote
+                self._real_quote_events.append(quote)
         return None
 
     def _register_real_time_message(self, symbol: str = "") -> dict[str, Any]:

@@ -8,6 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from .charting import SUPPORTED_MINUTE_INTERVALS
 from .models import BalanceSummary, Candle, Holding, KiwoomOrderRequest, MarketQuote, RealTimeQuote
 from .symbols import normalize_symbol
 
@@ -181,6 +182,7 @@ class KiwoomOpenApiClient:
         self._tr_results: dict[str, Any] = {}
         self._tr_parsers: dict[str, Callable[[str, str, str], Any]] = {}
         self._real_quotes: dict[str, RealTimeQuote] = {}
+        self._real_quote_events: deque[RealTimeQuote] = deque(maxlen=5000)
         self._last_login_error: int | None = None
         self._last_comm_connect_result: int | None = None
         self._login_window_status = ""
@@ -368,6 +370,9 @@ class KiwoomOpenApiClient:
         if not symbol:
             raise KiwoomOpenApiError("종목코드를 입력해 주세요.")
         interval = max(1, int(interval))
+        if interval not in SUPPORTED_MINUTE_INTERVALS:
+            supported = ", ".join(str(value) for value in SUPPORTED_MINUTE_INTERVALS)
+            raise KiwoomOpenApiError(f"분봉 간격은 {supported}분만 지원합니다.")
         count = max(1, int(count))
         candles = self._request_tr(
             "분봉조회",
@@ -410,7 +415,9 @@ class KiwoomOpenApiClient:
         symbol = normalize_symbol(symbol)
         if not symbol:
             raise KiwoomOpenApiError("실시간 등록 종목코드를 입력해 주세요.")
-        result = api.SetRealReg(screen_no, symbol, "10;11;12;13;20", "0")
+        self._real_quotes.pop(symbol, None)
+        self._real_quote_events.clear()
+        result = api.SetRealReg(screen_no, symbol, "10;11;12;13;15;20", "0")
         if result not in (0, None):
             raise KiwoomOpenApiError(f"실시간 시세 등록 실패: {result}")
         return f"{symbol} 실시간 시세를 등록했습니다."
@@ -422,6 +429,15 @@ class KiwoomOpenApiClient:
 
     def latest_real_time_quote(self, symbol: str) -> RealTimeQuote | None:
         return self._real_quotes.get(normalize_symbol(symbol))
+
+    def drain_real_time_quotes(self, symbol: str) -> list[RealTimeQuote]:
+        target = normalize_symbol(symbol)
+        quotes: list[RealTimeQuote] = []
+        while self._real_quote_events:
+            quote = self._real_quote_events.popleft()
+            if quote.symbol == target:
+                quotes.append(quote)
+        return quotes
 
     def lookup_symbol_name(self, symbol: str) -> str:
         api = self._ensure_api()
@@ -648,12 +664,14 @@ class KiwoomOpenApiClient:
         current = _to_price(self._get_real_data(code, 10))
         change = _to_number(self._get_real_data(code, 11))
         change_rate = _to_number(self._get_real_data(code, 12))
-        volume = _to_int(self._get_real_data(code, 13))
+        volume = _to_int(self._get_real_data(code, 15))
         timestamp = str(self._get_real_data(code, 20) or "").strip()
         symbol = normalize_symbol(code)
-        self._real_quotes[symbol] = RealTimeQuote(
+        quote = RealTimeQuote(
             symbol, current, change, change_rate, volume, timestamp
         )
+        self._real_quotes[symbol] = quote
+        self._real_quote_events.append(quote)
 
     def _parse_current_price(self, trcode: str, rqname: str, record_name: str) -> MarketQuote:
         return MarketQuote(

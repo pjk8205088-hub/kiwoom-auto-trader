@@ -5,6 +5,12 @@ from datetime import datetime
 from random import uniform
 
 from .broker import BrokerClient, MockBroker
+from .charting import (
+    SUPPORTED_MINUTE_INTERVALS,
+    SUPPORTED_SECOND_INTERVALS,
+    RealTimeCandleAggregator,
+    timeframe_label,
+)
 from .kiwoom_api import KiwoomAccountInfo, KiwoomOpenApiClient, KiwoomOpenApiError
 from .models import (
     BalanceSummary,
@@ -45,6 +51,9 @@ class ServiceSnapshot:
     market_quote: MarketQuote | None = None
     balance_summary: BalanceSummary | None = None
     real_time_quote: RealTimeQuote | None = None
+    chart_candles: list[Candle] = field(default_factory=list)
+    chart_timeframe: str = "3m"
+    chart_source: str = ""
     last_api_message: str = ""
     orders: list[tuple] = field(default_factory=list)
     logs: list[tuple] = field(default_factory=list)
@@ -73,6 +82,11 @@ class AutoTradingService:
         self.current_price = 72_000.0
         self.pattern_state: PatternState = "NONE"
         self.candles: list[Candle] = []
+        self.chart_candles: list[Candle] = []
+        self.chart_timeframe = "3m"
+        self.chart_source = "키움 분봉 API"
+        self.real_time_candles = RealTimeCandleAggregator()
+        self._last_aggregated_quote_key: tuple | None = None
         self.latest_dmi: DmiPoint | None = None
         self.last_decision: TradeDecision | None = None
         self.market_quote: MarketQuote | None = None
@@ -93,6 +107,10 @@ class AutoTradingService:
             self.strategy = StrategyEngine(settings)
             self.latest_dmi = None
             self.pattern_state = "NONE"
+        if next_symbol != previous_symbol:
+            self.chart_candles = []
+            self.real_time_candles.reset(next_symbol)
+            self._last_aggregated_quote_key = None
         self.symbol = next_symbol
         fallback_name = known_symbol_name(self.symbol)
         if fallback_name:
@@ -290,6 +308,11 @@ class AutoTradingService:
         self.real_time_symbol = ""
         self.real_time_quote = None
         self.candles = []
+        self.chart_candles = []
+        self.chart_timeframe = "3m"
+        self.chart_source = "키움 분봉 API"
+        self.real_time_candles.reset(self.symbol)
+        self._last_aggregated_quote_key = None
         self.latest_dmi = None
         self.pattern_state = "NONE"
         self.strategy.reset()
@@ -367,6 +390,9 @@ class AutoTradingService:
                 self.latest_dmi = self.strategy.latest_dmi(ordered_candles)
                 if self.latest_dmi is not None:
                     self.pattern_state = self.latest_dmi.pattern_state
+            if self.chart_timeframe == "3m":
+                self.chart_candles = list(self.candles)
+                self.chart_source = "키움 ka10080/opt10080"
             self.last_api_message = f"{target} 3분봉 {len(self.candles)}개 조회 완료"
             self.storage.log("INFO", "시세", self.last_api_message)
             return self.candles
@@ -376,6 +402,60 @@ class AutoTradingService:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "시세", self.last_api_message)
             return []
+
+    def request_chart_candles(
+        self,
+        interval_minutes: int,
+        symbol: str | None = None,
+    ) -> list[Candle]:
+        interval_minutes = int(interval_minutes)
+        if interval_minutes not in SUPPORTED_MINUTE_INTERVALS:
+            supported = ", ".join(str(value) for value in SUPPORTED_MINUTE_INTERVALS)
+            self.last_api_message = f"분봉 간격은 {supported}분만 지원합니다."
+            self.storage.log("WARN", "차트", self.last_api_message)
+            return []
+
+        self.chart_timeframe = f"{interval_minutes}m"
+        if interval_minutes == 3:
+            return self.request_three_minute_candles(symbol)
+
+        target = normalize_symbol(symbol or self.symbol)
+        api = self._active_api()
+        try:
+            self.chart_candles = api.request_minute_candles(
+                target,
+                interval=interval_minutes,
+                count=200,
+            )
+            self.symbol = target
+            self.chart_source = "키움 ka10080/opt10080"
+            if self.chart_candles:
+                self.current_price = self.chart_candles[0].close
+            label = timeframe_label(self.chart_timeframe)
+            self.last_api_message = f"{target} {label}봉 {len(self.chart_candles)}개 조회 완료"
+            self.storage.log("INFO", "차트", self.last_api_message)
+            return self.chart_candles
+        except API_ERRORS as exc:
+            self.chart_candles = []
+            self.last_api_message = str(exc)
+            self.storage.log("ERROR", "차트", self.last_api_message)
+            return []
+
+    def select_realtime_chart(self, interval_seconds: int) -> list[Candle]:
+        interval_seconds = int(interval_seconds)
+        if interval_seconds not in SUPPORTED_SECOND_INTERVALS:
+            supported = ", ".join(str(value) for value in SUPPORTED_SECOND_INTERVALS)
+            self.last_api_message = f"초봉 간격은 {supported}초만 지원합니다."
+            self.storage.log("WARN", "차트", self.last_api_message)
+            return []
+        self.chart_timeframe = f"{interval_seconds}s"
+        self.chart_source = "키움 실시간 체결 0B/주식체결"
+        return self.real_time_candles.candles(interval_seconds)
+
+    def chart_candles_for_display(self) -> list[Candle]:
+        if self.chart_timeframe.endswith("s"):
+            return self.real_time_candles.candles(int(self.chart_timeframe[:-1]))
+        return list(self.chart_candles)
 
     def evaluate_strategy_with_market_data(
         self,
@@ -424,6 +504,9 @@ class AutoTradingService:
         target = normalize_symbol(symbol or self.symbol)
         api = self._active_api()
         try:
+            if target != self.real_time_symbol:
+                self.real_time_candles.reset(target)
+                self._last_aggregated_quote_key = None
             self.last_api_message = api.register_real_time_price(target)
             self.symbol = target
             self.real_time_symbol = target
@@ -439,6 +522,8 @@ class AutoTradingService:
         api = self._active_api()
         try:
             api.pump_messages()
+            drain = getattr(api, "drain_real_time_quotes", None)
+            quotes = list(drain(self.real_time_symbol)) if callable(drain) else []
             self.real_time_quote = api.latest_real_time_quote(self.real_time_symbol)
         except API_ERRORS as exc:
             message = str(exc)
@@ -446,6 +531,13 @@ class AutoTradingService:
                 self.storage.log("ERROR", "실시간", message)
             self.last_api_message = message
             return None
+        if not quotes and self.real_time_quote is not None:
+            quote_key = self._real_time_quote_key(self.real_time_quote)
+            if quote_key != self._last_aggregated_quote_key:
+                quotes = [self.real_time_quote]
+        for quote in quotes:
+            self.real_time_candles.add(quote)
+            self._last_aggregated_quote_key = self._real_time_quote_key(quote)
         if self.real_time_quote and self.real_time_quote.current_price > 0:
             self.current_price = self.real_time_quote.current_price
         return self.real_time_quote
@@ -618,9 +710,21 @@ class AutoTradingService:
             market_quote=self.market_quote,
             balance_summary=self.balance_summary,
             real_time_quote=self.refresh_real_time_quote(),
+            chart_candles=self.chart_candles_for_display(),
+            chart_timeframe=self.chart_timeframe,
+            chart_source=self.chart_source,
             last_api_message=self.last_api_message,
             orders=self.storage.recent_orders(10),
             logs=self.storage.recent_logs(10),
+        )
+
+    @staticmethod
+    def _real_time_quote_key(quote: RealTimeQuote) -> tuple:
+        return (
+            quote.symbol,
+            quote.timestamp,
+            quote.current_price,
+            quote.volume,
         )
 
     def _execute_decision(self, decision: TradeDecision) -> None:

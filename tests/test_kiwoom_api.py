@@ -93,6 +93,17 @@ class FakeKiwoomApi:
     def SetRealRemove(self, screen_no, code):
         return 0
 
+    def GetCommRealData(self, code, fid):
+        values = {
+            10: "+72000",
+            11: "+500",
+            12: "+0.70",
+            13: "123456",
+            15: "12",
+            20: "101530",
+        }
+        return values.get(fid, "")
+
     def SendOrder(self, rqname, screen_no, account, order_type, code, quantity, price, hoga, original):
         self.order_calls.append((rqname, account, order_type, code, quantity, price, hoga, original))
         return 0
@@ -217,6 +228,19 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
 
         self.assertIn("등록", message)
         self.assertEqual(fake.real_reg_calls[0][1], "005930")
+
+    def test_buffers_openapi_realtime_trades_for_second_candles(self):
+        fake = FakeKiwoomApi()
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        client._handle_real_data("005930", "주식체결", "")
+
+        quote = client.latest_real_time_quote("005930")
+        events = client.drain_real_time_quotes("005930")
+        self.assertIsNotNone(quote)
+        self.assertEqual(quote.current_price, 72000)
+        self.assertEqual(events, [quote])
+        self.assertEqual(client.drain_real_time_quotes("005930"), [])
 
     def test_looks_up_symbol_name(self):
         fake = FakeKiwoomApi()

@@ -6,6 +6,7 @@ import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from .charting import moving_average, timeframe_label
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
     KIWOOM_MULTI_LOGIN_HELP,
@@ -297,12 +298,16 @@ class TraderApp(tk.Tk):
         db_path = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_ko.sqlite3"
         self.service = AutoTradingService(storage=Storage(db_path))
         self._refresh_after_id: str | None = None
+        self._chart_refresh_after_id: str | None = None
         self._account_after_id: str | None = None
         self._symbol_lookup_after_id: str | None = None
         self._account_poll_count = 0
         self._selected_account_full = ""
         self._account_info_window: tk.Toplevel | None = None
         self._candle_chart_window: tk.Toplevel | None = None
+        self._candle_chart_canvas: tk.Canvas | None = None
+        self._chart_render_state: dict[tk.Canvas, dict] = {}
+        self._chart_visible_count = 100
         self._build_ui()
         self._refresh()
 
@@ -516,13 +521,13 @@ class TraderApp(tk.Tk):
 
         self.dmi_chart_tab = ttk.Frame(self.main_notebook, padding=(10, 10, 10, 8))
         self.dmi_chart_tab.columnconfigure(0, weight=1)
-        self.dmi_chart_tab.rowconfigure(1, weight=1)
-        self.main_notebook.add(self.dmi_chart_tab, text="DMI 강/약 차트")
+        self.dmi_chart_tab.rowconfigure(2, weight=1)
+        self.main_notebook.add(self.dmi_chart_tab, text="멀티주기 DMI 차트")
 
         chart_header = ttk.Frame(self.dmi_chart_tab)
         chart_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         chart_header.columnconfigure(0, weight=1)
-        self.chart_caption_var = tk.StringVar(value="키움 3분봉 | DMI 강세·약세 전환")
+        self.chart_caption_var = tk.StringVar(value="키움 3분봉 | 자동매매 기준 3분봉")
         ttk.Label(
             chart_header,
             textvariable=self.chart_caption_var,
@@ -551,14 +556,127 @@ class TraderApp(tk.Tk):
         tk.Label(legend, text="-DI", fg="#1686b8").pack(side="left", padx=(7, 0))
         tk.Label(legend, text="ADX", fg="#555555").pack(side="left", padx=(7, 0))
 
+        chart_toolbar = ttk.Frame(self.dmi_chart_tab)
+        chart_toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 7))
+        self.chart_timeframe_var = tk.StringVar(value="3m")
+        timeframe_groups = (
+            ("초", (("1초", "1s"), ("5초", "5s"), ("10초", "10s"))),
+            (
+                "분",
+                (
+                    ("1분", "1m"),
+                    ("3분", "3m"),
+                    ("5분", "5m"),
+                    ("10분", "10m"),
+                    ("15분", "15m"),
+                    ("30분", "30m"),
+                    ("45분", "45m"),
+                ),
+            ),
+            ("시", (("1시간", "60m"),)),
+        )
+        for group_index, (group_label, choices) in enumerate(timeframe_groups):
+            if group_index:
+                ttk.Separator(chart_toolbar, orient="vertical").pack(
+                    side="left",
+                    fill="y",
+                    padx=6,
+                )
+            ttk.Label(chart_toolbar, text=group_label, font=("Malgun Gothic", 9, "bold")).pack(
+                side="left",
+                padx=(0, 4),
+            )
+            for label, value in choices:
+                tk.Radiobutton(
+                    chart_toolbar,
+                    text=label,
+                    variable=self.chart_timeframe_var,
+                    value=value,
+                    indicatoron=False,
+                    width=5,
+                    padx=2,
+                    pady=2,
+                    relief="flat",
+                    overrelief="groove",
+                    bg="#f0f0f0",
+                    activebackground="#dbeaf5",
+                    selectcolor="#cfe3f2",
+                    command=self._on_chart_timeframe_changed,
+                ).pack(side="left", padx=1)
+
+        zoom_controls = ttk.Frame(chart_toolbar)
+        zoom_controls.pack(side="right")
+        ttk.Button(
+            zoom_controls,
+            text="−",
+            width=3,
+            command=lambda: self._change_chart_zoom(-20),
+        ).pack(side="left")
+        self.chart_visible_count_var = tk.StringVar(value="100봉")
+        ttk.Label(zoom_controls, textvariable=self.chart_visible_count_var, width=7, anchor="center").pack(
+            side="left"
+        )
+        ttk.Button(
+            zoom_controls,
+            text="+",
+            width=3,
+            command=lambda: self._change_chart_zoom(20),
+        ).pack(side="left")
+        ttk.Button(zoom_controls, text="새로고침", command=self._reload_chart_timeframe).pack(
+            side="left",
+            padx=(6, 0),
+        )
+
+        chart_workspace = ttk.Frame(self.dmi_chart_tab)
+        chart_workspace.grid(row=2, column=0, sticky="nsew")
+        chart_workspace.columnconfigure(0, minsize=150)
+        chart_workspace.columnconfigure(1, weight=1)
+        chart_workspace.rowconfigure(0, weight=1)
+
+        indicator_panel = ttk.Frame(chart_workspace, width=150, padding=(4, 8, 10, 4))
+        indicator_panel.grid(row=0, column=0, sticky="nsw")
+        ttk.Label(indicator_panel, text="지표 설정", font=("Malgun Gothic", 10, "bold")).pack(
+            anchor="w",
+            pady=(0, 8),
+        )
+        self.show_pattern_var = tk.BooleanVar(value=True)
+        self.show_ma5_var = tk.BooleanVar(value=True)
+        self.show_ma20_var = tk.BooleanVar(value=True)
+        self.show_dmi_chart_var = tk.BooleanVar(value=True)
+        for label, variable in (
+            ("강/약 배경", self.show_pattern_var),
+            ("이동평균 MA5", self.show_ma5_var),
+            ("이동평균 MA20", self.show_ma20_var),
+            ("DMI / ADX", self.show_dmi_chart_var),
+        ):
+            ttk.Checkbutton(
+                indicator_panel,
+                text=label,
+                variable=variable,
+                command=self._draw_main_dmi_chart,
+            ).pack(anchor="w", pady=2)
+        ttk.Separator(indicator_panel, orient="horizontal").pack(fill="x", pady=10)
+        ttk.Label(indicator_panel, text="양봉", foreground="#d64545").pack(anchor="w")
+        ttk.Label(indicator_panel, text="음봉", foreground="#2f62bd").pack(anchor="w", pady=(3, 0))
+        ttk.Label(indicator_panel, text="MA5", foreground="#d92787").pack(anchor="w", pady=(8, 0))
+        ttk.Label(indicator_panel, text="MA20", foreground="#3459c7").pack(anchor="w", pady=(3, 0))
+
         self.main_chart_canvas = tk.Canvas(
-            self.dmi_chart_tab,
+            chart_workspace,
             background="#ffffff",
             highlightthickness=1,
             highlightbackground="#c8c8c8",
         )
-        self.main_chart_canvas.grid(row=1, column=0, sticky="nsew")
+        self.main_chart_canvas.grid(row=0, column=1, sticky="nsew")
         self.main_chart_canvas.bind("<Configure>", lambda _event: self._draw_main_dmi_chart())
+        self.main_chart_canvas.bind(
+            "<Motion>",
+            lambda event: self._on_chart_motion(self.main_chart_canvas, event),
+        )
+        self.main_chart_canvas.bind(
+            "<Leave>",
+            lambda _event: self.main_chart_canvas.delete("crosshair"),
+        )
 
         self.operations_tab = ttk.Frame(self.main_notebook, padding=(8, 10, 8, 8))
         for column in range(3):
@@ -684,6 +802,7 @@ class TraderApp(tk.Tk):
             self._selected_account_full = account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
             self.service.request_current_price(self.symbol_var.get())
+            self.service.request_chart_candles(3, self.symbol_var.get())
             self.service.register_real_time_price(self.symbol_var.get())
             self.service.request_balance(self._selected_account_full)
         else:
@@ -761,6 +880,7 @@ class TraderApp(tk.Tk):
             self._update_connection_badge(True, account_info.connection_method)
             self.service.lookup_symbol_name(self.symbol_var.get())
             self.service.request_current_price(self.symbol_var.get())
+            self.service.request_chart_candles(3, self.symbol_var.get())
             self.service.register_real_time_price(self.symbol_var.get())
             if self._account_for_api():
                 self.service.request_balance(self._account_for_api(), self.account_password_var.get())
@@ -796,9 +916,39 @@ class TraderApp(tk.Tk):
         if not self._require_live_connection():
             return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
-        self.service.request_three_minute_candles(self.symbol_var.get())
+        self.chart_timeframe_var.set("3m")
+        self.service.request_chart_candles(3, self.symbol_var.get())
         self._refresh()
         self.main_notebook.select(self.dmi_chart_tab)
+
+    def _on_chart_timeframe_changed(self) -> None:
+        if not self._require_live_connection():
+            self.chart_timeframe_var.set(self.service.chart_timeframe)
+            return
+        self._load_selected_chart()
+        self._refresh()
+        self.main_notebook.select(self.dmi_chart_tab)
+
+    def _reload_chart_timeframe(self) -> None:
+        if not self._require_live_connection():
+            return
+        self._load_selected_chart()
+        self._refresh()
+
+    def _load_selected_chart(self) -> list[Candle]:
+        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        timeframe = self.chart_timeframe_var.get()
+        if timeframe.endswith("s"):
+            if self.service.real_time_symbol != normalize_symbol(self.symbol_var.get()):
+                self.service.register_real_time_price(self.symbol_var.get())
+            return self.service.select_realtime_chart(int(timeframe[:-1]))
+        return self.service.request_chart_candles(int(timeframe[:-1]), self.symbol_var.get())
+
+    def _change_chart_zoom(self, delta: int) -> None:
+        self._chart_visible_count = max(40, min(200, self._chart_visible_count + delta))
+        self.chart_visible_count_var.set(f"{self._chart_visible_count}봉")
+        self._draw_main_dmi_chart()
+        self._draw_popup_chart()
 
     def _request_balance(self) -> None:
         if not self._require_live_connection():
@@ -830,17 +980,20 @@ class TraderApp(tk.Tk):
     def _show_candle_chart(self) -> None:
         if not self._require_live_connection():
             return
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
-        candles = self.service.request_three_minute_candles(self.symbol_var.get())
+        candles = self._load_selected_chart()
         self._refresh()
         if not candles:
-            messagebox.showwarning("3분봉 데이터 없음", "키움에서 3분봉 데이터를 받지 못했습니다.")
+            if self.chart_timeframe_var.get().endswith("s"):
+                messagebox.showwarning("실시간 체결 대기", "키움 실시간 체결이 수신되면 초봉이 생성됩니다.")
+            else:
+                messagebox.showwarning("차트 데이터 없음", "키움에서 선택한 주기의 차트 데이터를 받지 못했습니다.")
             return
 
         self._close_candle_chart()
         window = tk.Toplevel(self)
         self._candle_chart_window = window
-        window.title(f"키움 3분봉 그래프 - {self.service.symbol} {self.service.symbol_name}")
+        label = timeframe_label(self.service.chart_timeframe)
+        window.title(f"키움 {label}봉 차트 - {self.service.symbol} {self.service.symbol_name}")
         window.geometry("1040x680")
         window.minsize(760, 520)
         window.transient(self)
@@ -851,8 +1004,8 @@ class TraderApp(tk.Tk):
         ttk.Label(
             body,
             text=(
-                f"{self.service.symbol} {self.service.symbol_name} | 키움 3분봉 | "
-                f"DMI({self.service.strategy.settings.dmi_period}) 강세·약세 전환"
+                f"{self.service.symbol} {self.service.symbol_name} | 키움 {label}봉 | "
+                f"DMI({self.service.strategy.settings.dmi_period}) | 자동매매 기준 3분봉"
             ),
             font=("Malgun Gothic", 13, "bold"),
         ).pack(anchor="w", pady=(0, 8))
@@ -863,21 +1016,27 @@ class TraderApp(tk.Tk):
             highlightbackground="#c8c8c8",
         )
         canvas.pack(fill="both", expand=True)
-        chronological = self._chronological_candles(candles)
-        canvas.bind(
-            "<Configure>",
-            lambda _event: self._draw_candle_chart(canvas, chronological),
-        )
-        window.after_idle(lambda: self._draw_candle_chart(canvas, chronological))
+        self._candle_chart_canvas = canvas
+        canvas.bind("<Configure>", lambda _event: self._draw_popup_chart())
+        canvas.bind("<Motion>", lambda event: self._on_chart_motion(canvas, event))
+        canvas.bind("<Leave>", lambda _event: canvas.delete("crosshair"))
+        window.after_idle(self._draw_popup_chart)
 
     def _close_candle_chart(self) -> None:
         if self._candle_chart_window is not None and self._candle_chart_window.winfo_exists():
             self._candle_chart_window.destroy()
         self._candle_chart_window = None
+        self._candle_chart_canvas = None
 
     def _draw_main_dmi_chart(self) -> None:
-        candles = self._chronological_candles(self.service.candles)
+        candles = self._chronological_candles(self.service.chart_candles_for_display())
         self._draw_candle_chart(self.main_chart_canvas, candles)
+
+    def _draw_popup_chart(self) -> None:
+        if self._candle_chart_canvas is None or not self._candle_chart_canvas.winfo_exists():
+            return
+        candles = self._chronological_candles(self.service.chart_candles_for_display())
+        self._draw_candle_chart(self._candle_chart_canvas, candles)
 
     @staticmethod
     def _chronological_candles(candles: list[Candle]) -> list[Candle]:
@@ -890,31 +1049,38 @@ class TraderApp(tk.Tk):
 
     def _draw_candle_chart(self, canvas: tk.Canvas, candles: list[Candle]) -> None:
         canvas.delete("all")
+        self._chart_render_state.pop(canvas, None)
         if not candles:
             width = max(1, canvas.winfo_width())
             height = max(1, canvas.winfo_height())
+            empty_text = (
+                "실시간 체결 대기"
+                if self.service.chart_timeframe.endswith("s")
+                else "차트 데이터 대기"
+            )
             canvas.create_text(
                 width / 2,
                 height / 2,
-                text="DMI 데이터 대기",
+                text=empty_text,
                 fill="#777777",
                 font=("Malgun Gothic", 12),
             )
             return
 
-        width = max(720, canvas.winfo_width())
-        height = max(460, canvas.winfo_height())
-        left_pad, right_pad, top_pad, bottom_pad = 70, 34, 28, 42
+        width = max(600, canvas.winfo_width())
+        height = max(220, canvas.winfo_height())
+        left_pad, right_pad, top_pad, bottom_pad = 18, 82, 28, 38
         plot_width = max(1, width - left_pad - right_pad)
-        available_height = max(300, height - top_pad - bottom_pad)
-        indicator_height = max(110, int(available_height * 0.27))
-        pane_gap = 38
-        price_height = max(170, available_height - indicator_height - pane_gap)
+        available_height = max(150, height - top_pad - bottom_pad)
+        show_dmi = self.show_dmi_chart_var.get()
+        indicator_height = max(50, int(available_height * 0.28)) if show_dmi else 0
+        pane_gap = (18 if available_height < 220 else 30) if show_dmi else 0
+        price_height = max(82, available_height - indicator_height - pane_gap)
         price_bottom = top_pad + price_height
         dmi_top = price_bottom + pane_gap
         dmi_bottom = dmi_top + indicator_height
 
-        display_start = max(0, len(candles) - 100)
+        display_start = max(0, len(candles) - self._chart_visible_count)
         displayed = candles[display_start:]
         dmi_series = self.service.strategy.calculate_dmi_series(candles)
         dmi_by_index = {
@@ -938,34 +1104,62 @@ class TraderApp(tk.Tk):
             return dmi_top + ((100.0 - bounded) / 100.0) * indicator_height
 
         step = plot_width / max(1, len(displayed))
-        for index, point in dmi_by_index.items():
-            if index < 0 or index >= len(displayed):
-                continue
-            fill = "#fde4e9" if point.pattern_state == "BULLISH" else "#e3f2fb"
-            if point.pattern_state == "NONE":
-                continue
-            x0 = left_pad + step * index
-            x1 = left_pad + step * (index + 1)
-            canvas.create_rectangle(x0, top_pad, x1, dmi_bottom, fill=fill, outline="")
+        if self.show_pattern_var.get():
+            pattern_bottom = dmi_bottom if show_dmi else price_bottom
+            for index, point in dmi_by_index.items():
+                if index < 0 or index >= len(displayed) or point.pattern_state == "NONE":
+                    continue
+                fill = "#fde4e9" if point.pattern_state == "BULLISH" else "#e3f2fb"
+                x0 = left_pad + step * index
+                x1 = left_pad + step * (index + 1)
+                canvas.create_rectangle(x0, top_pad, x1, pattern_bottom, fill=fill, outline="")
 
-        canvas.create_line(left_pad, top_pad, left_pad, price_bottom, fill="#808080")
-        canvas.create_line(
-            left_pad,
-            price_bottom,
-            left_pad + plot_width,
-            price_bottom,
-            fill="#808080",
-        )
-        canvas.create_text(8, top_pad, text=f"{highest:,.0f}", anchor="w", fill="#333333")
-        canvas.create_text(
-            8,
-            price_bottom,
-            text=f"{lowest:,.0f}",
-            anchor="w",
-            fill="#333333",
-        )
+        for level_index in range(5):
+            ratio = level_index / 4
+            y = top_pad + ratio * price_height
+            price = highest - ratio * price_span
+            canvas.create_line(
+                left_pad,
+                y,
+                left_pad + plot_width,
+                y,
+                fill="#d5dce1",
+                dash=(2, 3),
+            )
+            canvas.create_text(
+                left_pad + plot_width + 8,
+                y,
+                text=f"{price:,.0f}",
+                anchor="w",
+                fill="#3f4a52",
+                font=("Malgun Gothic", 8),
+            )
 
-        body_width = max(2.0, min(8.0, step * 0.58))
+        label_indexes = sorted(
+            {
+                round(index * (len(displayed) - 1) / min(5, max(1, len(displayed) - 1)))
+                for index in range(min(5, max(1, len(displayed) - 1)) + 1)
+            }
+        )
+        chart_bottom = dmi_bottom if show_dmi else price_bottom
+        for index in label_indexes:
+            x = left_pad + step * (index + 0.5)
+            canvas.create_line(x, top_pad, x, chart_bottom, fill="#e1e5e8", dash=(2, 3))
+
+        def draw_price_line(values: list[float | None], color: str, width_value: int = 2) -> None:
+            coordinates: list[float] = []
+            for index, value in enumerate(values[display_start:]):
+                if value is None:
+                    if len(coordinates) >= 4:
+                        canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
+                    coordinates = []
+                    continue
+                x = left_pad + step * (index + 0.5)
+                coordinates.extend((x, price_y(value)))
+            if len(coordinates) >= 4:
+                canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
+
+        body_width = max(2.0, min(10.0, step * 0.62))
         for index, candle in enumerate(displayed):
             x = left_pad + step * (index + 0.5)
             open_price = candle.open or candle.close
@@ -985,6 +1179,20 @@ class TraderApp(tk.Tk):
                 fill=color,
                 outline=color,
             )
+
+        if self.show_ma5_var.get():
+            draw_price_line(moving_average(candles, 5), "#d92787")
+        if self.show_ma20_var.get():
+            draw_price_line(moving_average(candles, 20), "#3459c7")
+
+        canvas.create_line(left_pad, price_bottom, left_pad + plot_width, price_bottom, fill="#6f7880")
+        canvas.create_line(
+            left_pad + plot_width,
+            top_pad,
+            left_pad + plot_width,
+            chart_bottom,
+            fill="#6f7880",
+        )
 
         previous_point = None
         for index in sorted(dmi_by_index):
@@ -1013,55 +1221,162 @@ class TraderApp(tk.Tk):
             dash=(4, 3),
         )
         canvas.create_text(
-            left_pad + plot_width,
-            latest_y - 8,
-            text=f"현재 {latest.close:,.0f}",
-            anchor="e",
-            fill="#222222",
+            left_pad + plot_width + 8,
+            latest_y,
+            text=f"{latest.close:,.0f}",
+            anchor="w",
+            fill="#20262b",
+            font=("Malgun Gothic", 8, "bold"),
         )
 
-        canvas.create_line(left_pad, dmi_top, left_pad, dmi_bottom, fill="#808080")
-        canvas.create_line(left_pad, dmi_bottom, left_pad + plot_width, dmi_bottom, fill="#808080")
-        for level in (0, 25, 50, 75, 100):
-            y = dmi_y(float(level))
-            canvas.create_line(left_pad, y, left_pad + plot_width, y, fill="#d0d0d0", dash=(2, 3))
-            canvas.create_text(38, y, text=str(level), fill="#555555")
+        if show_dmi:
+            canvas.create_line(left_pad, dmi_top, left_pad + plot_width, dmi_top, fill="#6f7880")
+            canvas.create_line(left_pad, dmi_bottom, left_pad + plot_width, dmi_bottom, fill="#6f7880")
+            for level in (0, 25, 50, 75, 100):
+                y = dmi_y(float(level))
+                canvas.create_line(left_pad, y, left_pad + plot_width, y, fill="#d5dce1", dash=(2, 3))
+                canvas.create_text(
+                    left_pad + plot_width + 8,
+                    y,
+                    text=str(level),
+                    anchor="w",
+                    fill="#555555",
+                    font=("Malgun Gothic", 8),
+                )
 
-        def draw_dmi_line(attribute: str, color: str, width_value: int = 2) -> None:
-            coordinates: list[float] = []
-            for index in sorted(dmi_by_index):
-                point = dmi_by_index[index]
-                value = getattr(point, attribute)
-                if value is None or index < 0 or index >= len(displayed):
-                    if len(coordinates) >= 4:
-                        canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
-                    coordinates = []
-                    continue
-                x = left_pad + step * (index + 0.5)
-                coordinates.extend((x, dmi_y(float(value))))
-            if len(coordinates) >= 4:
-                canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
+            def draw_dmi_line(attribute: str, color: str, width_value: int = 2) -> None:
+                coordinates: list[float] = []
+                for index in sorted(dmi_by_index):
+                    point = dmi_by_index[index]
+                    value = getattr(point, attribute)
+                    if value is None or index < 0 or index >= len(displayed):
+                        if len(coordinates) >= 4:
+                            canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
+                        coordinates = []
+                        continue
+                    x = left_pad + step * (index + 0.5)
+                    coordinates.extend((x, dmi_y(float(value))))
+                if len(coordinates) >= 4:
+                    canvas.create_line(*coordinates, fill=color, width=width_value, smooth=True)
 
-        draw_dmi_line("plus_di", "#d92787")
-        draw_dmi_line("minus_di", "#1686b8")
-        draw_dmi_line("adx", "#555555", 1)
-        canvas.create_text(left_pad, dmi_top - 20, text="+DI", anchor="w", fill="#d92787", font=("Malgun Gothic", 9, "bold"))
-        canvas.create_text(left_pad + 42, dmi_top - 20, text="-DI", anchor="w", fill="#1686b8", font=("Malgun Gothic", 9, "bold"))
-        canvas.create_text(left_pad + 84, dmi_top - 20, text="ADX", anchor="w", fill="#555555", font=("Malgun Gothic", 9, "bold"))
+            draw_dmi_line("plus_di", "#d92787")
+            draw_dmi_line("minus_di", "#1686b8")
+            draw_dmi_line("adx", "#555555", 1)
+            canvas.create_text(
+                left_pad,
+                dmi_top - 18,
+                text="+DI  -DI  ADX",
+                anchor="w",
+                fill="#555555",
+                font=("Malgun Gothic", 8, "bold"),
+            )
 
-        label_indexes = sorted({0, len(displayed) // 2, len(displayed) - 1})
         for index in label_indexes:
             timestamp = displayed[index].timestamp
-            digits = "".join(char for char in timestamp if char.isdigit())
-            label = f"{digits[-6:-4]}:{digits[-4:-2]}" if len(digits) >= 6 else timestamp[-8:]
+            label = self._format_chart_timestamp(timestamp, compact=True)
             x = left_pad + step * (index + 0.5)
             canvas.create_text(
                 x,
-                dmi_bottom + 18,
+                chart_bottom + 14,
                 text=label or f"{index + 1}",
                 anchor="n",
                 fill="#555555",
+                font=("Malgun Gothic", 8),
             )
+
+        self._chart_render_state[canvas] = {
+            "displayed": displayed,
+            "dmi_by_index": dmi_by_index,
+            "left": left_pad,
+            "right": left_pad + plot_width,
+            "top": top_pad,
+            "bottom": chart_bottom,
+            "price_bottom": price_bottom,
+            "step": step,
+        }
+
+    def _on_chart_motion(self, canvas: tk.Canvas, event: tk.Event) -> None:
+        canvas.delete("crosshair")
+        state = self._chart_render_state.get(canvas)
+        if not state or event.x < state["left"] or event.x > state["right"]:
+            return
+        if event.y < state["top"] or event.y > state["bottom"]:
+            return
+
+        displayed = state["displayed"]
+        index = int((event.x - state["left"]) / state["step"])
+        index = max(0, min(len(displayed) - 1, index))
+        candle = displayed[index]
+        x = state["left"] + state["step"] * (index + 0.5)
+        canvas.create_line(
+            x,
+            state["top"],
+            x,
+            state["bottom"],
+            fill="#59666f",
+            dash=(3, 3),
+            tags="crosshair",
+        )
+        if event.y <= state["price_bottom"]:
+            canvas.create_line(
+                state["left"],
+                event.y,
+                state["right"],
+                event.y,
+                fill="#59666f",
+                dash=(3, 3),
+                tags="crosshair",
+            )
+
+        point = state["dmi_by_index"].get(index)
+        dmi_text = ""
+        if point is not None:
+            adx = "-" if point.adx is None else f"{point.adx:.2f}"
+            dmi_text = f"\n+DI {point.plus_di:.2f}  -DI {point.minus_di:.2f}  ADX {adx}"
+        tooltip = (
+            f"{self._format_chart_timestamp(candle.timestamp)}\n"
+            f"시가 {candle.open or candle.close:,.0f}  고가 {candle.high:,.0f}\n"
+            f"저가 {candle.low:,.0f}  종가 {candle.close:,.0f}\n"
+            f"거래량 {candle.volume:,}{dmi_text}"
+        )
+        tooltip_x = x + 12 if x < state["right"] - 235 else x - 225
+        tooltip_y = state["top"] + 10
+        text_id = canvas.create_text(
+            tooltip_x,
+            tooltip_y,
+            text=tooltip,
+            anchor="nw",
+            justify="left",
+            fill="#20262b",
+            font=("Malgun Gothic", 9),
+            tags="crosshair",
+        )
+        bounds = canvas.bbox(text_id)
+        if bounds:
+            background = canvas.create_rectangle(
+                bounds[0] - 6,
+                bounds[1] - 5,
+                bounds[2] + 6,
+                bounds[3] + 5,
+                fill="#f5f6f7",
+                outline="#59666f",
+                tags="crosshair",
+            )
+            canvas.tag_lower(background, text_id)
+
+    @staticmethod
+    def _format_chart_timestamp(timestamp: str, compact: bool = False) -> str:
+        digits = "".join(character for character in str(timestamp) if character.isdigit())
+        if len(digits) >= 14:
+            if compact:
+                return f"{digits[8:10]}:{digits[10:12]}:{digits[12:14]}"
+            return (
+                f"{digits[:4]}-{digits[4:6]}-{digits[6:8]} "
+                f"{digits[8:10]}:{digits[10:12]}:{digits[12:14]}"
+            )
+        if len(digits) >= 6:
+            return f"{digits[-6:-4]}:{digits[-4:-2]}:{digits[-2:]}"
+        return str(timestamp)
 
     def _send_order(self, side: str) -> None:
         if not self._require_live_connection():
@@ -1133,9 +1448,13 @@ class TraderApp(tk.Tk):
             self.symbol_name_var.set(snapshot.symbol_name)
         self.account_summary_var.set(self._format_account_summary(snapshot))
         self.trade_ready_var.set(self._format_trade_ready(snapshot))
+        if self.chart_timeframe_var.get() != snapshot.chart_timeframe:
+            self.chart_timeframe_var.set(snapshot.chart_timeframe)
+        chart_label = timeframe_label(snapshot.chart_timeframe)
         self.chart_caption_var.set(
-            f"{snapshot.symbol} {snapshot.symbol_name} | 키움 3분봉 | "
-            f"DMI({self.service.strategy.settings.dmi_period}) | {len(self.service.candles)}개"
+            f"{snapshot.symbol} {snapshot.symbol_name} | {chart_label}봉 {len(snapshot.chart_candles)}개 | "
+            f"{snapshot.chart_source} | DMI({self.service.strategy.settings.dmi_period}) | "
+            "자동매매 기준 3분봉"
         )
         self._update_trade_buttons()
         holdings = list(snapshot.balance_summary.holdings) if snapshot.balance_summary else []
@@ -1144,6 +1463,7 @@ class TraderApp(tk.Tk):
         self._replace_rows(self.logs, self._format_logs(snapshot.logs))
         self.after_idle(self._draw_main_dmi_chart)
         self._schedule_auto_tick()
+        self._schedule_chart_refresh()
 
     def _update_dmi_display(self, dmi: DmiPoint | None) -> None:
         if dmi is None:
@@ -1224,6 +1544,27 @@ class TraderApp(tk.Tk):
     def _schedule_auto_tick(self) -> None:
         if self._refresh_after_id is None:
             self._refresh_after_id = self.after(3000, self._auto_tick)
+
+    def _schedule_chart_refresh(self) -> None:
+        if self._chart_refresh_after_id is None:
+            delay = 250 if self.service.chart_timeframe.endswith("s") else 1000
+            self._chart_refresh_after_id = self.after(delay, self._chart_refresh_tick)
+
+    def _chart_refresh_tick(self) -> None:
+        self._chart_refresh_after_id = None
+        if self.service.real_time_symbol:
+            self.service.refresh_real_time_quote()
+            if self.service.chart_timeframe.endswith("s"):
+                candles = self.service.chart_candles_for_display()
+                label = timeframe_label(self.service.chart_timeframe)
+                self.chart_caption_var.set(
+                    f"{self.service.symbol} {self.service.symbol_name} | {label}봉 {len(candles)}개 | "
+                    f"{self.service.chart_source} | DMI({self.service.strategy.settings.dmi_period}) | "
+                    "자동매매 기준 3분봉"
+                )
+                self._draw_main_dmi_chart()
+                self._draw_popup_chart()
+        self._schedule_chart_refresh()
 
     def _replace_rows(self, table: ttk.Treeview, rows: list[tuple]) -> None:
         for item in table.get_children():

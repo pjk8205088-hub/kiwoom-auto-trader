@@ -176,6 +176,26 @@ class KiwoomRestApiClientTests(unittest.TestCase):
                 )
             )
 
+    def test_requests_official_sixty_minute_chart_scope(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response({"stk_min_pole_chart_qry": []}),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=True,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        client.request_minute_candles("005930", interval=60)
+
+        self.assertEqual(requester.calls[-1][2]["api-id"], "ka10080")
+        self.assertEqual(requester.calls[-1][3]["tic_scope"], "60")
+
     def test_mock_limiter_waits_for_same_api_id(self):
         clock = FakeClock()
         limiter = KiwoomRestRateLimiter(mock=True, clock=clock, sleeper=clock.sleep)
@@ -206,6 +226,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
                             "10": "+72000",
                             "12": "+1.25",
                             "13": "123456",
+                            "15": "12",
                         },
                     }
                 ],
@@ -218,7 +239,10 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertIsNotNone(quote)
         self.assertEqual(quote.current_price, 72000)
         self.assertEqual(quote.change_rate, 1.25)
-        self.assertEqual(quote.volume, 123456)
+        self.assertEqual(quote.volume, 12)
+        events = client.drain_real_time_quotes("005930")
+        self.assertEqual(events, [quote])
+        self.assertEqual(client.drain_real_time_quotes("005930"), [])
 
     def test_explains_live_key_used_against_mock_server(self):
         requester = FakeRequester(
