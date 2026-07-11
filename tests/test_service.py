@@ -3,7 +3,8 @@ import unittest
 from pathlib import Path
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
-from kiwoom_auto_trader.models import StrategySettings
+from kiwoom_auto_trader.models import Candle, StrategySettings
+from kiwoom_auto_trader.rest_api import KiwoomRestApiError
 from kiwoom_auto_trader.service import AutoTradingService
 from kiwoom_auto_trader.storage import Storage
 
@@ -46,6 +47,61 @@ class FakeAccountApi:
 
     def is_connected(self) -> bool:
         return self.connected
+
+
+class FakeRestApi:
+    def __init__(self) -> None:
+        self.connected = False
+        self.sell_failures_remaining = 0
+        self.order_calls = 0
+        self.info = KiwoomAccountInfo(
+            False,
+            [],
+            server_type="모의투자",
+            connection_method="REST API",
+        )
+
+    def connect(self, app_key: str, secret_key: str) -> KiwoomAccountInfo:
+        if app_key != "app-key" or secret_key != "secret-key":
+            raise AssertionError("테스트 키가 전달되지 않았습니다.")
+        self.connected = True
+        self.info = KiwoomAccountInfo(
+            True,
+            ["1234567890"],
+            user_id="REST API 토큰 인증",
+            server_type="모의투자",
+            message="REST API 모의투자 연결 완료",
+            reported_account_count=1,
+            login_event_code=0,
+            connection_method="REST API",
+        )
+        return self.info
+
+    def get_account_info(self) -> KiwoomAccountInfo:
+        return self.info
+
+    def is_connected(self) -> bool:
+        return self.connected
+
+    def login_status_message(self) -> str:
+        return self.info.message
+
+    def clear_session(self) -> None:
+        self.connected = False
+        self.info = KiwoomAccountInfo(
+            False,
+            [],
+            server_type="모의투자",
+            message="REST API 세션 종료",
+            connection_method="REST API",
+        )
+
+    def send_order(self, request) -> str:
+        self.order_calls += 1
+        if request.side == "SELL" and self.sell_failures_remaining > 0:
+            self.sell_failures_remaining -= 1
+            raise KiwoomRestApiError("테스트용 모의 매도 요청 실패")
+        return "REST 모의 주문 접수 완료"
 
 
 class AutoTradingServiceTests(unittest.TestCase):
@@ -110,6 +166,74 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertFalse(info.connected)
         self.assertEqual(info.accounts, [])
         self.assertIn("수신 확인", info.message)
+
+    def test_connects_rest_mock_account_and_switches_active_mode(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_rest_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        service.rest_api = FakeRestApi()
+
+        info = service.start_rest_connection("app-key", "secret-key")
+
+        self.assertTrue(info.connected)
+        self.assertEqual(service.connection_mode, "REST")
+        self.assertEqual(info.connection_method, "REST API")
+        self.assertEqual(info.accounts, ["1234567890"])
+        self.assertTrue(service.sync_account_connection())
+
+        service.rest_api.connected = False
+        self.assertFalse(service.sync_account_connection())
+        self.assertFalse(service.account_info.connected)
+
+    def test_market_strategy_uses_explicit_pattern_with_real_candles(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_pattern_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        service.configure("005930", 1_000_000, StrategySettings(use_cci_filter=False))
+        candles = [Candle(high=101, low=99, close=100) for _ in range(20)]
+        service.request_three_minute_candles = lambda _symbol=None: candles
+
+        buy = service.evaluate_strategy_with_market_data("005930", "BULLISH")
+        sell = service.evaluate_strategy_with_market_data("005930", "BEARISH")
+
+        self.assertEqual(buy.action, "BUY")
+        self.assertEqual(sell.action, "SELL")
+
+    def test_retries_mock_sell_request_but_not_buy(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_sell_retry_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+        fake_rest.sell_failures_remaining = 2
+
+        message = service.send_kiwoom_order("1234567890", "SELL", 1)
+
+        self.assertEqual(fake_rest.order_calls, 3)
+        self.assertIn("접수 완료", message)
+        fake_rest.order_calls = 0
+        service.send_kiwoom_order("1234567890", "BUY", 1)
+        self.assertEqual(fake_rest.order_calls, 1)
+
+    def test_blocks_manual_buy_over_configured_capital_limit(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_cap_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+        service.current_price = 100_000
+        service.max_capital = 500_000
+
+        message = service.send_kiwoom_order("1234567890", "BUY", 6)
+
+        self.assertEqual(fake_rest.order_calls, 0)
+        self.assertIn("최대 5주", message)
 
 
 if __name__ == "__main__":

@@ -18,10 +18,14 @@ from .models import (
     TradeDecision,
 )
 from .order_manager import OrderManager
+from .rest_api import KiwoomRestApiClient, KiwoomRestApiError
 from .risk import RiskManager
 from .storage import Storage
 from .strategy import StrategyEngine
-from .symbols import clean_account_number, known_symbol_name, normalize_symbol
+from .symbols import clean_account_number, known_symbol_name, mask_account_number, normalize_symbol
+
+
+API_ERRORS = (KiwoomOpenApiError, KiwoomRestApiError)
 
 
 @dataclass
@@ -56,6 +60,8 @@ class AutoTradingService:
         self.strategy = StrategyEngine()
         self.order_manager = OrderManager(self.broker, self.storage)
         self.kiwoom_api = KiwoomOpenApiClient()
+        self.rest_api = KiwoomRestApiClient(mock=True)
+        self.connection_mode = "ACTIVEX"
         self.account_info = KiwoomAccountInfo(False, [], message="키움 계좌가 연결되지 않았습니다.")
         self.expected_user_id = ""
         self.running = False
@@ -104,6 +110,8 @@ class AutoTradingService:
         self.storage.log("ERROR", "시스템", "긴급 정지가 요청되었습니다.")
 
     def start_account_connection(self, expected_user_id: str = "") -> str:
+        self.connection_mode = "ACTIVEX"
+        self.rest_api.clear_session()
         self.expected_user_id = expected_user_id.strip()
         self.account_info = KiwoomAccountInfo(
             False,
@@ -121,7 +129,37 @@ class AutoTradingService:
             self.storage.log("ERROR", "계좌", message)
             return message
 
+    def start_rest_connection(self, app_key: str, secret_key: str) -> KiwoomAccountInfo:
+        self.connection_mode = "REST"
+        self.expected_user_id = ""
+        self.account_info = KiwoomAccountInfo(
+            False,
+            [],
+            server_type="모의투자",
+            message="키움 REST API 모의투자 토큰과 계좌를 확인하고 있습니다.",
+            connection_method="REST API",
+        )
+        self._clear_live_trading_state()
+        try:
+            self.account_info = self.rest_api.connect(app_key, secret_key)
+            self.storage.log("INFO", "계좌", self.account_info.message)
+        except KiwoomRestApiError as exc:
+            message = str(exc)
+            self.account_info = KiwoomAccountInfo(
+                False,
+                [],
+                server_type="모의투자",
+                message=message,
+                connection_method="REST API",
+            )
+            self.storage.log("ERROR", "계좌", message)
+        return self.account_info
+
     def check_account_environment(self) -> str:
+        if self.connection_mode == "REST":
+            self.account_info = self.rest_api.get_account_info()
+            self.storage.log("INFO", "계좌", self.account_info.message)
+            return self.account_info.message
         status = self.kiwoom_api.check_environment()
         message = status.message
         if status.active_x_available:
@@ -137,6 +175,9 @@ class AutoTradingService:
         return message
 
     def refresh_account_connection(self) -> KiwoomAccountInfo:
+        if self.connection_mode == "REST":
+            self.account_info = self.rest_api.get_account_info()
+            return self.account_info
         previous_message = self.account_info.message
         try:
             raw_info = self.kiwoom_api.get_account_info()
@@ -160,14 +201,23 @@ class AutoTradingService:
         """Keep the UI/order gate aligned with the live OpenAPI connection."""
         if not self.account_info.connected:
             return False
+        api = self._active_api()
+        method = self.account_info.connection_method or "OpenAPI+"
         try:
-            if self.kiwoom_api.is_connected():
+            if api.is_connected():
                 return True
-            message = "키움 OpenAPI+ 연결이 종료되어 자동운용과 주문을 중지했습니다."
-        except KiwoomOpenApiError as exc:
-            message = f"키움 OpenAPI+ 연결 확인 실패로 자동운용과 주문을 중지했습니다: {exc}"
+            message = f"키움 {method} 연결이 종료되어 자동운용과 주문을 중지했습니다."
+        except API_ERRORS as exc:
+            message = f"키움 {method} 연결 확인 실패로 자동운용과 주문을 중지했습니다: {exc}"
 
-        self.account_info = KiwoomAccountInfo(False, [], message=message)
+        if self.connection_mode == "REST":
+            self.rest_api.clear_session()
+        self.account_info = KiwoomAccountInfo(
+            False,
+            [],
+            message=message,
+            connection_method=method,
+        )
         self._clear_live_trading_state()
         self.last_api_message = message
         self.storage.log("ERROR", "계좌", message)
@@ -186,6 +236,7 @@ class AutoTradingService:
                 message=info.message or "키움 로그인 정보 수신 확인에 실패했습니다.",
                 reported_account_count=info.reported_account_count,
                 login_event_code=info.login_event_code,
+                connection_method=info.connection_method,
             )
         expected = self.expected_user_id.casefold()
         actual = info.user_id.strip().casefold()
@@ -199,6 +250,7 @@ class AutoTradingService:
                 message="앱에서 확인할 키움 ID를 입력한 뒤 OpenAPI+ 로그인을 시작해 주세요.",
                 reported_account_count=info.reported_account_count,
                 login_event_code=info.login_event_code,
+                connection_method=info.connection_method,
             )
         if not actual or actual != expected:
             return KiwoomAccountInfo(
@@ -210,6 +262,7 @@ class AutoTradingService:
                 message="OpenAPI+ 로그인 ID가 앱에서 입력한 ID와 일치하지 않아 연결을 차단했습니다.",
                 reported_account_count=info.reported_account_count,
                 login_event_code=info.login_event_code,
+                connection_method=info.connection_method,
             )
         return info
 
@@ -225,9 +278,12 @@ class AutoTradingService:
 
     def account_login_status(self) -> str:
         try:
-            return self.kiwoom_api.login_status_message()
-        except KiwoomOpenApiError as exc:
+            return self._active_api().login_status_message()
+        except API_ERRORS as exc:
             return str(exc)
+
+    def _active_api(self):
+        return self.rest_api if self.connection_mode == "REST" else self.kiwoom_api
 
     def lookup_symbol_name(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)
@@ -241,14 +297,15 @@ class AutoTradingService:
         if fallback_name:
             self.symbol_name = fallback_name
 
+        api = self._active_api()
         try:
-            api_name = self.kiwoom_api.lookup_symbol_name(target)
+            api_name = api.lookup_symbol_name(target)
             if api_name:
                 self.symbol_name = api_name
                 self.last_api_message = f"{target} 종목명: {api_name}"
                 self.storage.log("INFO", "종목", self.last_api_message)
                 return api_name
-        except KiwoomOpenApiError as exc:
+        except API_ERRORS as exc:
             if not fallback_name:
                 self.last_api_message = str(exc)
                 self.storage.log("WARN", "종목", self.last_api_message)
@@ -261,8 +318,9 @@ class AutoTradingService:
 
     def request_current_price(self, symbol: str | None = None) -> MarketQuote | None:
         target = normalize_symbol(symbol or self.symbol)
+        api = self._active_api()
         try:
-            self.market_quote = self.kiwoom_api.request_current_price(target)
+            self.market_quote = api.request_current_price(target)
             self.symbol = self.market_quote.symbol or target
             if self.market_quote.name:
                 self.symbol_name = self.market_quote.name
@@ -271,40 +329,46 @@ class AutoTradingService:
             self.last_api_message = self.market_quote.message
             self.storage.log("INFO", "시세", f"{target} 현재가 {self.current_price:,.0f}")
             return self.market_quote
-        except KiwoomOpenApiError as exc:
+        except API_ERRORS as exc:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "시세", self.last_api_message)
             return None
 
     def request_three_minute_candles(self, symbol: str | None = None) -> list[Candle]:
         target = normalize_symbol(symbol or self.symbol)
+        api = self._active_api()
         try:
-            self.candles = self.kiwoom_api.request_minute_candles(target, interval=3, count=120)
+            self.candles = api.request_minute_candles(target, interval=3, count=120)
             self.symbol = target
             if self.candles:
                 self.current_price = self.candles[0].close
             self.last_api_message = f"{target} 3분봉 {len(self.candles)}개 조회 완료"
             self.storage.log("INFO", "시세", self.last_api_message)
             return self.candles
-        except KiwoomOpenApiError as exc:
+        except API_ERRORS as exc:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "시세", self.last_api_message)
             return []
 
-    def evaluate_strategy_with_market_data(self, symbol: str | None = None) -> TradeDecision | None:
+    def evaluate_strategy_with_market_data(
+        self,
+        symbol: str | None = None,
+        pattern_state: PatternState | None = None,
+    ) -> TradeDecision | None:
         candles = self.request_three_minute_candles(symbol)
         if len(candles) < 2:
             self.last_api_message = "전략 판단에 필요한 3분봉 데이터가 부족합니다."
             self.storage.log("WARN", "전략", self.last_api_message)
             return None
-        latest = candles[0]
-        previous = candles[1]
-        pattern: PatternState = "BULLISH" if latest.close >= previous.close else "BEARISH"
+        pattern = pattern_state or self.pattern_state
         ordered_candles = list(reversed(candles))
         decision = self.strategy.evaluate(ordered_candles, pattern)
         self.pattern_state = pattern
         self.last_decision = decision
-        self.last_api_message = f"실제 3분봉 기반 전략 판단: {decision.action} / {decision.reason}"
+        self.last_api_message = (
+            f"강세/약세 입력과 실제 3분봉 CCI 기반 전략 판단: "
+            f"{decision.action} / {decision.reason}"
+        )
         self.storage.log("INFO", "전략", self.last_api_message)
         return decision
 
@@ -312,28 +376,30 @@ class AutoTradingService:
         account = clean_account_number(account)
         if not account and self.account_info.accounts:
             account = clean_account_number(self.account_info.accounts[0])
+        api = self._active_api()
         try:
-            self.balance_summary = self.kiwoom_api.request_balance(account, password=password)
+            self.balance_summary = api.request_balance(account, password=password)
             self.last_api_message = self.balance_summary.message
             self.storage.log(
                 "INFO",
                 "잔고",
-                f"{account} 보유종목 {len(self.balance_summary.holdings)}개 조회 완료",
+                f"{mask_account_number(account)} 보유종목 {len(self.balance_summary.holdings)}개 조회 완료",
             )
             return self.balance_summary
-        except KiwoomOpenApiError as exc:
+        except API_ERRORS as exc:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "잔고", self.last_api_message)
             return None
 
     def register_real_time_price(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)
+        api = self._active_api()
         try:
-            self.last_api_message = self.kiwoom_api.register_real_time_price(target)
+            self.last_api_message = api.register_real_time_price(target)
             self.symbol = target
             self.real_time_symbol = target
             self.storage.log("INFO", "실시간", self.last_api_message)
-        except KiwoomOpenApiError as exc:
+        except API_ERRORS as exc:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "실시간", self.last_api_message)
         return self.last_api_message
@@ -341,19 +407,28 @@ class AutoTradingService:
     def refresh_real_time_quote(self) -> RealTimeQuote | None:
         if not self.real_time_symbol:
             return None
-        self.kiwoom_api.pump_messages()
-        self.real_time_quote = self.kiwoom_api.latest_real_time_quote(self.real_time_symbol)
+        api = self._active_api()
+        try:
+            api.pump_messages()
+            self.real_time_quote = api.latest_real_time_quote(self.real_time_symbol)
+        except API_ERRORS as exc:
+            message = str(exc)
+            if message != self.last_api_message:
+                self.storage.log("ERROR", "실시간", message)
+            self.last_api_message = message
+            return None
         if self.real_time_quote and self.real_time_quote.current_price > 0:
             self.current_price = self.real_time_quote.current_price
         return self.real_time_quote
 
     def unregister_real_time(self) -> str:
+        api = self._active_api()
         try:
-            self.last_api_message = self.kiwoom_api.unregister_real_time()
+            self.last_api_message = api.unregister_real_time()
             self.real_time_symbol = ""
             self.real_time_quote = None
             self.storage.log("INFO", "실시간", self.last_api_message)
-        except KiwoomOpenApiError as exc:
+        except API_ERRORS as exc:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "실시간", self.last_api_message)
         return self.last_api_message
@@ -368,11 +443,30 @@ class AutoTradingService:
         account = clean_account_number(account)
         self.symbol = normalize_symbol(self.symbol) or self.symbol
         result_side = "BUY" if side == "BUY" else "SELL"
+        api = self._active_api()
         try:
             if not account:
                 raise KiwoomOpenApiError("주문할 계좌번호를 입력해 주세요.")
             if not self.symbol:
                 raise KiwoomOpenApiError("주문할 종목번호를 입력해 주세요.")
+            holding_quantity = self._holding_quantity(self.symbol)
+            if result_side == "BUY":
+                risk_check = self.risk.approve_buy(
+                    self.max_capital,
+                    self.current_price,
+                    holding_quantity,
+                )
+                if not risk_check.approved:
+                    raise KiwoomOpenApiError(risk_check.reason)
+                if quantity > risk_check.quantity:
+                    raise KiwoomOpenApiError(
+                        f"주문 수량 {quantity}주는 운용 한도를 초과합니다. "
+                        f"현재가 기준 최대 {risk_check.quantity}주까지 가능합니다."
+                    )
+            elif self.balance_summary is not None and quantity > holding_quantity:
+                raise KiwoomOpenApiError(
+                    f"매도 수량 {quantity}주가 조회된 보유 수량 {holding_quantity}주를 초과합니다."
+                )
             request = KiwoomOrderRequest(
                 account=account,
                 symbol=self.symbol,
@@ -383,7 +477,25 @@ class AutoTradingService:
                 allow_real_order=allow_real_order,
                 require_mock_server=not allow_real_order,
             )
-            self.last_api_message = self.kiwoom_api.send_order(request)
+            max_attempts = (
+                3
+                if result_side == "SELL"
+                and self.account_info.server_type == "모의투자"
+                and not allow_real_order
+                else 1
+            )
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    self.last_api_message = api.send_order(request)
+                    break
+                except API_ERRORS as exc:
+                    if attempt >= max_attempts:
+                        raise
+                    self.storage.log(
+                        "WARN",
+                        "주문",
+                        f"모의 매도 요청 실패({attempt}/{max_attempts}): {exc} / 재시도합니다.",
+                    )
             self.storage.save_order_result(
                 OrderResult(
                     self.symbol,
@@ -396,7 +508,7 @@ class AutoTradingService:
                 )
             )
             self.storage.log("WARN" if allow_real_order else "INFO", "주문", self.last_api_message)
-        except KiwoomOpenApiError as exc:
+        except API_ERRORS as exc:
             self.last_api_message = str(exc)
             self.storage.save_order_result(
                 OrderResult(
@@ -417,8 +529,9 @@ class AutoTradingService:
         account: str,
         quantity: int,
         allow_real_order: bool = False,
+        pattern_state: PatternState | None = None,
     ) -> TradeDecision | None:
-        decision = self.evaluate_strategy_with_market_data(self.symbol)
+        decision = self.evaluate_strategy_with_market_data(self.symbol, pattern_state)
         if decision is None:
             return None
 

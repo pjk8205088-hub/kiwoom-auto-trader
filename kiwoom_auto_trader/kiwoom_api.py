@@ -150,6 +150,7 @@ class KiwoomAccountInfo:
     message: str = ""
     reported_account_count: int = 0
     login_event_code: int | None = None
+    connection_method: str = "OpenAPI+"
 
     @property
     def account_count(self) -> int:
