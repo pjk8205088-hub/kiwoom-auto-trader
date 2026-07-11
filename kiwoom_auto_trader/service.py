@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from random import uniform
 
 from .broker import BrokerClient, MockBroker
@@ -10,6 +11,7 @@ from .models import (
     Candle,
     KiwoomOrderRequest,
     MarketQuote,
+    OrderResult,
     PatternState,
     RealTimeQuote,
     StrategySettings,
@@ -19,6 +21,7 @@ from .order_manager import OrderManager
 from .risk import RiskManager
 from .storage import Storage
 from .strategy import StrategyEngine
+from .symbols import clean_account_number, known_symbol_name, normalize_symbol
 
 
 @dataclass
@@ -26,6 +29,7 @@ class ServiceSnapshot:
     connection: str
     running: bool
     symbol: str
+    symbol_name: str
     pattern: PatternState
     price: float
     quantity: int
@@ -55,6 +59,7 @@ class AutoTradingService:
         self.account_info = KiwoomAccountInfo(False, [], message="키움 계좌가 연결되지 않았습니다.")
         self.running = False
         self.symbol = "005930"
+        self.symbol_name = known_symbol_name(self.symbol)
         self.max_capital = 1_000_000.0
         self.current_price = 72_000.0
         self.pattern_state: PatternState = "NONE"
@@ -72,9 +77,15 @@ class AutoTradingService:
         max_capital: float,
         settings: StrategySettings,
     ) -> None:
-        self.symbol = symbol.strip() or "005930"
+        previous_symbol = self.symbol
+        next_symbol = normalize_symbol(symbol) or "005930"
+        if next_symbol != previous_symbol or self.strategy.settings != settings:
+            self.strategy = StrategyEngine(settings)
+        self.symbol = next_symbol
+        fallback_name = known_symbol_name(self.symbol)
+        if fallback_name:
+            self.symbol_name = fallback_name
         self.max_capital = max_capital
-        self.strategy = StrategyEngine(settings)
         self.storage.log("INFO", "설정", f"{self.symbol} 설정을 저장했습니다.")
 
     def start(self) -> None:
@@ -115,10 +126,43 @@ class AutoTradingService:
         self.storage.log("INFO", "계좌", self.account_info.message)
         return self.account_info
 
+    def lookup_symbol_name(self, symbol: str | None = None) -> str:
+        target = normalize_symbol(symbol or self.symbol)
+        if not target:
+            self.symbol_name = ""
+            self.last_api_message = "종목번호를 입력해 주세요."
+            return ""
+
+        self.symbol = target
+        fallback_name = known_symbol_name(target)
+        if fallback_name:
+            self.symbol_name = fallback_name
+
+        try:
+            api_name = self.kiwoom_api.lookup_symbol_name(target)
+            if api_name:
+                self.symbol_name = api_name
+                self.last_api_message = f"{target} 종목명: {api_name}"
+                self.storage.log("INFO", "종목", self.last_api_message)
+                return api_name
+        except KiwoomOpenApiError as exc:
+            if not fallback_name:
+                self.last_api_message = str(exc)
+                self.storage.log("WARN", "종목", self.last_api_message)
+                return ""
+
+        if fallback_name:
+            self.last_api_message = f"{target} 종목명: {fallback_name}"
+            self.storage.log("INFO", "종목", self.last_api_message)
+        return self.symbol_name
+
     def request_current_price(self, symbol: str | None = None) -> MarketQuote | None:
-        target = (symbol or self.symbol).strip()
+        target = normalize_symbol(symbol or self.symbol)
         try:
             self.market_quote = self.kiwoom_api.request_current_price(target)
+            self.symbol = self.market_quote.symbol or target
+            if self.market_quote.name:
+                self.symbol_name = self.market_quote.name
             if self.market_quote.current_price > 0:
                 self.current_price = self.market_quote.current_price
             self.last_api_message = self.market_quote.message
@@ -130,9 +174,10 @@ class AutoTradingService:
             return None
 
     def request_three_minute_candles(self, symbol: str | None = None) -> list[Candle]:
-        target = (symbol or self.symbol).strip()
+        target = normalize_symbol(symbol or self.symbol)
         try:
             self.candles = self.kiwoom_api.request_minute_candles(target, interval=3, count=120)
+            self.symbol = target
             if self.candles:
                 self.current_price = self.candles[0].close
             self.last_api_message = f"{target} 3분봉 {len(self.candles)}개 조회 완료"
@@ -161,6 +206,9 @@ class AutoTradingService:
         return decision
 
     def request_balance(self, account: str, password: str = "") -> BalanceSummary | None:
+        account = clean_account_number(account)
+        if not account and self.account_info.accounts:
+            account = clean_account_number(self.account_info.accounts[0])
         try:
             self.balance_summary = self.kiwoom_api.request_balance(account, password=password)
             self.last_api_message = self.balance_summary.message
@@ -176,9 +224,10 @@ class AutoTradingService:
             return None
 
     def register_real_time_price(self, symbol: str | None = None) -> str:
-        target = (symbol or self.symbol).strip()
+        target = normalize_symbol(symbol or self.symbol)
         try:
             self.last_api_message = self.kiwoom_api.register_real_time_price(target)
+            self.symbol = target
             self.real_time_symbol = target
             self.storage.log("INFO", "실시간", self.last_api_message)
         except KiwoomOpenApiError as exc:
@@ -213,11 +262,18 @@ class AutoTradingService:
         quantity: int,
         allow_real_order: bool = False,
     ) -> str:
+        account = clean_account_number(account)
+        self.symbol = normalize_symbol(self.symbol) or self.symbol
+        result_side = "BUY" if side == "BUY" else "SELL"
         try:
+            if not account:
+                raise KiwoomOpenApiError("주문할 계좌번호를 입력해 주세요.")
+            if not self.symbol:
+                raise KiwoomOpenApiError("주문할 종목번호를 입력해 주세요.")
             request = KiwoomOrderRequest(
                 account=account,
                 symbol=self.symbol,
-                side="BUY" if side == "BUY" else "SELL",
+                side=result_side,
                 quantity=quantity,
                 price=0,
                 hoga="03",
@@ -225,11 +281,66 @@ class AutoTradingService:
                 require_mock_server=not allow_real_order,
             )
             self.last_api_message = self.kiwoom_api.send_order(request)
+            self.storage.save_order_result(
+                OrderResult(
+                    self.symbol,
+                    result_side,
+                    quantity,
+                    self.current_price,
+                    True,
+                    self.last_api_message,
+                    datetime.now(),
+                )
+            )
             self.storage.log("WARN" if allow_real_order else "INFO", "주문", self.last_api_message)
         except KiwoomOpenApiError as exc:
             self.last_api_message = str(exc)
+            self.storage.save_order_result(
+                OrderResult(
+                    self.symbol,
+                    result_side,
+                    quantity,
+                    self.current_price,
+                    False,
+                    self.last_api_message,
+                    datetime.now(),
+                )
+            )
             self.storage.log("ERROR", "주문", self.last_api_message)
         return self.last_api_message
+
+    def evaluate_and_send_order_with_market_data(
+        self,
+        account: str,
+        quantity: int,
+        allow_real_order: bool = False,
+    ) -> TradeDecision | None:
+        decision = self.evaluate_strategy_with_market_data(self.symbol)
+        if decision is None:
+            return None
+
+        if decision.action == "HOLD":
+            self.storage.log("INFO", "자동주문", "전략 판단 결과 대기라 주문하지 않았습니다.")
+            return decision
+
+        if decision.action == "BUY":
+            existing_quantity = self._holding_quantity(self.symbol)
+            check = self.risk.approve_buy(self.max_capital, self.current_price, existing_quantity)
+            if not check.approved:
+                self.last_api_message = check.reason
+                self.storage.log("WARN", "위험관리", check.reason)
+                return decision
+            order_quantity = min(max(1, quantity), check.quantity)
+        else:
+            order_quantity = self._holding_quantity(self.symbol) or max(1, quantity)
+
+        self.send_kiwoom_order(
+            account=account,
+            side=decision.action,
+            quantity=order_quantity,
+            allow_real_order=allow_real_order,
+        )
+        return decision
 
     def step(self, pattern_state: PatternState, price: float | None = None) -> TradeDecision:
         if price is not None and price > 0:
@@ -251,6 +362,7 @@ class AutoTradingService:
             connection=self.broker.connection_status(),
             running=self.running,
             symbol=self.symbol,
+            symbol_name=self.symbol_name,
             pattern=self.pattern_state,
             price=self.current_price,
             quantity=position.quantity,
@@ -284,3 +396,11 @@ class AutoTradingService:
         self.candles.append(Candle(high=high, low=low, close=close))
         if len(self.candles) > 200:
             self.candles = self.candles[-200:]
+
+    def _holding_quantity(self, symbol: str) -> int:
+        target = normalize_symbol(symbol)
+        if self.balance_summary:
+            for holding in self.balance_summary.holdings:
+                if normalize_symbol(holding.symbol) == target:
+                    return holding.quantity
+        return self.broker.get_position(target).quantity

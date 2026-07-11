@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from .models import BalanceSummary, Candle, Holding, KiwoomOrderRequest, MarketQuote, RealTimeQuote
+from .symbols import normalize_symbol
 
 try:
     import pythoncom
@@ -201,7 +202,7 @@ class KiwoomOpenApiClient:
         return self.get_server_gubun() == "1"
 
     def request_current_price(self, symbol: str) -> MarketQuote:
-        symbol = symbol.strip()
+        symbol = normalize_symbol(symbol)
         if not symbol:
             raise KiwoomOpenApiError("종목코드를 입력해 주세요.")
         return self._request_tr(
@@ -212,7 +213,7 @@ class KiwoomOpenApiClient:
         )
 
     def request_minute_candles(self, symbol: str, interval: int = 3, count: int = 60) -> list[Candle]:
-        symbol = symbol.strip()
+        symbol = normalize_symbol(symbol)
         if not symbol:
             raise KiwoomOpenApiError("종목코드를 입력해 주세요.")
         interval = max(1, int(interval))
@@ -255,7 +256,7 @@ class KiwoomOpenApiClient:
 
     def register_real_time_price(self, symbol: str, screen_no: str = "9001") -> str:
         api = self._ensure_api()
-        symbol = symbol.strip()
+        symbol = normalize_symbol(symbol)
         if not symbol:
             raise KiwoomOpenApiError("실시간 등록 종목코드를 입력해 주세요.")
         result = api.SetRealReg(screen_no, symbol, "10;11;12;13;20", "0")
@@ -269,7 +270,17 @@ class KiwoomOpenApiClient:
         return "실시간 시세 등록을 해제했습니다."
 
     def latest_real_time_quote(self, symbol: str) -> RealTimeQuote | None:
-        return self._real_quotes.get(symbol.strip())
+        return self._real_quotes.get(normalize_symbol(symbol))
+
+    def lookup_symbol_name(self, symbol: str) -> str:
+        api = self._ensure_api()
+        normalized = normalize_symbol(symbol)
+        if not normalized:
+            raise KiwoomOpenApiError("종목코드를 입력해 주세요.")
+        try:
+            return str(api.GetMasterCodeName(normalized) or "").strip()
+        except Exception as exc:  # pragma: no cover - depends on COM runtime.
+            raise KiwoomOpenApiError(f"종목명 조회 실패: {exc}") from exc
 
     def send_order(self, request: KiwoomOrderRequest) -> str:
         api = self._ensure_api()
@@ -286,12 +297,13 @@ class KiwoomOpenApiClient:
 
         order_type = 1 if request.side == "BUY" else 2
         rqname = "모의매수주문" if request.side == "BUY" else "모의매도주문"
+        symbol = normalize_symbol(request.symbol)
         result = api.SendOrder(
             rqname,
             self._next_screen_no(),
             request.account,
             order_type,
-            request.symbol,
+            symbol,
             int(request.quantity),
             int(request.price),
             request.hoga,

@@ -27,6 +27,13 @@ class FakeKiwoomApi:
         }
         return values.get(tag, "")
 
+    def GetMasterCodeName(self, code):
+        values = {
+            "005930": "삼성전자",
+            "009150": "삼성전기",
+        }
+        return values.get(code, "")
+
     def SetInputValue(self, key, value):
         self.inputs[key] = value
 
@@ -133,6 +140,15 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
 
         self.assertIn("등록", message)
         self.assertEqual(fake.real_reg_calls[0][1], "005930")
+
+    def test_looks_up_symbol_name(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        name = client.lookup_symbol_name("00915")
+
+        self.assertEqual(name, "삼성전기")
 
     def test_sends_mock_market_order(self):
         fake = FakeKiwoomApi()
