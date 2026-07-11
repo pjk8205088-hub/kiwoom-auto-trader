@@ -103,6 +103,14 @@ class KiwoomRestApiClientTests(unittest.TestCase):
                 ),
                 response(
                     {
+                        "entr": "300000",
+                        "ord_alow_amt": "250000",
+                        "pymn_alow_amt": "200000",
+                        "d2_entra": "280000",
+                    }
+                ),
+                response(
+                    {
                         "tot_pur_amt": "700000",
                         "tot_evlt_amt": "720000",
                         "tot_evlt_pl": "20000",
@@ -146,8 +154,14 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertEqual(quote.name, "삼성전자")
         self.assertEqual(quote.current_price, 72000)
         self.assertEqual(candles[0].timestamp, "20260711120000")
+        self.assertEqual(balance.deposit, 300000)
+        self.assertEqual(balance.orderable_amount, 250000)
+        self.assertEqual(balance.withdrawable_amount, 200000)
+        self.assertEqual(balance.d2_estimated_deposit, 280000)
         self.assertEqual(balance.holdings[0].quantity, 10)
         self.assertIn("0000123", order_message)
+        cash_call = next(call for call in requester.calls if call[2]["api-id"] == "kt00001")
+        self.assertEqual(cash_call[3], {"qry_tp": "3"})
         self.assertEqual(requester.calls[-1][2]["api-id"], "kt10000")
 
     def test_blocks_real_order_flags(self):

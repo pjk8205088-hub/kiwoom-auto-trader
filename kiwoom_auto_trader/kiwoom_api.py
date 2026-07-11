@@ -5,11 +5,12 @@ import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from .charting import SUPPORTED_MINUTE_INTERVALS
 from .models import (
+    AccountCash,
     BalanceSummary,
     Candle,
     Holding,
@@ -55,6 +56,11 @@ LOGIN_WINDOW_TITLE_NEEDLES = (
     "khopenapi",
 )
 LOGIN_WINDOW_FOCUS_ATTEMPTS = 12
+
+
+def is_valid_account_password(password: str) -> bool:
+    value = str(password or "").strip()
+    return value.isdigit() and 4 <= len(value) <= 8
 
 
 class KiwoomRequestLimiter:
@@ -425,18 +431,38 @@ class KiwoomOpenApiClient:
         account = account.strip()
         if not account:
             raise KiwoomOpenApiError("잔고 조회 계좌번호를 입력해 주세요.")
-        return self._request_tr(
+        password = password.strip()
+        if not is_valid_account_password(password):
+            raise KiwoomOpenApiError("계좌 비밀번호는 숫자 4~8자리로 입력해 주세요.")
+        inputs = {
+            "계좌번호": account,
+            "비밀번호": password,
+            "비밀번호입력매체구분": password_media_type,
+            "조회구분": query_type,
+        }
+        cash = self._request_tr(
+            "예수금상세현황조회",
+            "opw00001",
+            inputs,
+            lambda trcode, rqname, record_name: self._parse_account_cash(
+                trcode, rqname, record_name, account
+            ),
+        )
+        balance = self._request_tr(
             "계좌잔고조회",
             "opw00018",
-            {
-                "계좌번호": account,
-                "비밀번호": password,
-                "비밀번호입력매체구분": password_media_type,
-                "조회구분": query_type,
-            },
+            inputs,
             lambda trcode, rqname, record_name: self._parse_balance(
                 trcode, rqname, record_name, account
             ),
+        )
+        return replace(
+            balance,
+            deposit=cash.deposit,
+            orderable_amount=cash.orderable_amount,
+            withdrawable_amount=cash.withdrawable_amount,
+            d2_estimated_deposit=cash.d2_estimated_deposit,
+            message="계좌 예수금 및 잔고 조회 완료",
         )
 
     def register_real_time_price(self, symbol: str, screen_no: str = "9001") -> str:
@@ -764,6 +790,31 @@ class KiwoomOpenApiClient:
             estimated_assets=_to_price(self._get_comm_data(trcode, record_name, 0, "추정예탁자산")),
             holdings=tuple(holdings),
             message="계좌 잔고 조회 완료",
+        )
+
+    def _parse_account_cash(
+        self,
+        trcode: str,
+        rqname: str,
+        record_name: str,
+        account: str,
+    ) -> AccountCash:
+        del rqname
+
+        def amount(*labels: str) -> float:
+            for label in labels:
+                raw_value = self._get_comm_data(trcode, record_name, 0, label)
+                if raw_value:
+                    return _to_number(raw_value)
+            return 0.0
+
+        return AccountCash(
+            account=account,
+            deposit=amount("예수금"),
+            orderable_amount=amount("주문가능금액"),
+            withdrawable_amount=amount("출금가능금액"),
+            d2_estimated_deposit=amount("d+2추정예수금", "D+2추정예수금"),
+            message="계좌 예수금 조회 완료",
         )
 
     def _get_comm_data(self, trcode: str, record_name: str, index: int, item: str) -> str:

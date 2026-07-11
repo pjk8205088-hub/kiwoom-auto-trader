@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 from .charting import SUPPORTED_MINUTE_INTERVALS
 from .kiwoom_api import KiwoomAccountInfo
 from .models import (
+    AccountCash,
     BalanceSummary,
     Candle,
     Holding,
@@ -325,6 +326,7 @@ class KiwoomRestApiClient:
         account = clean_account_number(account) or self._account
         if not account or account != self._account:
             raise KiwoomRestApiError("REST API 토큰의 계좌번호와 선택 계좌가 일치하지 않습니다.")
+        cash = self.request_account_cash(account)
         body = self._post(
             "kt00018",
             "/api/dostk/acnt",
@@ -349,13 +351,35 @@ class KiwoomRestApiClient:
                 )
         return BalanceSummary(
             account=account,
+            deposit=cash.deposit,
+            orderable_amount=cash.orderable_amount,
+            withdrawable_amount=cash.withdrawable_amount,
+            d2_estimated_deposit=cash.d2_estimated_deposit,
             total_purchase=_number(body.get("tot_pur_amt")),
             total_evaluation=_number(body.get("tot_evlt_amt")),
             total_profit_loss=_number(body.get("tot_evlt_pl")),
             total_profit_rate=_number(body.get("tot_prft_rt")),
             estimated_assets=_number(body.get("prsm_dpst_aset_amt")),
             holdings=tuple(holdings),
-            message="REST API 계좌평가잔고 조회 완료",
+            message="REST API 예수금 및 계좌평가잔고 조회 완료",
+        )
+
+    def request_account_cash(self, account: str) -> AccountCash:
+        account = clean_account_number(account) or self._account
+        if not account or account != self._account:
+            raise KiwoomRestApiError("REST API 토큰의 계좌번호와 선택 계좌가 일치하지 않습니다.")
+        body = self._post(
+            "kt00001",
+            "/api/dostk/acnt",
+            {"qry_tp": "3"},
+        )
+        return AccountCash(
+            account=account,
+            deposit=_number(body.get("entr")),
+            orderable_amount=_number(body.get("ord_alow_amt")),
+            withdrawable_amount=_number(body.get("pymn_alow_amt")),
+            d2_estimated_deposit=_number(body.get("d2_entra")),
+            message="REST API 예수금 조회 완료",
         )
 
     def register_real_time_price(self, symbol: str, screen_no: str = "") -> str:

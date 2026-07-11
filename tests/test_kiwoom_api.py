@@ -1,10 +1,11 @@
 import unittest
 
-from kiwoom_auto_trader.models import MarketQuote
+from kiwoom_auto_trader.models import AccountCash, BalanceSummary, MarketQuote
 from kiwoom_auto_trader.kiwoom_api import (
     KiwoomOpenApiClient,
     KiwoomOpenApiError,
     KiwoomRequestLimiter,
+    is_valid_account_password,
 )
 
 
@@ -81,6 +82,10 @@ class FakeKiwoomApi:
             "총평가손익금액": "20000",
             "총수익률(%)": "2.8",
             "추정예탁자산": "1000000",
+            "예수금": "300000",
+            "주문가능금액": "250000",
+            "출금가능금액": "200000",
+            "d+2추정예수금": "280000",
         }
         return values.get(item, "")
 
@@ -219,6 +224,52 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(balance.account, "1234567890")
         self.assertEqual(len(balance.holdings), 1)
         self.assertEqual(balance.holdings[0].symbol, "005930")
+
+    def test_parses_openapi_deposit_fields(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        cash = client._parse_account_cash("opw00001", "예수금상세현황조회", "", "1234567890")
+
+        self.assertEqual(cash.deposit, 300000)
+        self.assertEqual(cash.orderable_amount, 250000)
+        self.assertEqual(cash.withdrawable_amount, 200000)
+        self.assertEqual(cash.d2_estimated_deposit, 280000)
+
+    def test_accepts_only_four_to_eight_digit_account_passwords(self):
+        self.assertFalse(is_valid_account_password("123"))
+        self.assertTrue(is_valid_account_password("1234"))
+        self.assertTrue(is_valid_account_password("12345678"))
+        self.assertFalse(is_valid_account_password("123456789"))
+        self.assertFalse(is_valid_account_password("12ab"))
+
+    def test_combines_openapi_deposit_and_holding_balance(self):
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: FakeKiwoomApi())
+        calls = []
+
+        def request_tr(rqname, trcode, inputs, parser):
+            del parser
+            calls.append((rqname, trcode, inputs.copy()))
+            if trcode == "opw00001":
+                return AccountCash(
+                    account="1234567890",
+                    deposit=300000,
+                    orderable_amount=250000,
+                    withdrawable_amount=200000,
+                    d2_estimated_deposit=280000,
+                )
+            return BalanceSummary(account="1234567890", estimated_assets=1000000)
+
+        client._request_tr = request_tr
+
+        balance = client.request_balance("1234567890", password="1234")
+
+        self.assertEqual([call[1] for call in calls], ["opw00001", "opw00018"])
+        self.assertEqual(calls[0][2]["비밀번호"], "1234")
+        self.assertEqual(balance.deposit, 300000)
+        self.assertEqual(balance.estimated_assets, 1000000)
+        self.assertEqual(balance.message, "계좌 예수금 및 잔고 조회 완료")
 
     def test_registers_real_time_price(self):
         fake = FakeKiwoomApi()

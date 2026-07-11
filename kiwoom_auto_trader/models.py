@@ -94,6 +94,16 @@ class WatchlistQuote:
 
 
 @dataclass(frozen=True)
+class AccountCash:
+    account: str
+    deposit: float = 0.0
+    orderable_amount: float = 0.0
+    withdrawable_amount: float = 0.0
+    d2_estimated_deposit: float = 0.0
+    message: str = ""
+
+
+@dataclass(frozen=True)
 class Holding:
     symbol: str
     name: str
@@ -107,6 +117,10 @@ class Holding:
 @dataclass(frozen=True)
 class BalanceSummary:
     account: str
+    deposit: float = 0.0
+    orderable_amount: float = 0.0
+    withdrawable_amount: float = 0.0
+    d2_estimated_deposit: float = 0.0
     total_purchase: float = 0.0
     total_evaluation: float = 0.0
     total_profit_loss: float = 0.0

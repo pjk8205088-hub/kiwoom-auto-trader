@@ -5,10 +5,20 @@ from pathlib import Path
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
 from kiwoom_auto_trader.models import Candle, WatchlistQuote
 from kiwoom_auto_trader.service import ServiceSnapshot
-from kiwoom_auto_trader.ui import KiwoomRestLoginDialog, TraderApp
+from kiwoom_auto_trader.ui import (
+    KiwoomRestLoginDialog,
+    TraderApp,
+    _account_password_input_allowed,
+)
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_limits_account_password_input_to_eight_digits(self):
+        self.assertTrue(_account_password_input_allowed(""))
+        self.assertTrue(_account_password_input_allowed("12345678"))
+        self.assertFalse(_account_password_input_allowed("123456789"))
+        self.assertFalse(_account_password_input_allowed("12ab"))
+
     def test_reads_single_line_key_file_without_persisting_path(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "account_appkey.txt"

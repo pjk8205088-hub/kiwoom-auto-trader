@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 from .charting import moving_average, timeframe_label
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
+    is_valid_account_password,
 )
 from .models import Candle, DmiPoint, PatternState, StrategySettings, WatchlistQuote
 from .rest_api import KIWOOM_REST_PORTAL
@@ -32,6 +33,10 @@ SIDE_LABELS = {"BUY": "매수", "SELL": "매도"}
 LEVEL_LABELS = {"INFO": "정보", "WARN": "주의", "ERROR": "오류"}
 REST_LIVE_LABEL = "실전투자 (조회 전용)"
 REST_MOCK_LABEL = "모의투자"
+
+
+def _account_password_input_allowed(value: str) -> bool:
+    return not value or (value.isdigit() and len(value) <= 8)
 
 
 class KiwoomLoginDialog(tk.Toplevel):
@@ -454,12 +459,14 @@ class TraderApp(tk.Tk):
             justify="center",
             state="readonly",
         ).pack(side="left", padx=(2, 8))
-        ttk.Label(kiwoom_controls, text="계좌 비밀번호(저장 안 함)").pack(side="left")
+        ttk.Label(kiwoom_controls, text="계좌 비밀번호(숫자 4~8자리·저장 안 함)").pack(side="left")
         self.account_password_entry = ttk.Entry(
             kiwoom_controls,
             textvariable=self.account_password_var,
             width=10,
             show="*",
+            validate="key",
+            validatecommand=(self.register(_account_password_input_allowed), "%P"),
         )
         self.account_password_entry.pack(side="left", padx=(4, 8))
         ttk.Label(kiwoom_controls, text="시장가 주문 수량").pack(side="left")
@@ -515,7 +522,13 @@ class TraderApp(tk.Tk):
         body.rowconfigure(1, weight=1)
 
         self.status_text = tk.StringVar(value="")
-        ttk.Label(body, textvariable=self.account_summary_var, font=("Malgun Gothic", 10)).grid(
+        ttk.Label(
+            body,
+            textvariable=self.account_summary_var,
+            font=("Malgun Gothic", 10),
+            wraplength=1120,
+            justify="left",
+        ).grid(
             row=0, column=0, sticky="ew", pady=(0, 10)
         )
 
@@ -1190,7 +1203,12 @@ class TraderApp(tk.Tk):
             self.service.request_chart_candles(3, self.symbol_var.get())
             self.service.register_real_time_price(self.symbol_var.get())
             if self._account_for_api():
-                self.service.request_balance(self._account_for_api(), self.account_password_var.get())
+                password = self._balance_password()
+                if password is not None:
+                    try:
+                        self.service.request_balance(self._account_for_api(), password)
+                    finally:
+                        self.account_password_var.set("")
         self._refresh()
         login_failed = self.service.kiwoom_api.last_login_error not in (None, 0)
         identity_rejected = bool(account_info.user_id and not account_info.connected)
@@ -1260,8 +1278,25 @@ class TraderApp(tk.Tk):
     def _request_balance(self) -> None:
         if not self._require_live_connection():
             return
-        self.service.request_balance(self._account_for_api(), self.account_password_var.get())
+        password = self._balance_password()
+        if password is None:
+            self.service.last_api_message = "계좌 비밀번호는 숫자 4~8자리로 입력해 주세요."
+            self._refresh()
+            self.account_password_entry.focus_set()
+            return
+        try:
+            balance = self.service.request_balance(self._account_for_api(), password)
+        finally:
+            self.account_password_var.set("")
         self._refresh()
+        if balance is not None:
+            self._show_account_info_window(refresh=True)
+
+    def _balance_password(self) -> str | None:
+        if self.service.account_info.connection_method == "REST API":
+            return ""
+        password = self.account_password_var.get().strip()
+        return password if is_valid_account_password(password) else None
 
     def _register_real_time(self) -> None:
         if not self._require_live_connection():
@@ -1945,7 +1980,9 @@ class TraderApp(tk.Tk):
         return (
             f"계좌 창: {connection_method} 연결됨({snapshot.account_info.server_type}) | "
             f"선택 계좌 {mask_account_number(balance.account)} | "
-            f"보유 {len(balance.holdings)}종목 | 추정예탁자산 {balance.estimated_assets:,.0f} | "
+            f"예수금 {balance.deposit:,.0f}원 | 주문가능 {balance.orderable_amount:,.0f}원 | "
+            f"출금가능 {balance.withdrawable_amount:,.0f}원 | 보유 {len(balance.holdings)}종목 | "
+            f"추정예탁자산 {balance.estimated_assets:,.0f}원 | "
             f"평가금액 {balance.total_evaluation:,.0f} | 평가손익 {balance.total_profit_loss:,.0f} | "
             f"수익률 {balance.total_profit_rate:.2f}%"
         )
@@ -2047,19 +2084,21 @@ class TraderApp(tk.Tk):
                 outline="#808080",
             )
 
-    def _show_account_info_window(self) -> None:
+    def _show_account_info_window(self, refresh: bool = False) -> None:
         snapshot = self.service.snapshot()
         account_info = snapshot.account_info
         if not account_info.connected:
             return
         if self._account_info_window is not None and self._account_info_window.winfo_exists():
-            self._account_info_window.lift()
-            return
+            if not refresh:
+                self._account_info_window.lift()
+                return
+            self._account_info_window.destroy()
 
         window = tk.Toplevel(self)
         self._account_info_window = window
         window.title("키움 계좌정보")
-        window.geometry("650x390")
+        window.geometry("680x590")
         window.resizable(False, False)
         window.transient(self)
         window.protocol("WM_DELETE_WINDOW", window.destroy)
@@ -2086,7 +2125,7 @@ class TraderApp(tk.Tk):
             ("접속 서버", account_info.server_type or "확인 필요"),
             ("고객명", account_info.user_name or "확인 필요"),
             ("사용자 ID", account_info.user_id or "확인 필요"),
-            ("선택 계좌", mask_account_number(self._account_for_api() or self._selected_account_full)),
+            ("API 확인 계좌", mask_account_number(self._account_for_api() or self._selected_account_full)),
             (
                 "계좌 수",
                 f"{len(account_info.accounts)}개 (키움 보고 {account_info.reported_account_count}개)",
@@ -2094,19 +2133,57 @@ class TraderApp(tk.Tk):
             ("정보 활용", self._account_capability_label(account_info)),
         ]
         if snapshot.balance_summary:
+            balance = snapshot.balance_summary
             rows.extend(
                 [
-                    ("보유 종목", f"{len(snapshot.balance_summary.holdings)}종목"),
-                    ("추정예탁자산", f"{snapshot.balance_summary.estimated_assets:,.0f}"),
+                    ("예수금", f"{balance.deposit:,.0f}원"),
+                    ("주문가능금액", f"{balance.orderable_amount:,.0f}원"),
+                    ("출금가능금액", f"{balance.withdrawable_amount:,.0f}원"),
+                    ("D+2 추정예수금", f"{balance.d2_estimated_deposit:,.0f}원"),
+                    ("보유 종목", f"{len(balance.holdings)}종목"),
+                    ("추정예탁자산", f"{balance.estimated_assets:,.0f}원"),
                 ]
             )
+        else:
+            balance_help = (
+                "연결 상태 확인 후 계좌잔고 불러오기를 눌러 주세요."
+                if account_info.connection_method == "REST API"
+                else "계좌 비밀번호 입력 후 잔고 불러오기를 눌러 주세요."
+            )
+            rows.append(("계좌 금액", balance_help))
 
         for row_index, (label, value) in enumerate(rows, start=1):
             ttk.Label(body, text=label, width=14).grid(row=row_index, column=0, sticky="w", pady=3)
             ttk.Label(body, text=value, width=48).grid(row=row_index, column=1, sticky="w", pady=3)
 
+        action_row = len(rows) + 1
+        if account_info.connection_method != "REST API":
+            cash_actions = ttk.Frame(body)
+            cash_actions.grid(
+                row=action_row,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+                pady=(12, 0),
+            )
+            ttk.Label(cash_actions, text="계좌 비밀번호(숫자 4~8자리)").pack(side="left")
+            ttk.Entry(
+                cash_actions,
+                textvariable=self.account_password_var,
+                width=10,
+                show="*",
+                validate="key",
+                validatecommand=(self.register(_account_password_input_allowed), "%P"),
+            ).pack(side="left", padx=(6, 8))
+            ttk.Button(
+                cash_actions,
+                text="예수금·잔고 조회",
+                command=self._request_balance,
+            ).pack(side="left")
+            action_row += 1
+
         ttk.Button(body, text="닫기", command=window.destroy).grid(
-            row=len(rows) + 1, column=0, columnspan=2, sticky="e", pady=(14, 0)
+            row=action_row, column=0, columnspan=2, sticky="e", pady=(14, 0)
         )
 
     @staticmethod
