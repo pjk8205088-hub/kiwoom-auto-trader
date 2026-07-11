@@ -495,7 +495,7 @@ class TraderApp(tk.Tk):
         ready_row.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
         self.chart_button = ttk.Button(
             ready_row,
-            text="3분봉 그래프 보기",
+            text="DMI 차트 확대",
             command=self._show_candle_chart,
         )
         self.chart_button.pack(side="left")
@@ -504,28 +504,81 @@ class TraderApp(tk.Tk):
         body = ttk.Frame(self, padding=12)
         body.grid(row=2, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
-        body.columnconfigure(1, weight=1)
-        body.columnconfigure(2, weight=1)
         body.rowconfigure(1, weight=1)
 
         self.status_text = tk.StringVar(value="")
         ttk.Label(body, textvariable=self.account_summary_var, font=("Malgun Gothic", 10)).grid(
-            row=0, column=0, columnspan=3, sticky="ew", pady=(0, 12)
+            row=0, column=0, sticky="ew", pady=(0, 10)
         )
 
+        self.main_notebook = ttk.Notebook(body)
+        self.main_notebook.grid(row=1, column=0, sticky="nsew")
+
+        self.dmi_chart_tab = ttk.Frame(self.main_notebook, padding=(10, 10, 10, 8))
+        self.dmi_chart_tab.columnconfigure(0, weight=1)
+        self.dmi_chart_tab.rowconfigure(1, weight=1)
+        self.main_notebook.add(self.dmi_chart_tab, text="DMI 강/약 차트")
+
+        chart_header = ttk.Frame(self.dmi_chart_tab)
+        chart_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        chart_header.columnconfigure(0, weight=1)
+        self.chart_caption_var = tk.StringVar(value="키움 3분봉 | DMI 강세·약세 전환")
+        ttk.Label(
+            chart_header,
+            textvariable=self.chart_caption_var,
+            font=("Malgun Gothic", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+
+        legend = ttk.Frame(chart_header)
+        legend.grid(row=0, column=1, sticky="e")
+        tk.Label(
+            legend,
+            text="강세 (+DI 우세)",
+            bg="#fde4e9",
+            fg="#8d1d50",
+            padx=7,
+            pady=2,
+        ).pack(side="left")
+        tk.Label(
+            legend,
+            text="약세 (-DI 우세)",
+            bg="#e3f2fb",
+            fg="#17618f",
+            padx=7,
+            pady=2,
+        ).pack(side="left", padx=(5, 10))
+        tk.Label(legend, text="+DI", fg="#d92787").pack(side="left")
+        tk.Label(legend, text="-DI", fg="#1686b8").pack(side="left", padx=(7, 0))
+        tk.Label(legend, text="ADX", fg="#555555").pack(side="left", padx=(7, 0))
+
+        self.main_chart_canvas = tk.Canvas(
+            self.dmi_chart_tab,
+            background="#ffffff",
+            highlightthickness=1,
+            highlightbackground="#c8c8c8",
+        )
+        self.main_chart_canvas.grid(row=1, column=0, sticky="nsew")
+        self.main_chart_canvas.bind("<Configure>", lambda _event: self._draw_main_dmi_chart())
+
+        self.operations_tab = ttk.Frame(self.main_notebook, padding=(8, 10, 8, 8))
+        for column in range(3):
+            self.operations_tab.columnconfigure(column, weight=1)
+        self.operations_tab.rowconfigure(0, weight=1)
+        self.main_notebook.add(self.operations_tab, text="계좌·주문·로그")
+
         self.holdings = self._table(
-            body,
+            self.operations_tab,
             "계좌 잔고",
             ("종목번호", "종목명", "보유", "평균", "현재가", "평가손익", "수익률"),
             0,
         )
         self.orders = self._table(
-            body,
+            self.operations_tab,
             "최근 주문/요청 결과",
             ("시간", "종목", "구분", "수량", "가격", "결과", "메시지"),
             1,
         )
-        self.logs = self._table(body, "시스템 로그", ("시간", "레벨", "분류", "메시지"), 2)
+        self.logs = self._table(self.operations_tab, "시스템 로그", ("시간", "레벨", "분류", "메시지"), 2)
 
     def _field(self, parent: ttk.Frame, label: str, variable: tk.StringVar, column: int) -> None:
         ttk.Label(parent, text=label).grid(row=0, column=column, sticky="w")
@@ -535,7 +588,7 @@ class TraderApp(tk.Tk):
 
     def _table(self, parent: ttk.Frame, title: str, columns: tuple[str, ...], column: int) -> ttk.Treeview:
         frame = ttk.LabelFrame(parent, text=title, padding=8)
-        frame.grid(row=1, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0))
+        frame.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0))
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
         table = ttk.Treeview(frame, columns=columns, show="headings", height=16)
@@ -745,6 +798,7 @@ class TraderApp(tk.Tk):
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.request_three_minute_candles(self.symbol_var.get())
         self._refresh()
+        self.main_notebook.select(self.dmi_chart_tab)
 
     def _request_balance(self) -> None:
         if not self._require_live_connection():
@@ -771,6 +825,7 @@ class TraderApp(tk.Tk):
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.evaluate_strategy_with_market_data(self.symbol_var.get())
         self._refresh()
+        self.main_notebook.select(self.dmi_chart_tab)
 
     def _show_candle_chart(self) -> None:
         if not self._require_live_connection():
@@ -808,7 +863,7 @@ class TraderApp(tk.Tk):
             highlightbackground="#c8c8c8",
         )
         canvas.pack(fill="both", expand=True)
-        chronological = list(reversed(candles))
+        chronological = self._chronological_candles(candles)
         canvas.bind(
             "<Configure>",
             lambda _event: self._draw_candle_chart(canvas, chronological),
@@ -820,9 +875,31 @@ class TraderApp(tk.Tk):
             self._candle_chart_window.destroy()
         self._candle_chart_window = None
 
+    def _draw_main_dmi_chart(self) -> None:
+        candles = self._chronological_candles(self.service.candles)
+        self._draw_candle_chart(self.main_chart_canvas, candles)
+
+    @staticmethod
+    def _chronological_candles(candles: list[Candle]) -> list[Candle]:
+        def timestamp_key(candle: Candle) -> str:
+            return "".join(character for character in candle.timestamp if character.isdigit())
+
+        if not candles or not all(timestamp_key(candle) for candle in candles):
+            return list(candles)
+        return sorted(candles, key=timestamp_key)
+
     def _draw_candle_chart(self, canvas: tk.Canvas, candles: list[Candle]) -> None:
         canvas.delete("all")
         if not candles:
+            width = max(1, canvas.winfo_width())
+            height = max(1, canvas.winfo_height())
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="DMI 데이터 대기",
+                fill="#777777",
+                font=("Malgun Gothic", 12),
+            )
             return
 
         width = max(720, canvas.winfo_width())
@@ -1056,11 +1133,16 @@ class TraderApp(tk.Tk):
             self.symbol_name_var.set(snapshot.symbol_name)
         self.account_summary_var.set(self._format_account_summary(snapshot))
         self.trade_ready_var.set(self._format_trade_ready(snapshot))
+        self.chart_caption_var.set(
+            f"{snapshot.symbol} {snapshot.symbol_name} | 키움 3분봉 | "
+            f"DMI({self.service.strategy.settings.dmi_period}) | {len(self.service.candles)}개"
+        )
         self._update_trade_buttons()
         holdings = list(snapshot.balance_summary.holdings) if snapshot.balance_summary else []
         self._replace_rows(self.holdings, self._format_holdings(holdings))
         self._replace_rows(self.orders, self._format_orders(snapshot.orders))
         self._replace_rows(self.logs, self._format_logs(snapshot.logs))
+        self.after_idle(self._draw_main_dmi_chart)
         self._schedule_auto_tick()
 
     def _update_dmi_display(self, dmi: DmiPoint | None) -> None:

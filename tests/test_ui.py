@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
+from kiwoom_auto_trader.models import Candle
 from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import KiwoomRestLoginDialog, TraderApp
 
@@ -91,6 +92,20 @@ class UiHelperTests(unittest.TestCase):
         self.assertNotIn("MOCK_CONNECTED", status)
         self.assertNotIn("내부 테스트", status)
         self.assertNotIn("1234-5678", status)
+
+    def test_orders_api_candles_chronologically_for_the_main_chart(self):
+        candles = [
+            Candle(110, 90, 100, 98, timestamp="20260711120600"),
+            Candle(108, 88, 96, 95, timestamp="20260711120000"),
+            Candle(109, 89, 98, 96, timestamp="20260711120300"),
+        ]
+
+        ordered = TraderApp._chronological_candles(candles)
+
+        self.assertEqual(
+            [candle.timestamp for candle in ordered],
+            ["20260711120000", "20260711120300", "20260711120600"],
+        )
 
 
 if __name__ == "__main__":
