@@ -12,7 +12,7 @@ from .kiwoom_api import (
     KIWOOM_OPENAPI_INSTALLER,
     KIWOOM_OPENAPI_PAGE,
 )
-from .models import PatternState, StrategySettings
+from .models import Candle, PatternState, StrategySettings
 from .service import AutoTradingService
 from .storage import Storage
 from .symbols import clean_account_number, mask_account_number, normalize_symbol
@@ -100,6 +100,7 @@ class TraderApp(tk.Tk):
         self._account_poll_count = 0
         self._selected_account_full = ""
         self._account_info_window: tk.Toplevel | None = None
+        self._candle_chart_window: tk.Toplevel | None = None
         self._build_ui()
         self._refresh()
 
@@ -274,9 +275,15 @@ class TraderApp(tk.Tk):
             side="left",
             padx=4,
         )
-        ttk.Label(controls, textvariable=self.trade_ready_var).grid(
-            row=5, column=0, columnspan=9, sticky="ew", pady=(8, 0)
+        ready_row = ttk.Frame(controls)
+        ready_row.grid(row=5, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+        self.chart_button = ttk.Button(
+            ready_row,
+            text="3분봉 그래프 보기",
+            command=self._show_candle_chart,
         )
+        self.chart_button.pack(side="left")
+        ttk.Label(ready_row, textvariable=self.trade_ready_var).pack(side="left", padx=(10, 0))
 
         body = ttk.Frame(self, padding=12)
         body.grid(row=2, column=0, sticky="nsew")
@@ -512,6 +519,139 @@ class TraderApp(tk.Tk):
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.evaluate_strategy_with_market_data(self.symbol_var.get())
         self._refresh()
+
+    def _show_candle_chart(self) -> None:
+        if not self._require_live_connection():
+            return
+        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        candles = self.service.request_three_minute_candles(self.symbol_var.get())
+        self._refresh()
+        if not candles:
+            messagebox.showwarning("3분봉 데이터 없음", "키움에서 3분봉 데이터를 받지 못했습니다.")
+            return
+
+        self._close_candle_chart()
+        window = tk.Toplevel(self)
+        self._candle_chart_window = window
+        window.title(f"키움 3분봉 그래프 - {self.service.symbol} {self.service.symbol_name}")
+        window.geometry("920x520")
+        window.minsize(680, 420)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", self._close_candle_chart)
+
+        body = ttk.Frame(window, padding=12)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=f"{self.service.symbol} {self.service.symbol_name} | 키움 opt10080 최근 3분봉",
+            font=("Malgun Gothic", 13, "bold"),
+        ).pack(anchor="w", pady=(0, 8))
+        canvas = tk.Canvas(
+            body,
+            background="#ffffff",
+            highlightthickness=1,
+            highlightbackground="#c8c8c8",
+        )
+        canvas.pack(fill="both", expand=True)
+        chronological = list(reversed(candles[:80]))
+        canvas.bind(
+            "<Configure>",
+            lambda _event: self._draw_candle_chart(canvas, chronological),
+        )
+        window.after_idle(lambda: self._draw_candle_chart(canvas, chronological))
+
+    def _close_candle_chart(self) -> None:
+        if self._candle_chart_window is not None and self._candle_chart_window.winfo_exists():
+            self._candle_chart_window.destroy()
+        self._candle_chart_window = None
+
+    def _draw_candle_chart(self, canvas: tk.Canvas, candles: list[Candle]) -> None:
+        canvas.delete("all")
+        if not candles:
+            return
+
+        width = max(640, canvas.winfo_width())
+        height = max(340, canvas.winfo_height())
+        left_pad, right_pad, top_pad, bottom_pad = 70, 28, 24, 52
+        plot_width = max(1, width - left_pad - right_pad)
+        plot_height = max(1, height - top_pad - bottom_pad)
+        lowest = min(min(candle.low, candle.open or candle.close, candle.close) for candle in candles)
+        highest = max(max(candle.high, candle.open or candle.close, candle.close) for candle in candles)
+        price_span = max(1.0, highest - lowest)
+
+        def price_y(price: float) -> float:
+            return top_pad + ((highest - price) / price_span) * plot_height
+
+        canvas.create_line(left_pad, top_pad, left_pad, top_pad + plot_height, fill="#808080")
+        canvas.create_line(
+            left_pad,
+            top_pad + plot_height,
+            left_pad + plot_width,
+            top_pad + plot_height,
+            fill="#808080",
+        )
+        canvas.create_text(8, top_pad, text=f"{highest:,.0f}", anchor="w", fill="#333333")
+        canvas.create_text(
+            8,
+            top_pad + plot_height,
+            text=f"{lowest:,.0f}",
+            anchor="w",
+            fill="#333333",
+        )
+
+        step = plot_width / max(1, len(candles))
+        body_width = max(2.0, min(8.0, step * 0.58))
+        for index, candle in enumerate(candles):
+            x = left_pad + step * (index + 0.5)
+            open_price = candle.open or candle.close
+            color = "#d64545" if candle.close >= open_price else "#2f62bd"
+            canvas.create_line(x, price_y(candle.high), x, price_y(candle.low), fill=color, width=1)
+            open_y = price_y(open_price)
+            close_y = price_y(candle.close)
+            top = min(open_y, close_y)
+            bottom = max(open_y, close_y)
+            if bottom - top < 1:
+                bottom = top + 1
+            canvas.create_rectangle(
+                x - body_width / 2,
+                top,
+                x + body_width / 2,
+                bottom,
+                fill=color,
+                outline=color,
+            )
+
+        latest = candles[-1]
+        latest_y = price_y(latest.close)
+        canvas.create_line(
+            left_pad,
+            latest_y,
+            left_pad + plot_width,
+            latest_y,
+            fill="#555555",
+            dash=(4, 3),
+        )
+        canvas.create_text(
+            left_pad + plot_width,
+            latest_y - 8,
+            text=f"현재 {latest.close:,.0f}",
+            anchor="e",
+            fill="#222222",
+        )
+
+        label_indexes = sorted({0, len(candles) // 2, len(candles) - 1})
+        for index in label_indexes:
+            timestamp = candles[index].timestamp
+            digits = "".join(char for char in timestamp if char.isdigit())
+            label = f"{digits[-6:-4]}:{digits[-4:-2]}" if len(digits) >= 6 else timestamp[-8:]
+            x = left_pad + step * (index + 0.5)
+            canvas.create_text(
+                x,
+                top_pad + plot_height + 22,
+                text=label or f"{index + 1}",
+                anchor="n",
+                fill="#555555",
+            )
 
     def _send_order(self, side: str) -> None:
         if not self._require_live_connection():
@@ -768,6 +908,8 @@ class TraderApp(tk.Tk):
         self.buy_button.configure(state=state)
         self.sell_button.configure(state=state)
         self.strategy_order_button.configure(state=state)
+        chart_state = "normal" if self.service.account_info.connected else "disabled"
+        self.chart_button.configure(state=chart_state)
 
     def _require_live_connection(self) -> bool:
         if self._ensure_live_connection():
@@ -784,6 +926,7 @@ class TraderApp(tk.Tk):
         if self._account_info_window is not None and self._account_info_window.winfo_exists():
             self._account_info_window.destroy()
         self._account_info_window = None
+        self._close_candle_chart()
         self._update_connection_badge(False)
         self._update_trade_buttons()
         return False

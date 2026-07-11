@@ -1,6 +1,10 @@
 import unittest
 
-from kiwoom_auto_trader.kiwoom_api import KiwoomOpenApiClient, KiwoomRequestLimiter
+from kiwoom_auto_trader.kiwoom_api import (
+    KiwoomOpenApiClient,
+    KiwoomOpenApiError,
+    KiwoomRequestLimiter,
+)
 
 
 class FakeClock:
@@ -20,13 +24,14 @@ class FakeKiwoomApi:
     def __init__(self):
         self.connected = 0
         self.login_called = False
+        self.comm_connect_result = 0
         self.inputs = {}
         self.order_calls = []
         self.real_reg_calls = []
 
     def CommConnect(self):
         self.login_called = True
-        return 0
+        return self.comm_connect_result
 
     def GetConnectState(self):
         return self.connected
@@ -96,12 +101,31 @@ class FakeKiwoomApi:
 class KiwoomOpenApiClientTests(unittest.TestCase):
     def test_starts_login_with_comm_connect(self):
         fake = FakeKiwoomApi()
-        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+        nudged = []
+        client = KiwoomOpenApiClient(
+            dispatch_factory=lambda: fake,
+            login_window_nudger=lambda: nudged.append(True),
+        )
 
         message = client.start_login()
 
         self.assertTrue(fake.login_called)
-        self.assertIn("로그인 창", message)
+        self.assertEqual(client.last_comm_connect_result, 0)
+        self.assertEqual(nudged, [True])
+        self.assertIn("반환코드 0", message)
+
+    def test_reports_comm_connect_failure_code(self):
+        fake = FakeKiwoomApi()
+        fake.comm_connect_result = -101
+        client = KiwoomOpenApiClient(
+            dispatch_factory=lambda: fake,
+            login_window_nudger=lambda: None,
+        )
+
+        with self.assertRaises(KiwoomOpenApiError) as caught:
+            client.start_login()
+
+        self.assertIn("반환코드 -101", str(caught.exception))
 
     def test_reads_account_info_after_connection(self):
         fake = FakeKiwoomApi()

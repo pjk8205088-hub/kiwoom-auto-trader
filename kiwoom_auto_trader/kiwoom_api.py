@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import struct
+import threading
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -39,6 +41,14 @@ KIWOOM_LOGIN_ERRORS = {
     -101: "키움 서버에 연결할 수 없습니다.",
     -102: "버전 정보가 맞지 않습니다. OpenAPI+ 모듈을 업데이트해 주세요.",
 }
+LOGIN_WINDOW_TITLE_NEEDLES = (
+    "open api login",
+    "openapi login",
+    "open api 로그인",
+    "키움증권 open api",
+    "khopenapi",
+)
+LOGIN_WINDOW_FOCUS_ATTEMPTS = 12
 
 
 class KiwoomRequestLimiter:
@@ -162,6 +172,7 @@ class KiwoomOpenApiClient:
         self,
         dispatch_factory: Callable[[], Any] | None = None,
         request_limiter: KiwoomRequestLimiter | None = None,
+        login_window_nudger: Callable[[], None] | None = None,
     ) -> None:
         self._dispatch_factory = dispatch_factory
         self._api: Any | None = None
@@ -170,6 +181,9 @@ class KiwoomOpenApiClient:
         self._tr_parsers: dict[str, Callable[[str, str, str], Any]] = {}
         self._real_quotes: dict[str, RealTimeQuote] = {}
         self._last_login_error: int | None = None
+        self._last_comm_connect_result: int | None = None
+        self._login_window_status = ""
+        self._login_window_nudger = login_window_nudger or self._nudge_login_window_to_front
         self._request_limiter = request_limiter or KiwoomRequestLimiter()
 
     def check_environment(self) -> KiwoomEnvironmentStatus:
@@ -225,10 +239,30 @@ class KiwoomOpenApiClient:
             return "이미 키움 OpenAPI에 연결되어 있습니다."
 
         self._last_login_error = None
-        result = api.CommConnect()
-        if result not in (0, None):
-            raise KiwoomOpenApiError(f"CommConnect 호출 실패: {result}")
-        return "키움 로그인 창을 열었습니다. 로그인 완료 후 계좌를 조회합니다."
+        self._last_comm_connect_result = None
+        self._login_window_status = "키움 OpenAPI+ 로그인 창을 찾는 중입니다."
+        try:
+            result = self._call_api(lambda: api.CommConnect())
+        except Exception as exc:
+            raise KiwoomOpenApiError(f"CommConnect 호출 중 오류가 발생했습니다: {exc}") from exc
+        try:
+            self._last_comm_connect_result = 0 if result is None else int(result)
+        except (TypeError, ValueError) as exc:
+            raise KiwoomOpenApiError(f"CommConnect 반환코드를 해석할 수 없습니다: {result}") from exc
+        if self._last_comm_connect_result != 0:
+            raise KiwoomOpenApiError(
+                f"CommConnect 호출 실패 (반환코드 {self._last_comm_connect_result}). "
+                "키움 OpenAPI+ 서비스 사용신청, 모듈 설치와 버전을 확인해 주세요."
+            )
+        try:
+            self._login_window_nudger()
+        except Exception:
+            self._login_window_status = "로그인 창 전면 표시 보조 기능을 시작하지 못했습니다."
+        return (
+            "키움 로그인 창 요청을 완료했습니다 "
+            f"(CommConnect 반환코드 {self._last_comm_connect_result}). "
+            "공식 로그인 창에서 인증을 완료해 주세요."
+        )
 
     def is_connected(self) -> bool:
         api = self._ensure_api()
@@ -292,12 +326,25 @@ class KiwoomOpenApiClient:
     def last_login_error(self) -> int | None:
         return self._last_login_error
 
+    @property
+    def last_comm_connect_result(self) -> int | None:
+        return self._last_comm_connect_result
+
+    @property
+    def login_window_status(self) -> str:
+        return self._login_window_status
+
     def login_status_message(self) -> str:
         self.pump_messages()
         if self.is_connected():
             return f"키움 로그인 완료 ({self.get_server_name()} 서버)"
         if self._last_login_error is None:
-            return "키움 로그인 진행 중입니다. 로그인 창에서 인증을 완료해 주세요."
+            details = ["키움 로그인 진행 중입니다. 공식 로그인 창에서 인증을 완료해 주세요."]
+            if self._last_comm_connect_result is not None:
+                details.append(f"CommConnect 반환코드 {self._last_comm_connect_result}")
+            if self._login_window_status:
+                details.append(self._login_window_status)
+            return " | ".join(details)
         detail = KIWOOM_LOGIN_ERRORS.get(
             self._last_login_error,
             "알 수 없는 로그인 오류가 발생했습니다.",
@@ -416,6 +463,98 @@ class KiwoomOpenApiClient:
         if result != 0:
             raise KiwoomOpenApiError(f"SendOrder 호출 실패: {result}")
         return f"{rqname} 요청을 전송했습니다."
+
+    def _nudge_login_window_to_front(self) -> None:
+        thread = threading.Thread(
+            target=self._focus_login_window_worker,
+            name="KiwoomLoginWindowFocus",
+            daemon=True,
+        )
+        thread.start()
+
+    def _focus_login_window_worker(self) -> None:
+        try:
+            import win32api
+            import win32con
+            import win32gui
+            import win32process
+        except Exception:
+            self._login_window_status = "로그인 창 전면 표시 기능을 사용할 수 없습니다."
+            return
+
+        current_pid = os.getpid()
+        found = False
+
+        def _show_matching_window(hwnd: int, _: Any) -> bool:
+            nonlocal found
+            try:
+                _, process_id = win32process.GetWindowThreadProcessId(hwnd)
+                title = str(win32gui.GetWindowText(hwnd) or "").strip()
+            except Exception:
+                return True
+            if process_id != current_pid:
+                return True
+            lowered_title = title.casefold()
+            title_matches = any(
+                needle in lowered_title for needle in LOGIN_WINDOW_TITLE_NEEDLES
+            ) or lowered_title in {"로그인", "키움 로그인"}
+            if not title_matches:
+                return True
+
+            found = True
+            try:
+                left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+                monitor = win32api.MonitorFromWindow(hwnd, win32con.MONITOR_DEFAULTTONEAREST)
+                work_left, work_top, work_right, work_bottom = win32api.GetMonitorInfo(monitor)[
+                    "Work"
+                ]
+                width = max(320, right - left)
+                height = max(240, bottom - top)
+                is_offscreen = (
+                    right <= work_left
+                    or left >= work_right
+                    or bottom <= work_top
+                    or top >= work_bottom
+                )
+                if is_offscreen:
+                    left = work_left + max(0, (work_right - work_left - width) // 2)
+                    top = work_top + max(0, (work_bottom - work_top - height) // 2)
+                    win32gui.SetWindowPos(
+                        hwnd,
+                        win32con.HWND_TOP,
+                        left,
+                        top,
+                        width,
+                        height,
+                        win32con.SWP_SHOWWINDOW,
+                    )
+
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                flags = win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW
+                win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 0, 0, 0, 0, flags)
+                win32gui.SetWindowPos(hwnd, win32con.HWND_NOTOPMOST, 0, 0, 0, 0, flags)
+                win32gui.BringWindowToTop(hwnd)
+                win32gui.SetForegroundWindow(hwnd)
+            except Exception:
+                pass
+            return True
+
+        for _ in range(LOGIN_WINDOW_FOCUS_ATTEMPTS):
+            found = False
+            try:
+                win32gui.EnumWindows(_show_matching_window, None)
+            except Exception:
+                self._login_window_status = "로그인 창 탐색 중 Windows 오류가 발생했습니다."
+                return
+            if found:
+                self._login_window_status = "키움 OpenAPI+ 로그인 창을 화면 앞으로 표시했습니다."
+                return
+            time.sleep(0.25)
+
+        self._login_window_status = (
+            "CommConnect는 성공했지만 OpenAPI+ 로그인 창을 찾지 못했습니다. "
+            "작업 표시줄과 다른 모니터를 확인해 주세요."
+        )
 
     def pump_messages(self) -> None:
         if pythoncom is not None:
