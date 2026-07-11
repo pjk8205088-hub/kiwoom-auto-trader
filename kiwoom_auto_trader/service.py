@@ -57,6 +57,7 @@ class AutoTradingService:
         self.order_manager = OrderManager(self.broker, self.storage)
         self.kiwoom_api = KiwoomOpenApiClient()
         self.account_info = KiwoomAccountInfo(False, [], message="키움 계좌가 연결되지 않았습니다.")
+        self.expected_user_id = ""
         self.running = False
         self.symbol = "005930"
         self.symbol_name = known_symbol_name(self.symbol)
@@ -89,6 +90,7 @@ class AutoTradingService:
         self.storage.log("INFO", "설정", f"{self.symbol} 설정을 저장했습니다.")
 
     def start(self) -> None:
+        self.order_manager.resume()
         self.running = True
         self.storage.log("INFO", "시스템", "자동 운용을 시작했습니다.")
 
@@ -101,7 +103,14 @@ class AutoTradingService:
         self.stop()
         self.storage.log("ERROR", "시스템", "긴급 정지가 요청되었습니다.")
 
-    def start_account_connection(self) -> str:
+    def start_account_connection(self, expected_user_id: str = "") -> str:
+        self.expected_user_id = expected_user_id.strip()
+        self.account_info = KiwoomAccountInfo(
+            False,
+            [],
+            message="키움 OpenAPI+ 로그인과 사용자 ID 확인을 기다리고 있습니다.",
+        )
+        self._clear_live_trading_state()
         try:
             message = self.kiwoom_api.start_login()
             self.storage.log("INFO", "계좌", message)
@@ -117,7 +126,7 @@ class AutoTradingService:
         message = status.message
         if status.active_x_available:
             try:
-                self.account_info = self.kiwoom_api.get_account_info()
+                self.account_info = self._verify_account_info(self.kiwoom_api.get_account_info())
                 message = self.account_info.message
             except KiwoomOpenApiError as exc:
                 self.account_info = KiwoomAccountInfo(False, [], message=str(exc))
@@ -128,18 +137,76 @@ class AutoTradingService:
         return message
 
     def refresh_account_connection(self) -> KiwoomAccountInfo:
+        previous_message = self.account_info.message
         try:
-            self.account_info = self.kiwoom_api.get_account_info()
+            raw_info = self.kiwoom_api.get_account_info()
+            self.account_info = self._verify_account_info(raw_info)
             if not self.account_info.connected:
-                self.account_info = KiwoomAccountInfo(
-                    False,
-                    [],
-                    message=self.kiwoom_api.login_status_message(),
-                )
+                if raw_info.connected:
+                    self._clear_live_trading_state()
+                else:
+                    self.account_info = KiwoomAccountInfo(
+                        False,
+                        [],
+                        message=self.kiwoom_api.login_status_message(),
+                    )
         except KiwoomOpenApiError as exc:
             self.account_info = KiwoomAccountInfo(False, [], message=str(exc))
-        self.storage.log("INFO", "계좌", self.account_info.message)
+        if self.account_info.message != previous_message:
+            self.storage.log("INFO", "계좌", self.account_info.message)
         return self.account_info
+
+    def sync_account_connection(self) -> bool:
+        """Keep the UI/order gate aligned with the live OpenAPI connection."""
+        if not self.account_info.connected:
+            return False
+        try:
+            if self.kiwoom_api.is_connected():
+                return True
+            message = "키움 OpenAPI+ 연결이 종료되어 자동운용과 주문을 중지했습니다."
+        except KiwoomOpenApiError as exc:
+            message = f"키움 OpenAPI+ 연결 확인 실패로 자동운용과 주문을 중지했습니다: {exc}"
+
+        self.account_info = KiwoomAccountInfo(False, [], message=message)
+        self._clear_live_trading_state()
+        self.last_api_message = message
+        self.storage.log("ERROR", "계좌", message)
+        return False
+
+    def _verify_account_info(self, info: KiwoomAccountInfo) -> KiwoomAccountInfo:
+        if not info.connected:
+            return info
+        expected = self.expected_user_id.casefold()
+        actual = info.user_id.strip().casefold()
+        if not expected:
+            return KiwoomAccountInfo(
+                False,
+                [],
+                user_id=info.user_id,
+                user_name=info.user_name,
+                server_type=info.server_type,
+                message="앱에서 확인할 키움 ID를 입력한 뒤 OpenAPI+ 로그인을 시작해 주세요.",
+            )
+        if not actual or actual != expected:
+            return KiwoomAccountInfo(
+                False,
+                [],
+                user_id=info.user_id,
+                user_name=info.user_name,
+                server_type=info.server_type,
+                message="OpenAPI+ 로그인 ID가 앱에서 입력한 ID와 일치하지 않아 연결을 차단했습니다.",
+            )
+        return info
+
+    def _clear_live_trading_state(self) -> None:
+        self.running = False
+        self.order_manager.request_stop()
+        self.market_quote = None
+        self.balance_summary = None
+        self.real_time_symbol = ""
+        self.real_time_quote = None
+        self.candles = []
+        self.last_decision = None
 
     def account_login_status(self) -> str:
         try:

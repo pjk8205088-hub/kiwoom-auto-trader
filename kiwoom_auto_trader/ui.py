@@ -34,9 +34,8 @@ class KiwoomLoginDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("키움 ID 로그인")
         self.resizable(False, False)
-        self.result: tuple[str, str] | None = None
+        self.result: str | None = None
         self.user_id_var = tk.StringVar(value=default_user_id)
-        self.password_var = tk.StringVar(value="")
 
         self.transient(parent)
         self.grab_set()
@@ -49,39 +48,39 @@ class KiwoomLoginDialog(tk.Toplevel):
         ttk.Label(body, text="ID").grid(row=1, column=0, sticky="w", pady=(0, 8))
         user_entry = ttk.Entry(body, textvariable=self.user_id_var, width=28)
         user_entry.grid(row=1, column=1, sticky="ew", pady=(0, 8))
-        ttk.Label(body, text="비밀번호").grid(row=2, column=0, sticky="w", pady=(0, 8))
-        password_entry = ttk.Entry(body, textvariable=self.password_var, width=28, show="*")
-        password_entry.grid(row=2, column=1, sticky="ew", pady=(0, 8))
         ttk.Label(
             body,
-            text="로그인을 누르면 키움 OpenAPI+ 공식 로그인 절차를 시작합니다. 홈페이지 로그인과 별도이며, 비밀번호는 저장하지 않습니다.",
+            text=(
+                "다음에 열리는 키움 OpenAPI+ 공식 창에서 ID, 비밀번호, 인증서를 입력하세요. "
+                "앱은 비밀번호를 받거나 저장하지 않으며, 로그인된 ID가 위 ID와 일치할 때만 연결합니다."
+            ),
             wraplength=360,
             foreground="#555555",
-        ).grid(row=3, column=0, columnspan=2, sticky="ew", pady=(2, 14))
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(2, 14))
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=4, column=0, columnspan=2, sticky="ew")
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew")
         buttons.columnconfigure(0, weight=1)
         ttk.Button(
             buttons,
             text="키움 홈페이지 열기",
             command=lambda: webbrowser.open(KIWOOM_HOME_PAGE),
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(buttons, text="로그인", command=self._submit).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(buttons, text="OpenAPI+ 로그인", command=self._submit).grid(
+            row=0, column=1, padx=(8, 0)
+        )
         ttk.Button(buttons, text="취소", command=self._cancel).grid(row=0, column=2, padx=(8, 0))
 
-        password_entry.focus_set()
+        user_entry.focus_set()
         self.bind("<Return>", lambda _event: self._submit())
         self.bind("<Escape>", lambda _event: self._cancel())
         self.protocol("WM_DELETE_WINDOW", self._cancel)
 
     def _submit(self) -> None:
-        self.result = (self.user_id_var.get().strip(), self.password_var.get())
-        self.password_var.set("")
+        self.result = self.user_id_var.get().strip()
         self.destroy()
 
     def _cancel(self) -> None:
-        self.password_var.set("")
         self.result = None
         self.destroy()
 
@@ -345,6 +344,12 @@ class TraderApp(tk.Tk):
 
     def _start(self) -> None:
         self._save_settings()
+        if self.kiwoom_auto_order_var.get():
+            if not self._require_live_connection():
+                return
+            if not self._trading_ready():
+                messagebox.showwarning("자동운용 준비 필요", self.trade_ready_var.get())
+                return
         self.service.start()
         self._refresh()
 
@@ -361,21 +366,18 @@ class TraderApp(tk.Tk):
         self.wait_window(dialog)
         if dialog.result is None:
             return
-        user_id, password = dialog.result
+        user_id = dialog.result
         if not user_id:
             messagebox.showwarning("로그인 ID 필요", "키움 ID를 입력해 주세요.")
             return
-        if not password:
-            messagebox.showwarning("비밀번호 필요", "비밀번호를 입력해 주세요.")
-            return
-        self.service.storage.log("INFO", "계좌", f"키움 ID {user_id}로 OpenAPI 로그인을 요청합니다.")
-        self._connect_account()
+        self.service.storage.log("INFO", "계좌", "입력한 ID와 OpenAPI+ 로그인 ID 확인을 시작합니다.")
+        self._connect_account(user_id)
 
-    def _connect_account(self) -> None:
+    def _connect_account(self, expected_user_id: str) -> None:
         self.account_button.configure(state="disabled")
         self._update_connection_badge(False)
         self._account_poll_count = 0
-        message = self.service.start_account_connection()
+        message = self.service.start_account_connection(expected_user_id)
         self.status_text.set(f"키움 계좌 연결: {message}")
         if "로그인 창" in message or "이미" in message:
             self._schedule_account_poll()
@@ -449,7 +451,8 @@ class TraderApp(tk.Tk):
                 self.service.request_balance(self._account_for_api(), self.account_password_var.get())
         self._refresh()
         login_failed = self.service.kiwoom_api.last_login_error not in (None, 0)
-        if account_info.connected or login_failed or self._account_poll_count >= 120:
+        identity_rejected = bool(account_info.user_id and not account_info.connected)
+        if account_info.connected or login_failed or identity_rejected or self._account_poll_count >= 120:
             self.account_button.configure(state="normal")
             if account_info.connected:
                 self._show_account_info_window()
@@ -469,34 +472,48 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _request_current_price(self) -> None:
+        if not self._require_live_connection():
+            return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.request_current_price(self.symbol_var.get())
         self._refresh()
 
     def _request_three_minute(self) -> None:
+        if not self._require_live_connection():
+            return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.request_three_minute_candles(self.symbol_var.get())
         self._refresh()
 
     def _request_balance(self) -> None:
+        if not self._require_live_connection():
+            return
         self.service.request_balance(self._account_for_api(), self.account_password_var.get())
         self._refresh()
 
     def _register_real_time(self) -> None:
+        if not self._require_live_connection():
+            return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.register_real_time_price(self.symbol_var.get())
         self._refresh()
 
     def _unregister_real_time(self) -> None:
+        if not self._require_live_connection():
+            return
         self.service.unregister_real_time()
         self._refresh()
 
     def _evaluate_market_strategy(self) -> None:
+        if not self._require_live_connection():
+            return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.evaluate_strategy_with_market_data(self.symbol_var.get())
         self._refresh()
 
     def _send_order(self, side: str) -> None:
+        if not self._require_live_connection():
+            return
         allow_real = self.allow_real_order_var.get()
         if not self._trading_ready():
             messagebox.showwarning("주문 준비 필요", self.trade_ready_var.get())
@@ -513,6 +530,11 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _evaluate_and_send_order(self, auto: bool = False) -> None:
+        if not self._ensure_live_connection():
+            if not auto:
+                messagebox.showwarning("OpenAPI+ 연결 필요", self.service.account_info.message)
+            self._refresh()
+            return
         if not self._trading_ready():
             if not auto:
                 messagebox.showwarning("주문 준비 필요", self.trade_ready_var.get())
@@ -600,9 +622,21 @@ class TraderApp(tk.Tk):
 
     def _auto_tick(self) -> None:
         self._refresh_after_id = None
+        if self.service.account_info.connected and not self._ensure_live_connection():
+            self._refresh()
+            return
         if self.service.running:
-            if self.kiwoom_auto_order_var.get() and self._trading_ready():
-                self._evaluate_and_send_order(auto=True)
+            if self.kiwoom_auto_order_var.get():
+                if self._trading_ready():
+                    self._evaluate_and_send_order(auto=True)
+                else:
+                    self.service.stop()
+                    self.service.storage.log(
+                        "ERROR",
+                        "자동주문",
+                        "OpenAPI+ 연결 또는 주문 준비 상태가 해제되어 자동운용을 중지했습니다.",
+                    )
+                    self._refresh()
             else:
                 self._run_tick()
         else:
@@ -732,6 +766,25 @@ class TraderApp(tk.Tk):
         self.buy_button.configure(state=state)
         self.sell_button.configure(state=state)
         self.strategy_order_button.configure(state=state)
+
+    def _require_live_connection(self) -> bool:
+        if self._ensure_live_connection():
+            return True
+        self._refresh()
+        messagebox.showwarning("OpenAPI+ 연결 필요", self.service.account_info.message)
+        return False
+
+    def _ensure_live_connection(self) -> bool:
+        if self.service.sync_account_connection():
+            return True
+        self._selected_account_full = ""
+        self._set_account_display("")
+        if self._account_info_window is not None and self._account_info_window.winfo_exists():
+            self._account_info_window.destroy()
+        self._account_info_window = None
+        self._update_connection_badge(False)
+        self._update_trade_buttons()
+        return False
 
     def _update_connection_badge(self, connected: bool) -> None:
         if connected:

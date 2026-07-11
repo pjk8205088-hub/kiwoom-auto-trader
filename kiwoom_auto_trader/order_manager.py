@@ -15,6 +15,9 @@ class OrderManager:
     def request_stop(self) -> None:
         self.stop_requested = True
 
+    def resume(self) -> None:
+        self.stop_requested = False
+
     def execute_buy(self, symbol: str, quantity: int, price: float) -> OrderResult:
         result = self.broker.place_market_buy(symbol, quantity, price)
         self.storage.save_order_result(result)
