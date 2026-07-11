@@ -29,6 +29,8 @@ KIWOOM_SETUP_GUIDE = (
     "4) 32비트 실행 파일로 다시 실행"
 )
 DEFAULT_TR_TIMEOUT_SECONDS = 10.0
+DEFAULT_COM_RETRY_SECONDS = 8.0
+COM_CALL_REJECTED = -2147418113
 KIWOOM_LOGIN_ERRORS = {
     0: "로그인에 성공했습니다.",
     -100: "사용자 정보 교환에 실패했습니다.",
@@ -218,8 +220,7 @@ class KiwoomOpenApiClient:
     def is_connected(self) -> bool:
         api = self._ensure_api()
         try:
-            self.pump_messages()
-            return int(api.GetConnectState()) == 1
+            return int(self._call_api(lambda: api.GetConnectState())) == 1
         except Exception as exc:  # pragma: no cover - depends on COM runtime.
             raise KiwoomOpenApiError(f"연결 상태 확인 실패: {exc}") from exc
 
@@ -228,9 +229,9 @@ class KiwoomOpenApiClient:
         if not self.is_connected():
             return KiwoomAccountInfo(False, [], message="키움 OpenAPI에 아직 연결되지 않았습니다.")
 
-        raw_accounts = str(api.GetLoginInfo("ACCNO") or "")
+        raw_accounts = str(self._call_api(lambda: api.GetLoginInfo("ACCNO")) or "")
         if not raw_accounts:
-            raw_accounts = str(api.GetLoginInfo("ACCLIST") or "")
+            raw_accounts = str(self._call_api(lambda: api.GetLoginInfo("ACCLIST")) or "")
 
         accounts = [account.strip() for account in raw_accounts.split(";") if account.strip()]
         server_type = self.get_server_name()
@@ -240,15 +241,15 @@ class KiwoomOpenApiClient:
         return KiwoomAccountInfo(
             connected=True,
             accounts=accounts,
-            user_id=str(api.GetLoginInfo("USER_ID") or ""),
-            user_name=str(api.GetLoginInfo("USER_NAME") or ""),
+            user_id=str(self._call_api(lambda: api.GetLoginInfo("USER_ID")) or ""),
+            user_name=str(self._call_api(lambda: api.GetLoginInfo("USER_NAME")) or ""),
             server_type=server_type,
             message=message,
         )
 
     def get_server_gubun(self) -> str:
         api = self._ensure_api()
-        value = str(api.GetLoginInfo("GetServerGubun") or "").strip()
+        value = str(self._call_api(lambda: api.GetLoginInfo("GetServerGubun")) or "").strip()
         return value
 
     def is_mock_server(self) -> bool:
@@ -392,6 +393,28 @@ class KiwoomOpenApiClient:
                 pythoncom.PumpWaitingMessages()
             except Exception:
                 pass
+
+    def _call_api(self, call: Callable[[], Any], timeout: float = DEFAULT_COM_RETRY_SECONDS) -> Any:
+        deadline = time.monotonic() + timeout
+        last_error: Exception | None = None
+        while True:
+            self.pump_messages()
+            try:
+                return call()
+            except Exception as exc:  # pragma: no cover - depends on COM runtime.
+                last_error = exc
+                if not self._is_retryable_com_error(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.2)
+        if last_error is not None:
+            raise last_error
+
+    def _is_retryable_com_error(self, exc: Exception) -> bool:
+        if getattr(exc, "hresult", None) == COM_CALL_REJECTED:
+            return True
+        if exc.args and exc.args[0] == COM_CALL_REJECTED:
+            return True
+        return str(COM_CALL_REJECTED) in str(exc)
 
     def _request_tr(
         self,

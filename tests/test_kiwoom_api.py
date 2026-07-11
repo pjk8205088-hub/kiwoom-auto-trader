@@ -114,6 +114,23 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(info.accounts, ["1234567890", "0987654321"])
         self.assertEqual(info.server_type, "모의투자")
 
+    def test_retries_rejected_com_connection_state(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        calls = {"count": 0}
+
+        def busy_once():
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise Exception(-2147418113, "오류입니다.")
+            return fake.connected
+
+        fake.GetConnectState = busy_once
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        self.assertTrue(client.is_connected())
+        self.assertEqual(calls["count"], 2)
+
     def test_environment_check_uses_fake_dispatch(self):
         fake = FakeKiwoomApi()
         client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
