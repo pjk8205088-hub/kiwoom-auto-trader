@@ -57,7 +57,7 @@ class KiwoomLoginDialog(tk.Toplevel):
         buttons = ttk.Frame(body)
         buttons.grid(row=4, column=0, columnspan=2, sticky="e")
         ttk.Button(buttons, text="취소", command=self._cancel).pack(side="right")
-        ttk.Button(buttons, text="로그인창 열기", command=self._submit).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="로그인", command=self._submit).pack(side="right", padx=(0, 8))
 
         password_entry.focus_set()
         self.bind("<Return>", lambda _event: self._submit())
@@ -89,6 +89,7 @@ class TraderApp(tk.Tk):
         self._symbol_lookup_after_id: str | None = None
         self._account_poll_count = 0
         self._selected_account_full = ""
+        self._account_info_window: tk.Toplevel | None = None
         self._build_ui()
         self._refresh()
 
@@ -103,7 +104,7 @@ class TraderApp(tk.Tk):
         ttk.Label(header, text="키움 자동매매 - 계좌/시세/주문 준비", font=("Malgun Gothic", 16, "bold")).grid(
             row=0, column=0, sticky="w"
         )
-        self.account_button = ttk.Button(header, text="키움 ID 로그인", command=self._open_login_dialog)
+        self.account_button = ttk.Button(header, text="키움 로그인", command=self._open_login_dialog)
         self.account_button.grid(row=0, column=1, padx=(0, 8))
         self.connection_badge = tk.Label(
             header,
@@ -342,7 +343,7 @@ class TraderApp(tk.Tk):
         if not password:
             messagebox.showwarning("비밀번호 필요", "비밀번호를 입력해 주세요.")
             return
-        self.service.storage.log("INFO", "계좌", f"키움 ID {user_id}로 OpenAPI 로그인창을 엽니다.")
+        self.service.storage.log("INFO", "계좌", f"키움 ID {user_id}로 OpenAPI 로그인을 요청합니다.")
         self._connect_account()
 
     def _connect_account(self) -> None:
@@ -359,7 +360,13 @@ class TraderApp(tk.Tk):
     def _check_account_environment(self) -> None:
         message = self.service.check_account_environment()
         self.status_text.set(f"키움 연결환경: {message}")
+        if self.service.account_info.accounts:
+            if self._selected_account_full not in self.service.account_info.accounts:
+                self._selected_account_full = self.service.account_info.accounts[0]
+            self._set_account_display(self._selected_account_full)
         self._refresh()
+        if self.service.account_info.connected:
+            self._show_account_info_window()
 
     def _open_kiwoom_openapi_page(self) -> None:
         webbrowser.open(KIWOOM_OPENAPI_PAGE)
@@ -405,6 +412,7 @@ class TraderApp(tk.Tk):
                 self._selected_account_full = account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
         if account_info.connected:
+            self._update_connection_badge(True)
             self.service.lookup_symbol_name(self.symbol_var.get())
             if self._account_for_api():
                 self.service.request_balance(self._account_for_api(), self.account_password_var.get())
@@ -412,6 +420,8 @@ class TraderApp(tk.Tk):
         login_failed = self.service.kiwoom_api.last_login_error not in (None, 0)
         if account_info.connected or login_failed or self._account_poll_count >= 120:
             self.account_button.configure(state="normal")
+            if account_info.connected:
+                self._show_account_info_window()
             return
         self._schedule_account_poll()
 
@@ -694,11 +704,57 @@ class TraderApp(tk.Tk):
 
     def _update_connection_badge(self, connected: bool) -> None:
         if connected:
-            self.connection_state_var.set("ON 키움 연결됨")
+            self.connection_state_var.set("ON 연결됨")
             self.connection_badge.configure(bg="#16833a", fg="white")
         else:
             self.connection_state_var.set("OFF 연결 안됨")
             self.connection_badge.configure(bg="#7a7a7a", fg="white")
+
+    def _show_account_info_window(self) -> None:
+        snapshot = self.service.snapshot()
+        account_info = snapshot.account_info
+        if not account_info.connected:
+            return
+        if self._account_info_window is not None and self._account_info_window.winfo_exists():
+            self._account_info_window.lift()
+            return
+
+        window = tk.Toplevel(self)
+        self._account_info_window = window
+        window.title("키움 계좌정보")
+        window.geometry("420x260")
+        window.resizable(False, False)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+
+        body = ttk.Frame(window, padding=18)
+        body.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(body, text="계좌정보", font=("Malgun Gothic", 15, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
+        )
+        rows = [
+            ("연결 상태", "ON 연결됨"),
+            ("접속 서버", account_info.server_type or "확인 필요"),
+            ("고객명", account_info.user_name or "확인 필요"),
+            ("사용자 ID", account_info.user_id or "확인 필요"),
+            ("선택 계좌", mask_account_number(self._account_for_api() or self._selected_account_full)),
+            ("계좌 수", f"{len(account_info.accounts)}개"),
+        ]
+        if snapshot.balance_summary:
+            rows.extend(
+                [
+                    ("보유 종목", f"{len(snapshot.balance_summary.holdings)}종목"),
+                    ("추정예탁자산", f"{snapshot.balance_summary.estimated_assets:,.0f}"),
+                ]
+            )
+
+        for row_index, (label, value) in enumerate(rows, start=1):
+            ttk.Label(body, text=label, width=14).grid(row=row_index, column=0, sticky="w", pady=3)
+            ttk.Label(body, text=value, width=28).grid(row=row_index, column=1, sticky="w", pady=3)
+
+        ttk.Button(body, text="닫기", command=window.destroy).grid(
+            row=len(rows) + 1, column=0, columnspan=2, sticky="e", pady=(14, 0)
+        )
 
     def _account_for_api(self) -> str:
         entered = clean_account_number(self.account_var.get())
