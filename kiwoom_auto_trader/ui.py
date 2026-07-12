@@ -39,10 +39,6 @@ def _account_password_input_allowed(value: str) -> bool:
     return not value or (value.isdigit() and len(value) <= 8)
 
 
-def _order_quantity_input_allowed(value: str) -> bool:
-    return not value or value.isdigit()
-
-
 def _parse_order_quantity(value: str) -> int:
     text = str(value or "").strip()
     return int(text) if text.isdigit() else 0
@@ -401,6 +397,7 @@ class TraderApp(tk.Tk):
         self.account_last_var = tk.StringVar(value="")
         self.account_password_var = tk.StringVar(value="")
         self.order_qty_var = tk.StringVar(value="0")
+        self.order_qty_display_var = tk.StringVar(value="0주")
         self.allow_real_order_var = tk.BooleanVar(value=False)
         self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
         self.account_summary_var = tk.StringVar(
@@ -473,28 +470,25 @@ class TraderApp(tk.Tk):
             validatecommand=(self.register(_account_password_input_allowed), "%P"),
         )
         self.account_password_entry.pack(side="left", padx=(4, 8))
-        ttk.Label(kiwoom_controls, text="주문 수량").pack(side="left")
         ttk.Button(
             kiwoom_controls,
-            text="-",
-            width=3,
+            text="매도 -",
+            width=7,
             command=lambda: self._change_order_quantity(-1),
-        ).pack(side="left", padx=(4, 2))
-        ttk.Entry(
-            kiwoom_controls,
-            textvariable=self.order_qty_var,
-            width=6,
-            justify="center",
-            validate="key",
-            validatecommand=(self.register(_order_quantity_input_allowed), "%P"),
-        ).pack(side="left")
-        ttk.Label(kiwoom_controls, text="주").pack(side="left", padx=(2, 2))
+        ).pack(side="left", padx=(0, 2))
         ttk.Button(
             kiwoom_controls,
-            text="+",
-            width=3,
+            textvariable=self.order_qty_display_var,
+            width=7,
+            state="disabled",
+            takefocus=False,
+        ).pack(side="left", padx=2)
+        ttk.Button(
+            kiwoom_controls,
+            text="매수 +",
+            width=7,
             command=lambda: self._change_order_quantity(1),
-        ).pack(side="left", padx=(0, 8))
+        ).pack(side="left", padx=(2, 8))
         self.allow_real_order_checkbutton = ttk.Checkbutton(
             kiwoom_controls,
             text="실거래 주문 허용(위험)",
@@ -2065,6 +2059,7 @@ class TraderApp(tk.Tk):
     def _change_order_quantity(self, delta: int) -> None:
         quantity = max(0, self._order_quantity() + int(delta))
         self.order_qty_var.set(str(quantity))
+        self.order_qty_display_var.set(f"{quantity}주")
         self._refresh()
 
     def _update_trade_buttons(self) -> None:

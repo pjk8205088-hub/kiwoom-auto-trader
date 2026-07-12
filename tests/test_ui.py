@@ -9,7 +9,6 @@ from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
     TraderApp,
     _account_password_input_allowed,
-    _order_quantity_input_allowed,
     _parse_order_quantity,
 )
 
@@ -22,13 +21,11 @@ class UiHelperTests(unittest.TestCase):
         self.assertFalse(_account_password_input_allowed("12ab"))
 
     def test_parses_non_negative_integer_order_quantity(self):
-        self.assertTrue(_order_quantity_input_allowed("0"))
-        self.assertTrue(_order_quantity_input_allowed("25"))
-        self.assertFalse(_order_quantity_input_allowed("2.5"))
-        self.assertFalse(_order_quantity_input_allowed("-1"))
         self.assertEqual(_parse_order_quantity(""), 0)
         self.assertEqual(_parse_order_quantity("0"), 0)
         self.assertEqual(_parse_order_quantity("25"), 25)
+        self.assertEqual(_parse_order_quantity("2.5"), 0)
+        self.assertEqual(_parse_order_quantity("-1"), 0)
 
     def test_reads_single_line_key_file_without_persisting_path(self):
         with tempfile.TemporaryDirectory() as directory:
