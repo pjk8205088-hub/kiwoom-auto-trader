@@ -39,6 +39,31 @@ def _account_password_input_allowed(value: str) -> bool:
     return not value or (value.isdigit() and len(value) <= 8)
 
 
+def _account_access_confirmed(
+    api_connected: bool,
+    connection_method: str,
+    account: str,
+    password_verified: bool,
+) -> bool:
+    has_account = bool(clean_account_number(account))
+    rest_account_verified = connection_method == "REST API"
+    return bool(api_connected and has_account and (rest_account_verified or password_verified))
+
+
+def _account_connect_button_allowed(
+    api_connected: bool,
+    connection_method: str,
+    account: str,
+    password: str,
+) -> bool:
+    return bool(
+        api_connected
+        and connection_method != "REST API"
+        and clean_account_number(account)
+        and is_valid_account_password(password.strip())
+    )
+
+
 def _parse_order_quantity(value: str) -> int:
     text = str(value or "").strip()
     return int(text) if text.isdigit() else 0
@@ -310,6 +335,7 @@ class TraderApp(tk.Tk):
         self._symbol_lookup_after_id: str | None = None
         self._account_poll_count = 0
         self._selected_account_full = ""
+        self._account_access_verified = False
         self._account_info_window: tk.Toplevel | None = None
         self._candle_chart_window: tk.Toplevel | None = None
         self._candle_chart_canvas: tk.Canvas | None = None
@@ -470,6 +496,14 @@ class TraderApp(tk.Tk):
             validatecommand=(self.register(_account_password_input_allowed), "%P"),
         )
         self.account_password_entry.pack(side="left", padx=(4, 8))
+        self.account_connect_button = ttk.Button(
+            kiwoom_controls,
+            text="계좌연결",
+            width=9,
+            state="disabled",
+            command=self._connect_account_with_password,
+        )
+        self.account_connect_button.pack(side="left", padx=(0, 6))
         ttk.Button(
             kiwoom_controls,
             text="매도 -",
@@ -496,6 +530,7 @@ class TraderApp(tk.Tk):
             command=self._refresh,
         )
         self.allow_real_order_checkbutton.pack(side="left")
+        self.account_password_var.trace_add("write", self._on_account_password_changed)
 
         api_actions = ttk.Frame(controls)
         api_actions.grid(row=4, column=0, columnspan=10, sticky="ew", pady=(8, 0))
@@ -795,6 +830,7 @@ class TraderApp(tk.Tk):
 
     def _connect_account(self, expected_user_id: str) -> None:
         self._set_login_buttons_state("disabled")
+        self._account_access_verified = False
         self._update_connection_badge(False)
         self._account_poll_count = 0
         message = self.service.start_account_connection(expected_user_id)
@@ -823,6 +859,7 @@ class TraderApp(tk.Tk):
 
     def _connect_rest_account(self, app_key: str, secret_key: str, mock: bool) -> None:
         self._set_login_buttons_state("disabled")
+        self._account_access_verified = False
         self._update_connection_badge(False)
         self.account_password_var.set("")
         self.allow_real_order_var.set(False)
@@ -835,11 +872,13 @@ class TraderApp(tk.Tk):
         if account_info.connected and account_info.accounts:
             self._selected_account_full = account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
+            self._account_access_verified = True
             self.service.request_current_price(self.symbol_var.get())
             self.service.request_chart_candles(3, self.symbol_var.get())
             self.service.register_real_time_price(self.symbol_var.get())
             self.service.request_balance(self._selected_account_full)
         else:
+            self._account_access_verified = False
             self._selected_account_full = ""
             self._set_account_display("")
         self._set_login_buttons_state("normal")
@@ -858,8 +897,12 @@ class TraderApp(tk.Tk):
             if self._selected_account_full not in self.service.account_info.accounts:
                 self._selected_account_full = self.service.account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
+        if not self.service.account_info.connected:
+            self._account_access_verified = False
+        elif self.service.account_info.connection_method == "REST API":
+            self._account_access_verified = True
         self._refresh()
-        if self.service.account_info.connected:
+        if self._account_connection_confirmed(self.service.account_info):
             self._show_account_info_window()
 
     def _open_watchlist_window(self) -> None:
@@ -1215,24 +1258,16 @@ class TraderApp(tk.Tk):
                 self._selected_account_full = account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
         if account_info.connected:
-            self._update_connection_badge(True, account_info.connection_method)
             self.service.lookup_symbol_name(self.symbol_var.get())
             self.service.request_current_price(self.symbol_var.get())
             self.service.request_chart_candles(3, self.symbol_var.get())
             self.service.register_real_time_price(self.symbol_var.get())
-            if self._account_for_api():
-                password = self._balance_password()
-                if password is not None:
-                    try:
-                        self.service.request_balance(self._account_for_api(), password)
-                    finally:
-                        self.account_password_var.set("")
         self._refresh()
         login_failed = self.service.kiwoom_api.last_login_error not in (None, 0)
         identity_rejected = bool(account_info.user_id and not account_info.connected)
         if account_info.connected or login_failed or identity_rejected or self._account_poll_count >= 120:
             self._set_login_buttons_state("normal")
-            if account_info.connected:
+            if self._account_connection_confirmed(account_info):
                 self._show_account_info_window()
             return
         self._schedule_account_poll()
@@ -1302,13 +1337,50 @@ class TraderApp(tk.Tk):
             self._refresh()
             self.account_password_entry.focus_set()
             return
+        uses_account_password = self.service.account_info.connection_method != "REST API"
+        if uses_account_password:
+            self._account_access_verified = False
+            self._update_connection_badge(False)
+            self.status_text.set("키움 계좌 비밀번호와 잔고 접근 권한을 확인하고 있습니다.")
+            self.update_idletasks()
         try:
             balance = self.service.request_balance(self._account_for_api(), password)
         finally:
             self.account_password_var.set("")
+        if uses_account_password:
+            self._account_access_verified = balance is not None
         self._refresh()
         if balance is not None:
             self._show_account_info_window(refresh=True)
+        elif uses_account_password:
+            messagebox.showwarning("계좌 연결 실패", self.service.last_api_message)
+
+    def _connect_account_with_password(self) -> None:
+        if not _account_connect_button_allowed(
+            self.service.account_info.connected,
+            self.service.account_info.connection_method,
+            self._account_for_api(),
+            self.account_password_var.get(),
+        ):
+            self.service.last_api_message = (
+                "OpenAPI+ 로그인과 계좌번호를 확인한 뒤 계좌 비밀번호를 숫자 4~8자리로 입력해 주세요."
+            )
+            self._refresh()
+            self.account_password_entry.focus_set()
+            return
+        self._request_balance()
+
+    def _on_account_password_changed(self, *_args) -> None:
+        self._update_account_connect_button()
+
+    def _update_account_connect_button(self) -> None:
+        allowed = _account_connect_button_allowed(
+            self.service.account_info.connected,
+            self.service.account_info.connection_method,
+            self._account_for_api(),
+            self.account_password_var.get(),
+        )
+        self.account_connect_button.configure(state="normal" if allowed else "disabled")
 
     def _balance_password(self) -> str | None:
         if self.service.account_info.connection_method == "REST API":
@@ -1798,9 +1870,12 @@ class TraderApp(tk.Tk):
         snapshot = self.service.snapshot()
         account = snapshot.account_info
         connection_method = account.connection_method or "OpenAPI+"
-        self._update_connection_badge(account.connected, connection_method)
+        if not account.connected:
+            self._account_access_verified = False
+        self._update_connection_badge(self._account_connection_confirmed(account), connection_method)
         password_state = "disabled" if account.connected and connection_method == "REST API" else "normal"
         self.account_password_entry.configure(state=password_state)
+        self._update_account_connect_button()
         real_order_state = "disabled" if connection_method == "REST API" else "normal"
         self.allow_real_order_checkbutton.configure(state=real_order_state)
         self._update_dmi_display(snapshot.dmi)
@@ -1985,6 +2060,11 @@ class TraderApp(tk.Tk):
                 "OpenAPI+ 로그인 또는 REST API 연결 후 계좌번호 앞4자리+뒤4자리와 잔고가 표시됩니다."
             )
         connection_method = snapshot.account_info.connection_method or "OpenAPI+"
+        if not self._account_connection_confirmed(snapshot.account_info):
+            return (
+                f"계좌 창: {connection_method} 로그인 완료 / 계좌 미연결 | 선택 계좌 {selected_label} | "
+                "계좌 비밀번호 4~8자리를 입력하고 '계좌연결'을 눌러 주세요."
+            )
         if not snapshot.balance_summary:
             balance_help = (
                 "'계좌잔고 불러오기'를 누르면 잔고가 표시됩니다."
@@ -2010,10 +2090,11 @@ class TraderApp(tk.Tk):
         account = clean_account_number(self._account_for_api())
         name = snapshot.symbol_name or self.symbol_name_var.get().strip()
         quantity_ok = self._order_quantity_valid()
+        account_connected = self._account_connection_confirmed(snapshot.account_info)
         server_ready = (
             snapshot.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
         )
-        if snapshot.account_info.connected and account and name and quantity_ok and server_ready:
+        if account_connected and account and name and quantity_ok and server_ready:
             order_mode = "모의주문" if snapshot.account_info.server_type == "모의투자" else "실거래 주문"
             return (
                 f"거래 준비 완료: {snapshot.symbol} {name} | 계좌 {mask_account_number(account)} | "
@@ -2021,7 +2102,9 @@ class TraderApp(tk.Tk):
             )
         missing = []
         if not snapshot.account_info.connected:
-            missing.append("키움 API 로그인/연결")
+            missing.append("키움 API 로그인")
+        elif not account_connected:
+            missing.append("계좌연결")
         if not account:
             missing.append("계좌번호")
         if not name or name == "키움 로그인 후 조회 필요":
@@ -2042,7 +2125,7 @@ class TraderApp(tk.Tk):
             self.service.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
         )
         return bool(
-            self.service.account_info.connected
+            self._account_connection_confirmed(self.service.account_info)
             and account
             and name
             and name != "키움 로그인 후 조회 필요"
@@ -2080,6 +2163,7 @@ class TraderApp(tk.Tk):
     def _ensure_live_connection(self) -> bool:
         if self.service.sync_account_connection():
             return True
+        self._account_access_verified = False
         self._selected_account_full = ""
         self._set_account_display("")
         if self._account_info_window is not None and self._account_info_window.winfo_exists():
@@ -2092,8 +2176,7 @@ class TraderApp(tk.Tk):
 
     def _update_connection_badge(self, connected: bool, connection_method: str = "") -> None:
         if connected:
-            method = connection_method or "키움 API"
-            self.connection_state_var.set(f"ON {method} 연결됨")
+            self.connection_state_var.set("ON 연결됨")
             self.connection_badge.configure(bg="#16833a", fg="white")
             self.connection_light.itemconfigure(
                 self._connection_light_id,
@@ -2108,6 +2191,17 @@ class TraderApp(tk.Tk):
                 fill="#b0b0b0",
                 outline="#808080",
             )
+
+    def _account_connection_confirmed(self, account_info) -> bool:
+        account = self._account_for_api()
+        if not account and account_info.accounts:
+            account = account_info.accounts[0]
+        return _account_access_confirmed(
+            account_info.connected,
+            account_info.connection_method,
+            account,
+            self._account_access_verified,
+        )
 
     def _show_account_info_window(self, refresh: bool = False) -> None:
         snapshot = self.service.snapshot()
