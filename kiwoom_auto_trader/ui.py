@@ -338,7 +338,7 @@ class TraderApp(tk.Tk):
         header = ttk.Frame(self, padding=12)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="키움 자동매매 - 계좌/시세/주문 준비", font=("Malgun Gothic", 16, "bold")).grid(
+        ttk.Label(header, text="키움 자동매매", font=("Malgun Gothic", 16, "bold")).grid(
             row=0, column=0, sticky="w"
         )
         self.account_button = ttk.Button(header, text="OpenAPI+ 로그인", command=self._open_login_dialog)
