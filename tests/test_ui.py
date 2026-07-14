@@ -9,31 +9,25 @@ from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
     TraderApp,
     _account_access_confirmed,
-    _account_connect_button_allowed,
-    _account_password_input_allowed,
     _parse_order_quantity,
+    _percentage_input_allowed,
 )
 
 
 class UiHelperTests(unittest.TestCase):
-    def test_limits_account_password_input_to_eight_digits(self):
-        self.assertTrue(_account_password_input_allowed(""))
-        self.assertTrue(_account_password_input_allowed("12345678"))
-        self.assertFalse(_account_password_input_allowed("123456789"))
-        self.assertFalse(_account_password_input_allowed("12ab"))
-
-    def test_enables_account_connect_only_after_openapi_account_and_password_are_ready(self):
-        self.assertFalse(_account_connect_button_allowed(False, "OpenAPI+", "12345678", "1234"))
-        self.assertFalse(_account_connect_button_allowed(True, "OpenAPI+", "", "1234"))
-        self.assertFalse(_account_connect_button_allowed(True, "OpenAPI+", "12345678", "123"))
-        self.assertTrue(_account_connect_button_allowed(True, "OpenAPI+", "12345678", "1234"))
-        self.assertFalse(_account_connect_button_allowed(True, "REST API", "12345678", "1234"))
-
     def test_marks_openapi_account_connected_only_after_password_verification(self):
         self.assertFalse(_account_access_confirmed(True, "OpenAPI+", "12345678", False))
         self.assertTrue(_account_access_confirmed(True, "OpenAPI+", "12345678", True))
         self.assertTrue(_account_access_confirmed(True, "REST API", "12345678", False))
         self.assertFalse(_account_access_confirmed(False, "REST API", "12345678", True))
+
+    def test_accepts_numeric_percentage_during_entry(self):
+        self.assertTrue(_percentage_input_allowed(""))
+        self.assertTrue(_percentage_input_allowed("3"))
+        self.assertTrue(_percentage_input_allowed("3.5"))
+        self.assertTrue(_percentage_input_allowed("0."))
+        self.assertFalse(_percentage_input_allowed("3%"))
+        self.assertFalse(_percentage_input_allowed("1.2.3"))
 
     def test_parses_non_negative_integer_order_quantity(self):
         self.assertEqual(_parse_order_quantity(""), 0)

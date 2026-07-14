@@ -77,10 +77,10 @@ class AutoTradingService:
         self.account_info = KiwoomAccountInfo(False, [], message="키움 계좌가 연결되지 않았습니다.")
         self.expected_user_id = ""
         self.running = False
-        self.symbol = "005930"
-        self.symbol_name = known_symbol_name(self.symbol)
+        self.symbol = "000000"
+        self.symbol_name = ""
         self.max_capital = 1_000_000.0
-        self.current_price = 72_000.0
+        self.current_price = 0.0
         self.pattern_state: PatternState = "NONE"
         self.candles: list[Candle] = []
         self.chart_candles: list[Candle] = []
@@ -104,7 +104,7 @@ class AutoTradingService:
         settings: StrategySettings,
     ) -> None:
         previous_symbol = self.symbol
-        next_symbol = normalize_symbol(symbol) or "005930"
+        next_symbol = normalize_symbol(symbol) or "000000"
         if next_symbol != previous_symbol or self.strategy.settings != settings:
             self.strategy = StrategyEngine(settings)
             self.latest_dmi = None
@@ -113,10 +113,14 @@ class AutoTradingService:
             self.chart_candles = []
             self.real_time_candles.reset(next_symbol)
             self._last_aggregated_quote_key = None
+            self.market_quote = None
+            self.real_time_quote = None
         self.symbol = next_symbol
         fallback_name = known_symbol_name(self.symbol)
         if fallback_name:
             self.symbol_name = fallback_name
+        elif next_symbol != previous_symbol:
+            self.symbol_name = ""
         self.max_capital = max_capital
         self.storage.log("INFO", "설정", f"{self.symbol} 설정을 저장했습니다.")
 
@@ -660,6 +664,8 @@ class AutoTradingService:
                 raise KiwoomOpenApiError("주문할 종목번호를 입력해 주세요.")
             if quantity <= 0:
                 raise KiwoomOpenApiError("주문 수량은 1주 이상 선택해 주세요.")
+            if self.symbol == "000000":
+                raise KiwoomOpenApiError("종목 세팅을 먼저 완료해 주세요.")
             holding_quantity = self._holding_quantity(self.symbol)
             if result_side == "BUY":
                 risk_check = self.risk.approve_buy(

@@ -4,7 +4,7 @@ import tempfile
 import tkinter as tk
 import webbrowser
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from .charting import moving_average, timeframe_label
 from .kiwoom_api import (
@@ -12,6 +12,7 @@ from .kiwoom_api import (
     is_valid_account_password,
 )
 from .models import Candle, DmiPoint, PatternState, StrategySettings, WatchlistQuote
+from .price_triggers import OneShotPriceTrigger, OneShotPriceTriggerBook
 from .rest_api import KIWOOM_REST_PORTAL
 from .service import AutoTradingService
 from .storage import Storage
@@ -35,10 +36,6 @@ REST_LIVE_LABEL = "실전투자 (조회 전용)"
 REST_MOCK_LABEL = "모의투자"
 
 
-def _account_password_input_allowed(value: str) -> bool:
-    return not value or (value.isdigit() and len(value) <= 8)
-
-
 def _account_access_confirmed(
     api_connected: bool,
     connection_method: str,
@@ -50,23 +47,23 @@ def _account_access_confirmed(
     return bool(api_connected and has_account and (rest_account_verified or password_verified))
 
 
-def _account_connect_button_allowed(
-    api_connected: bool,
-    connection_method: str,
-    account: str,
-    password: str,
-) -> bool:
-    return bool(
-        api_connected
-        and connection_method != "REST API"
-        and clean_account_number(account)
-        and is_valid_account_password(password.strip())
-    )
-
-
 def _parse_order_quantity(value: str) -> int:
     text = str(value or "").strip()
     return int(text) if text.isdigit() else 0
+
+
+def _percentage_input_allowed(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return True
+    if len(text) > 7 or text.count(".") > 1:
+        return False
+    whole, separator, fraction = text.partition(".")
+    if whole and not whole.isdigit():
+        return False
+    if separator and fraction and not fraction.isdigit():
+        return False
+    return bool(whole or separator)
 
 
 class KiwoomLoginDialog(tk.Toplevel):
@@ -332,7 +329,6 @@ class TraderApp(tk.Tk):
         self._refresh_after_id: str | None = None
         self._chart_refresh_after_id: str | None = None
         self._account_after_id: str | None = None
-        self._symbol_lookup_after_id: str | None = None
         self._account_poll_count = 0
         self._selected_account_full = ""
         self._account_access_verified = False
@@ -349,6 +345,8 @@ class TraderApp(tk.Tk):
         self.watchlist_detail_vars: dict[str, tk.StringVar] = {}
         self._chart_render_state: dict[tk.Canvas, dict] = {}
         self._chart_visible_count = 100
+        self.price_triggers = OneShotPriceTriggerBook()
+        self._processing_price_triggers = False
         self._build_ui()
         self._refresh()
 
@@ -409,8 +407,8 @@ class TraderApp(tk.Tk):
         for idx in range(10):
             controls.columnconfigure(idx, weight=1)
 
-        self.symbol_var = tk.StringVar(value="005930")
-        self.symbol_name_var = tk.StringVar(value="삼성전자")
+        self.symbol_var = tk.StringVar(value="000000")
+        self.symbol_name_var = tk.StringVar(value="")
         self.capital_var = tk.StringVar(value="1000000")
         self.price_var = tk.StringVar(value="72000")
         self.dmi_period_var = tk.StringVar(value="14")
@@ -421,22 +419,30 @@ class TraderApp(tk.Tk):
         self.account_var = tk.StringVar(value="")
         self.account_first_var = tk.StringVar(value="")
         self.account_last_var = tk.StringVar(value="")
-        self.account_password_var = tk.StringVar(value="")
         self.order_qty_var = tk.StringVar(value="0")
         self.order_qty_display_var = tk.StringVar(value="0주")
+        self.current_price_display_var = tk.StringVar(value="미조회")
+        self.buy_percent_var = tk.StringVar(value="")
+        self.sell_percent_var = tk.StringVar(value="")
+        self.buy_trigger_status_var = tk.StringVar(value="미설정")
+        self.sell_trigger_status_var = tk.StringVar(value="미설정")
         self.allow_real_order_var = tk.BooleanVar(value=False)
         self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
         self.account_summary_var = tk.StringVar(
             value="계좌 창: 로그인 전입니다. 키움 로그인 후 계좌번호 앞4자리+뒤4자리와 잔고가 표시됩니다."
         )
         self.trade_ready_var = tk.StringVar(value="거래 준비: 종목번호와 회사명, 계좌번호를 확인해 주세요.")
-        self.symbol_var.trace_add("write", self._on_symbol_input_changed)
 
         self._field(controls, "종목번호(6자리)", self.symbol_var, 0)
         ttk.Label(controls, text="회사명").grid(row=0, column=1, sticky="w")
-        ttk.Label(controls, textvariable=self.symbol_name_var, width=16).grid(
-            row=1, column=1, sticky="ew", padx=(0, 8)
+        symbol_name_row = ttk.Frame(controls)
+        symbol_name_row.grid(row=1, column=1, sticky="ew", padx=(0, 8))
+        ttk.Label(symbol_name_row, textvariable=self.symbol_name_var, width=11).pack(
+            side="left",
+            fill="x",
+            expand=True,
         )
+        ttk.Button(symbol_name_row, text="종목 세팅", width=9, command=self._set_symbol).pack(side="right")
         self._field(controls, "종목별 운용 한도금액", self.capital_var, 2)
         self._field(controls, "모의 현재가(테스트용)", self.price_var, 3)
         self._field(controls, "DMI 계산 기간", self.dmi_period_var, 4)
@@ -486,56 +492,58 @@ class TraderApp(tk.Tk):
             justify="center",
             state="readonly",
         ).pack(side="left", padx=(2, 8))
-        ttk.Label(kiwoom_controls, text="계좌 비밀번호(숫자 4~8자리·저장 안 함)").pack(side="left")
-        self.account_password_entry = ttk.Entry(
-            kiwoom_controls,
-            textvariable=self.account_password_var,
-            width=10,
-            show="*",
-            validate="key",
-            validatecommand=(self.register(_account_password_input_allowed), "%P"),
-        )
-        self.account_password_entry.pack(side="left", padx=(4, 8))
-        self.account_connect_button = ttk.Button(
-            kiwoom_controls,
-            text="계좌연결",
-            width=9,
-            state="disabled",
-            command=self._connect_account_with_password,
-        )
-        self.account_connect_button.pack(side="left", padx=(0, 6))
-        ttk.Button(
-            kiwoom_controls,
-            text="매도 -",
-            width=7,
-            command=lambda: self._change_order_quantity(-1),
-        ).pack(side="left", padx=(0, 2))
-        ttk.Button(
-            kiwoom_controls,
-            textvariable=self.order_qty_display_var,
-            width=7,
-            state="disabled",
-            takefocus=False,
-        ).pack(side="left", padx=2)
-        ttk.Button(
-            kiwoom_controls,
-            text="매수 +",
-            width=7,
-            command=lambda: self._change_order_quantity(1),
-        ).pack(side="left", padx=(2, 8))
         self.allow_real_order_checkbutton = ttk.Checkbutton(
             kiwoom_controls,
             text="실거래 주문 허용(위험)",
             variable=self.allow_real_order_var,
             command=self._refresh,
         )
-        self.allow_real_order_checkbutton.pack(side="left")
-        self.account_password_var.trace_add("write", self._on_account_password_changed)
+        self.allow_real_order_checkbutton.pack(side="left", padx=(12, 0))
+
+        order_controls = ttk.Frame(controls)
+        order_controls.grid(row=4, column=0, columnspan=10, sticky="ew", pady=(8, 0))
+        for column in range(4):
+            order_controls.columnconfigure(column, weight=1, uniform="order-control")
+
+        price_box = ttk.LabelFrame(order_controls, text="현재가", padding=8)
+        price_box.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        ttk.Label(
+            price_box,
+            textvariable=self.current_price_display_var,
+            font=("Malgun Gothic", 11, "bold"),
+            width=13,
+            anchor="e",
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(price_box, text="불러오기", command=self._request_current_price).pack(side="left")
+
+        quantity_box = ttk.LabelFrame(order_controls, text="주문 수량", padding=8)
+        quantity_box.grid(row=0, column=1, sticky="nsew", padx=4)
+        tk.Label(
+            quantity_box,
+            textvariable=self.order_qty_display_var,
+            width=6,
+            anchor="center",
+            relief="sunken",
+            bd=1,
+            bg="#ffffff",
+            padx=4,
+            pady=3,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(quantity_box, text="-", width=4, command=lambda: self._change_order_quantity(-1)).pack(
+            side="left",
+            padx=2,
+        )
+        ttk.Button(quantity_box, text="+", width=4, command=lambda: self._change_order_quantity(1)).pack(
+            side="left",
+            padx=2,
+        )
+
+        self._build_percent_trigger_box(order_controls, "BUY", 2)
+        self._build_percent_trigger_box(order_controls, "SELL", 3)
 
         api_actions = ttk.Frame(controls)
-        api_actions.grid(row=4, column=0, columnspan=10, sticky="ew", pady=(8, 0))
-        ttk.Button(api_actions, text="현재가 불러오기", command=self._request_current_price).pack(side="left")
-        ttk.Button(api_actions, text="3분봉 데이터 불러오기", command=self._request_three_minute).pack(side="left", padx=4)
+        api_actions.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
+        ttk.Button(api_actions, text="3분봉 데이터 불러오기", command=self._request_three_minute).pack(side="left")
         ttk.Button(api_actions, text="계좌잔고 불러오기", command=self._request_balance).pack(side="left", padx=4)
         ttk.Button(api_actions, text="실시간 시세 시작", command=self._register_real_time).pack(side="left", padx=4)
         ttk.Button(api_actions, text="실시간 시세 중지", command=self._unregister_real_time).pack(side="left", padx=4)
@@ -560,7 +568,7 @@ class TraderApp(tk.Tk):
             padx=4,
         )
         ready_row = ttk.Frame(controls)
-        ready_row.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
+        ready_row.grid(row=6, column=0, columnspan=10, sticky="ew", pady=(8, 0))
         self.chart_button = ttk.Button(
             ready_row,
             text="DMI 차트 확대",
@@ -773,6 +781,39 @@ class TraderApp(tk.Tk):
             row=1, column=column, sticky="ew", padx=(0, 8)
         )
 
+    def _build_percent_trigger_box(self, parent: ttk.Frame, side: str, column: int) -> None:
+        is_buy = side == "BUY"
+        title = "일회성 자동매수" if is_buy else "일회성 자동매도"
+        sign = "-" if is_buy else "+"
+        percentage_var = self.buy_percent_var if is_buy else self.sell_percent_var
+        status_var = self.buy_trigger_status_var if is_buy else self.sell_trigger_status_var
+
+        box = ttk.LabelFrame(parent, text=title, padding=8)
+        box.grid(row=0, column=column, sticky="nsew", padx=(4, 0 if column == 3 else 4))
+        ttk.Label(box, text=sign, font=("Malgun Gothic", 11, "bold")).grid(row=0, column=0)
+        ttk.Entry(
+            box,
+            textvariable=percentage_var,
+            width=6,
+            justify="right",
+            validate="key",
+            validatecommand=(self.register(_percentage_input_allowed), "%P"),
+        ).grid(row=0, column=1, padx=(4, 2))
+        ttk.Label(box, text="%").grid(row=0, column=2, padx=(0, 6))
+        button = ttk.Button(box, text="설정", width=7, command=lambda: self._arm_price_trigger(side))
+        button.grid(row=0, column=3)
+        ttk.Label(box, textvariable=status_var, foreground="#555555").grid(
+            row=1,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(5, 0),
+        )
+        if is_buy:
+            self.buy_trigger_button = button
+        else:
+            self.sell_trigger_button = button
+
     def _table(self, parent: ttk.Frame, title: str, columns: tuple[str, ...], column: int) -> ttk.Treeview:
         frame = ttk.LabelFrame(parent, text=title, padding=8)
         frame.grid(row=0, column=column, sticky="nsew", padx=(0 if column == 0 else 6, 0))
@@ -861,7 +902,6 @@ class TraderApp(tk.Tk):
         self._set_login_buttons_state("disabled")
         self._account_access_verified = False
         self._update_connection_badge(False)
-        self.account_password_var.set("")
         self.allow_real_order_var.set(False)
         server_type = "모의투자" if mock else "실전투자 조회 전용"
         self.status_text.set(f"키움 REST API {server_type} 토큰과 계좌를 확인하고 있습니다.")
@@ -873,9 +913,10 @@ class TraderApp(tk.Tk):
             self._selected_account_full = account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
             self._account_access_verified = True
-            self.service.request_current_price(self.symbol_var.get())
-            self.service.request_chart_candles(3, self.symbol_var.get())
-            self.service.register_real_time_price(self.symbol_var.get())
+            if self._selected_symbol_ready():
+                self.service.request_current_price(self.symbol_var.get())
+                self.service.request_chart_candles(3, self.symbol_var.get())
+                self.service.register_real_time_price(self.symbol_var.get())
             self.service.request_balance(self._selected_account_full)
         else:
             self._account_access_verified = False
@@ -1224,25 +1265,29 @@ class TraderApp(tk.Tk):
             return "down"
         return "flat"
 
-    def _on_symbol_input_changed(self, *_args: object) -> None:
-        if self._symbol_lookup_after_id is not None:
-            self.after_cancel(self._symbol_lookup_after_id)
-        self._symbol_lookup_after_id = self.after(450, self._lookup_symbol_from_input)
-
-    def _lookup_symbol_from_input(self) -> None:
-        self._symbol_lookup_after_id = None
-        digits = "".join(ch for ch in self.symbol_var.get() if ch.isdigit())
-        if len(digits) < 5:
+    def _set_symbol(self) -> None:
+        digits = "".join(character for character in self.symbol_var.get() if character.isdigit())
+        if len(digits) != 6 or digits == "000000":
             self.symbol_name_var.set("")
-            self.trade_ready_var.set("거래 준비: 5~6자리 종목번호를 입력하면 회사명을 조회합니다.")
-            self._update_trade_buttons()
+            self._clear_all_price_triggers()
+            self.current_price_display_var.set("미조회")
+            messagebox.showwarning("종목번호 확인", "000000이 아닌 6자리 종목번호를 입력해 주세요.")
             return
 
-        name = self.service.lookup_symbol_name(self.symbol_var.get())
-        normalized = normalize_symbol(self.symbol_var.get())
-        if normalized and self.symbol_var.get().strip() != normalized:
-            self.symbol_var.set(normalized)
-        self.symbol_name_var.set(name or "키움 로그인 후 조회 필요")
+        normalized = normalize_symbol(digits)
+        previous_symbol = self.service.symbol
+        self.service.configure(normalized, float(self.capital_var.get()), self._settings())
+        name = self.service.lookup_symbol_name(normalized)
+        self.symbol_var.set(normalized)
+        self.symbol_name_var.set(name or "조회 실패")
+        if normalized != previous_symbol:
+            self._clear_all_price_triggers()
+            self.current_price_display_var.set("미조회")
+        self.service.storage.log(
+            "INFO" if name else "WARN",
+            "종목",
+            f"종목 세팅: {normalized} {name or '종목명 조회 실패'}",
+        )
         self._refresh()
 
     def _schedule_account_poll(self) -> None:
@@ -1258,10 +1303,10 @@ class TraderApp(tk.Tk):
                 self._selected_account_full = account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
         if account_info.connected:
-            self.service.lookup_symbol_name(self.symbol_var.get())
-            self.service.request_current_price(self.symbol_var.get())
-            self.service.request_chart_candles(3, self.symbol_var.get())
-            self.service.register_real_time_price(self.symbol_var.get())
+            if self._selected_symbol_ready():
+                self.service.request_current_price(self.symbol_var.get())
+                self.service.request_chart_candles(3, self.symbol_var.get())
+                self.service.register_real_time_price(self.symbol_var.get())
         self._refresh()
         login_failed = self.service.kiwoom_api.last_login_error not in (None, 0)
         identity_rejected = bool(account_info.user_id and not account_info.connected)
@@ -1285,6 +1330,9 @@ class TraderApp(tk.Tk):
 
     def _request_current_price(self) -> None:
         if not self._require_live_connection():
+            return
+        if not self._selected_symbol_ready():
+            messagebox.showwarning("종목 세팅 필요", "6자리 종목번호를 입력하고 '종목 세팅'을 먼저 눌러 주세요.")
             return
         self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
         self.service.request_current_price(self.symbol_var.get())
@@ -1331,13 +1379,22 @@ class TraderApp(tk.Tk):
     def _request_balance(self) -> None:
         if not self._require_live_connection():
             return
-        password = self._balance_password()
-        if password is None:
-            self.service.last_api_message = "계좌 비밀번호는 숫자 4~8자리로 입력해 주세요."
-            self._refresh()
-            self.account_password_entry.focus_set()
-            return
         uses_account_password = self.service.account_info.connection_method != "REST API"
+        password = ""
+        if uses_account_password:
+            entered = simpledialog.askstring(
+                "계좌 비밀번호",
+                "OpenAPI+ 잔고 조회용 숫자 4~8자리를 입력해 주세요.\n입력값은 저장하지 않습니다.",
+                show="*",
+                parent=self,
+            )
+            if entered is None:
+                return
+            password = entered.strip()
+            entered = ""
+            if not is_valid_account_password(password):
+                messagebox.showwarning("계좌 비밀번호 확인", "계좌 비밀번호는 숫자 4~8자리로 입력해 주세요.")
+                return
         if uses_account_password:
             self._account_access_verified = False
             self._update_connection_badge(False)
@@ -1346,7 +1403,7 @@ class TraderApp(tk.Tk):
         try:
             balance = self.service.request_balance(self._account_for_api(), password)
         finally:
-            self.account_password_var.set("")
+            password = ""
         if uses_account_password:
             self._account_access_verified = balance is not None
         self._refresh()
@@ -1354,39 +1411,6 @@ class TraderApp(tk.Tk):
             self._show_account_info_window(refresh=True)
         elif uses_account_password:
             messagebox.showwarning("계좌 연결 실패", self.service.last_api_message)
-
-    def _connect_account_with_password(self) -> None:
-        if not _account_connect_button_allowed(
-            self.service.account_info.connected,
-            self.service.account_info.connection_method,
-            self._account_for_api(),
-            self.account_password_var.get(),
-        ):
-            self.service.last_api_message = (
-                "OpenAPI+ 로그인과 계좌번호를 확인한 뒤 계좌 비밀번호를 숫자 4~8자리로 입력해 주세요."
-            )
-            self._refresh()
-            self.account_password_entry.focus_set()
-            return
-        self._request_balance()
-
-    def _on_account_password_changed(self, *_args) -> None:
-        self._update_account_connect_button()
-
-    def _update_account_connect_button(self) -> None:
-        allowed = _account_connect_button_allowed(
-            self.service.account_info.connected,
-            self.service.account_info.connection_method,
-            self._account_for_api(),
-            self.account_password_var.get(),
-        )
-        self.account_connect_button.configure(state="normal" if allowed else "disabled")
-
-    def _balance_password(self) -> str | None:
-        if self.service.account_info.connection_method == "REST API":
-            return ""
-        password = self.account_password_var.get().strip()
-        return password if is_valid_account_password(password) else None
 
     def _register_real_time(self) -> None:
         if not self._require_live_connection():
@@ -1868,14 +1892,15 @@ class TraderApp(tk.Tk):
 
     def _refresh(self) -> None:
         snapshot = self.service.snapshot()
+        self._update_current_price_display()
+        if self._process_one_shot_price_triggers():
+            snapshot = self.service.snapshot()
+            self._update_current_price_display()
         account = snapshot.account_info
         connection_method = account.connection_method or "OpenAPI+"
         if not account.connected:
             self._account_access_verified = False
         self._update_connection_badge(self._account_connection_confirmed(account), connection_method)
-        password_state = "disabled" if account.connected and connection_method == "REST API" else "normal"
-        self.account_password_entry.configure(state=password_state)
-        self._update_account_connect_button()
         real_order_state = "disabled" if connection_method == "REST API" else "normal"
         self.allow_real_order_checkbutton.configure(state=real_order_state)
         self._update_dmi_display(snapshot.dmi)
@@ -1992,6 +2017,9 @@ class TraderApp(tk.Tk):
         self._chart_refresh_after_id = None
         if self.service.real_time_symbol:
             self.service.refresh_real_time_quote()
+            self._update_current_price_display()
+            if self._process_one_shot_price_triggers():
+                self._refresh()
             self._update_watchlist_live_row()
             if self.service.chart_timeframe.endswith("s"):
                 candles = self.service.chart_candles_for_display()
@@ -2063,7 +2091,7 @@ class TraderApp(tk.Tk):
         if not self._account_connection_confirmed(snapshot.account_info):
             return (
                 f"계좌 창: {connection_method} 로그인 완료 / 계좌 미연결 | 선택 계좌 {selected_label} | "
-                "계좌 비밀번호 4~8자리를 입력하고 '계좌연결'을 눌러 주세요."
+                "'계좌잔고 불러오기'를 눌러 계좌 접근을 확인해 주세요."
             )
         if not snapshot.balance_summary:
             balance_help = (
@@ -2144,6 +2172,183 @@ class TraderApp(tk.Tk):
         self.order_qty_var.set(str(quantity))
         self.order_qty_display_var.set(f"{quantity}주")
         self._refresh()
+
+    def _selected_symbol_ready(self) -> bool:
+        symbol = normalize_symbol(self.symbol_var.get())
+        name = self.symbol_name_var.get().strip()
+        invalid_names = {"조회 실패", "키움 로그인 후 조회 필요"}
+        return bool(symbol and symbol != "000000" and name and name not in invalid_names)
+
+    def _selected_current_price(self) -> float:
+        symbol = normalize_symbol(self.symbol_var.get())
+        for quote in (self.service.real_time_quote, self.service.market_quote):
+            if quote is None or normalize_symbol(quote.symbol) != symbol:
+                continue
+            if quote.current_price > 0:
+                return float(quote.current_price)
+        return 0.0
+
+    def _update_current_price_display(self) -> None:
+        current_price = self._selected_current_price()
+        self.current_price_display_var.set(f"{current_price:,.0f}원" if current_price > 0 else "미조회")
+
+    def _arm_price_trigger(self, side: str) -> None:
+        if not self._require_live_connection():
+            return
+        if not self._selected_symbol_ready():
+            messagebox.showwarning("종목 세팅 필요", "6자리 종목번호를 입력하고 '종목 세팅'을 먼저 눌러 주세요.")
+            return
+        if not self._account_connection_confirmed(self.service.account_info):
+            messagebox.showwarning("계좌 연결 필요", "계좌 연결과 잔고 확인을 먼저 완료해 주세요.")
+            return
+
+        current_price = self._selected_current_price()
+        quantity = self._order_quantity()
+        percentage_var = self.buy_percent_var if side == "BUY" else self.sell_percent_var
+        try:
+            percent = float(percentage_var.get().strip())
+            candidate = OneShotPriceTrigger.create(
+                side,
+                self.symbol_var.get(),
+                current_price,
+                percent,
+                quantity,
+            )
+        except (TypeError, ValueError) as exc:
+            messagebox.showwarning("자동주문 설정 확인", str(exc))
+            return
+
+        allow_real_order = False
+        if self.service.account_info.server_type != "모의투자":
+            if self.service.account_info.connection_method == "REST API":
+                messagebox.showwarning(
+                    "REST 실거래 잠금",
+                    "현재 버전은 REST API 실거래 주문이 잠겨 있습니다. 모의투자에서 먼저 검증해 주세요.",
+                )
+                return
+            if not self.allow_real_order_var.get():
+                messagebox.showwarning(
+                    "실거래 잠금",
+                    "실거래 주문 허용을 먼저 켜야 일회성 자동주문을 설정할 수 있습니다.",
+                )
+                return
+            action = "매수" if side == "BUY" else "매도"
+            if not messagebox.askyesno(
+                "실거래 일회성 자동주문 확인",
+                f"현재가 {candidate.base_price:,.0f}원 기준 {candidate.percent:.2f}% 조건으로\n"
+                f"목표가 {candidate.target_price:,.0f}원 도달 시 {candidate.quantity}주를 자동 {action}합니다.\n\n"
+                "조건 충족 시 추가 확인 없이 실제 주문이 1회 전송됩니다. 설정하시겠습니까?",
+            ):
+                return
+            allow_real_order = True
+
+        trigger = self.price_triggers.arm(
+            side,
+            candidate.symbol,
+            candidate.base_price,
+            candidate.percent,
+            candidate.quantity,
+            allow_real_order,
+        )
+        self._update_price_trigger_status(side)
+        if self.service.real_time_symbol != trigger.symbol:
+            self.service.register_real_time_price(trigger.symbol)
+        if self.service.real_time_symbol != trigger.symbol:
+            self.price_triggers.clear(side)
+            self._update_price_trigger_status(side)
+            messagebox.showwarning("실시간 시세 연결 실패", self.service.last_api_message)
+            return
+
+        action = "자동매수" if side == "BUY" else "자동매도"
+        self.service.storage.log(
+            "WARN" if trigger.allow_real_order else "INFO",
+            action,
+            f"일회성 설정: 기준 {trigger.base_price:,.0f}원 / 목표 {trigger.target_price:,.0f}원 / "
+            f"{trigger.percent:.2f}% / {trigger.quantity}주",
+        )
+        self._refresh()
+
+    def _update_price_trigger_status(self, side: str) -> None:
+        trigger = self.price_triggers.get(side)
+        status_var = self.buy_trigger_status_var if side == "BUY" else self.sell_trigger_status_var
+        button = self.buy_trigger_button if side == "BUY" else self.sell_trigger_button
+        if trigger is None:
+            status_var.set("미설정")
+            button.configure(text="설정")
+            return
+        status_var.set(
+            f"기준 {trigger.base_price:,.0f} → 목표 {trigger.target_price:,.0f}원 / {trigger.quantity}주"
+        )
+        button.configure(text="재설정")
+
+    def _clear_price_trigger(self, side: str) -> None:
+        self.price_triggers.clear(side)
+        if side == "BUY":
+            self.buy_percent_var.set("")
+        else:
+            self.sell_percent_var.set("")
+        self._update_price_trigger_status(side)
+
+    def _clear_all_price_triggers(self) -> None:
+        self.price_triggers.clear()
+        self.buy_percent_var.set("")
+        self.sell_percent_var.set("")
+        self._update_price_trigger_status("BUY")
+        self._update_price_trigger_status("SELL")
+
+    def _process_one_shot_price_triggers(self) -> bool:
+        if self._processing_price_triggers:
+            return False
+        current_price = self._selected_current_price()
+        if current_price <= 0:
+            return False
+        triggered = self.price_triggers.pop_triggered(self.symbol_var.get(), current_price)
+        if not triggered:
+            return False
+
+        self._processing_price_triggers = True
+        try:
+            for trigger in triggered:
+                if trigger.side == "BUY":
+                    self.buy_percent_var.set("")
+                else:
+                    self.sell_percent_var.set("")
+                self._update_price_trigger_status(trigger.side)
+
+                action = "자동매수" if trigger.side == "BUY" else "자동매도"
+                if not self._account_connection_confirmed(self.service.account_info):
+                    self.service.storage.log("ERROR", action, "계좌 연결이 해제되어 일회성 설정만 종료했습니다.")
+                    continue
+                if trigger.allow_real_order:
+                    real_ready = (
+                        self.service.account_info.server_type != "모의투자"
+                        and self.service.account_info.connection_method != "REST API"
+                        and self.allow_real_order_var.get()
+                    )
+                    if not real_ready:
+                        self.service.storage.log("ERROR", action, "실거래 안전장치가 해제되어 주문하지 않았습니다.")
+                        continue
+                elif self.service.account_info.server_type != "모의투자":
+                    self.service.storage.log("ERROR", action, "모의투자 연결이 아니어서 주문하지 않았습니다.")
+                    continue
+
+                self.service.configure(trigger.symbol, float(self.capital_var.get()), self._settings())
+                self.service.current_price = current_price
+                self.service.storage.log(
+                    "WARN" if trigger.allow_real_order else "INFO",
+                    action,
+                    f"현재가 {current_price:,.0f}원이 목표 {trigger.target_price:,.0f}원에 도달했습니다. "
+                    "설정을 해제하고 주문을 1회 요청합니다.",
+                )
+                self.service.send_kiwoom_order(
+                    account=self._account_for_api(),
+                    side=trigger.side,
+                    quantity=trigger.quantity,
+                    allow_real_order=trigger.allow_real_order,
+                )
+        finally:
+            self._processing_price_triggers = False
+        return True
 
     def _update_trade_buttons(self) -> None:
         state = "normal" if self._trading_ready() else "disabled"
@@ -2285,15 +2490,6 @@ class TraderApp(tk.Tk):
                 sticky="ew",
                 pady=(12, 0),
             )
-            ttk.Label(cash_actions, text="계좌 비밀번호(숫자 4~8자리)").pack(side="left")
-            ttk.Entry(
-                cash_actions,
-                textvariable=self.account_password_var,
-                width=10,
-                show="*",
-                validate="key",
-                validatecommand=(self.register(_account_password_input_allowed), "%P"),
-            ).pack(side="left", padx=(6, 8))
             ttk.Button(
                 cash_actions,
                 text="예수금·잔고 조회",

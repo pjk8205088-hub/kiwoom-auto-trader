@@ -377,6 +377,8 @@ class AutoTradingServiceTests(unittest.TestCase):
         fake_rest = FakeRestApi()
         service.rest_api = fake_rest
         service.start_rest_connection("app-key", "secret-key")
+        service.symbol = "005930"
+        service.current_price = 72_000
         fake_rest.sell_failures_remaining = 2
 
         message = service.send_kiwoom_order("1234567890", "SELL", 1)
@@ -395,6 +397,7 @@ class AutoTradingServiceTests(unittest.TestCase):
         fake_rest = FakeRestApi()
         service.rest_api = fake_rest
         service.start_rest_connection("app-key", "secret-key")
+        service.symbol = "005930"
         service.current_price = 100_000
         service.max_capital = 500_000
 
@@ -416,6 +419,20 @@ class AutoTradingServiceTests(unittest.TestCase):
 
         self.assertEqual(fake_rest.order_calls, 0)
         self.assertIn("1주 이상", message)
+
+    def test_blocks_placeholder_symbol_before_api_call(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_symbol_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+
+        message = service.send_kiwoom_order("1234567890", "BUY", 1)
+
+        self.assertEqual(fake_rest.order_calls, 0)
+        self.assertIn("종목 세팅", message)
 
     def test_strategy_sell_uses_selected_share_quantity(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_sell_qty_test.sqlite3"
