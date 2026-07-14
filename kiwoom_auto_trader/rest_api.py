@@ -104,6 +104,26 @@ def _integer(value: Any) -> int:
     return int(abs(_number(value)))
 
 
+def _decode_websocket_message(raw_message: Any) -> Any:
+    if isinstance(raw_message, bytes):
+        raw_message = raw_message.decode("utf-8")
+    if not isinstance(raw_message, str):
+        return raw_message
+    stripped = raw_message.strip()
+    if not stripped:
+        return ""
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return stripped
+
+
+def _encode_websocket_message(message: Any) -> str:
+    if isinstance(message, str):
+        return message
+    return json.dumps(message, ensure_ascii=False)
+
+
 class KiwoomRestApiClient:
     def __init__(
         self,
@@ -133,6 +153,7 @@ class KiwoomRestApiClient:
         self._websocket_thread: threading.Thread | None = None
         self._websocket = None
         self._websocket_stop = threading.Event()
+        self._websocket_ready = threading.Event()
         self._websocket_lock = threading.Lock()
         self._websocket_error = ""
 
@@ -190,6 +211,7 @@ class KiwoomRestApiClient:
             self._real_time_quote = None
             self._real_quote_events.clear()
         self._websocket_error = ""
+        self._websocket_ready.clear()
         self._account_info = KiwoomAccountInfo(
             False,
             [],
@@ -321,6 +343,37 @@ class KiwoomRestApiClient:
         ]
         return candles[:count]
 
+    def request_tick_candles(self, symbol: str, count: int = 3000) -> list[Candle]:
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KiwoomRestApiError("종목코드를 입력해 주세요.")
+        count = max(1, int(count))
+        body = self._post(
+            "ka10079",
+            "/api/dostk/chart",
+            {
+                "stk_cd": symbol,
+                "tic_scope": "1",
+                "upd_stkpc_tp": "1",
+            },
+        )
+        rows = body.get("stk_tic_chart_qry") or []
+        if not isinstance(rows, list):
+            raise KiwoomRestApiError("REST API 1틱 차트 응답 형식이 올바르지 않습니다.")
+        candles = [
+            Candle(
+                high=_price(row.get("high_pric")),
+                low=_price(row.get("low_pric")),
+                close=_price(row.get("cur_prc")),
+                open=_price(row.get("open_pric")),
+                volume=_integer(row.get("trde_qty")),
+                timestamp=str(row.get("cntr_tm") or "").strip(),
+            )
+            for row in rows
+            if isinstance(row, dict) and _price(row.get("cur_prc")) > 0
+        ]
+        return candles[:count]
+
     def request_balance(self, account: str, password: str = "") -> BalanceSummary:
         del password
         account = clean_account_number(account) or self._account
@@ -395,6 +448,7 @@ class KiwoomRestApiClient:
             self._real_time_quote = None
             self._real_quote_events.clear()
         self._websocket_error = ""
+        self._websocket_ready.clear()
         stop_event = threading.Event()
         self._websocket_stop = stop_event
         token = self._token
@@ -416,6 +470,7 @@ class KiwoomRestApiClient:
             self._real_time_quote = None
             self._real_quote_events.clear()
         self._websocket_error = ""
+        self._websocket_ready.clear()
         return f"{symbol or 'REST'} WebSocket 실시간 시세를 중지했습니다."
 
     def latest_real_time_quote(self, symbol: str) -> RealTimeQuote | None:
@@ -480,11 +535,12 @@ class KiwoomRestApiClient:
                 socket_url,
                 open_timeout=DEFAULT_REST_TIMEOUT_SECONDS,
                 close_timeout=2,
+                ping_interval=None,
             ) as websocket:
                 if stop_event.is_set():
                     return
                 self._websocket = websocket
-                websocket.send(json.dumps({"trnm": "LOGIN", "token": token}))
+                websocket.send(_encode_websocket_message({"trnm": "LOGIN", "token": token}))
                 while not stop_event.is_set():
                     try:
                         raw_message = websocket.recv(timeout=0.5)
@@ -492,35 +548,48 @@ class KiwoomRestApiClient:
                         continue
                     if raw_message is None:
                         break
-                    response = json.loads(raw_message)
+                    response = _decode_websocket_message(raw_message)
                     reply = self._handle_websocket_message(response)
                     if reply is not None:
-                        websocket.send(json.dumps(reply))
+                        websocket.send(_encode_websocket_message(reply))
                 if symbol:
                     try:
-                        websocket.send(json.dumps(self._remove_real_time_message(symbol)))
+                        websocket.send(_encode_websocket_message(self._remove_real_time_message(symbol)))
                     except Exception:
                         pass
         except Exception as exc:
             if not stop_event.is_set():
                 self._websocket_error = f"REST WebSocket 실시간 시세 연결 실패: {exc}"
+                self._websocket_ready.clear()
         finally:
             if self._websocket is websocket:
                 self._websocket = None
 
-    def _handle_websocket_message(self, response: dict[str, Any]) -> dict[str, Any] | None:
+    def _handle_websocket_message(self, response: Any) -> dict[str, Any] | str | None:
+        if isinstance(response, str):
+            return response if response.strip().upper() == "PING" else None
+        if not isinstance(response, dict):
+            return None
         tr_name = str(response.get("trnm") or "").upper()
         if tr_name == "LOGIN":
             return_code = int(response.get("return_code") or 0)
             if return_code != 0:
                 message = str(response.get("return_msg") or "WebSocket 토큰 로그인이 실패했습니다.")
                 raise KiwoomRestApiError(f"REST WebSocket 로그인 오류 {return_code}: {message}")
+            self._websocket_error = ""
             return self._register_real_time_message()
         if tr_name == "PING":
             return response
-        if tr_name == "REG" and int(response.get("return_code") or 0) != 0:
-            message = str(response.get("return_msg") or "실시간 시세 등록이 실패했습니다.")
-            raise KiwoomRestApiError(f"REST WebSocket 등록 오류: {message}")
+        if tr_name == "REG":
+            if int(response.get("return_code") or 0) != 0:
+                message = str(response.get("return_msg") or "실시간 시세 등록이 실패했습니다.")
+                raise KiwoomRestApiError(f"REST WebSocket 등록 오류: {message}")
+            self._websocket_ready.set()
+            self._websocket_error = ""
+            return None
+        if tr_name == "SYSTEM" and int(response.get("return_code") or 0) != 0:
+            message = str(response.get("return_msg") or "WebSocket 시스템 오류가 발생했습니다.")
+            raise KiwoomRestApiError(f"REST WebSocket 시스템 오류: {message}")
         if tr_name != "REAL":
             return None
 
@@ -573,6 +642,7 @@ class KiwoomRestApiClient:
 
     def _stop_websocket(self) -> None:
         self._websocket_stop.set()
+        self._websocket_ready.clear()
         websocket = self._websocket
         if websocket is not None:
             try:

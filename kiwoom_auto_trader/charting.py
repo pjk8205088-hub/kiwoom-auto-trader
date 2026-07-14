@@ -57,14 +57,59 @@ class RealTimeCandleAggregator:
             bucket_second = int(traded_at.timestamp())
             bucket_second -= bucket_second % interval
             bucket = datetime.fromtimestamp(bucket_second).strftime("%Y%m%d%H%M%S")
-            self._merge(interval, bucket, quote.current_price, abs(int(quote.volume)))
+            self._merge(
+                interval,
+                bucket,
+                quote.current_price,
+                quote.current_price,
+                quote.current_price,
+                quote.current_price,
+                abs(int(quote.volume)),
+            )
+
+    def add_tick_candle(self, symbol: str, candle: Candle, now: datetime | None = None) -> None:
+        normalized = normalize_symbol(symbol)
+        close_price = float(candle.close)
+        if not normalized or close_price <= 0:
+            return
+        if self.symbol and normalized != self.symbol:
+            self.reset(normalized)
+        elif not self.symbol:
+            self.symbol = normalized
+
+        open_price = float(candle.open or close_price)
+        high_price = float(candle.high or max(open_price, close_price))
+        low_price = float(candle.low or min(open_price, close_price))
+        traded_at = self._quote_datetime(candle.timestamp, now)
+        for interval in SUPPORTED_SECOND_INTERVALS:
+            bucket_second = int(traded_at.timestamp())
+            bucket_second -= bucket_second % interval
+            bucket = datetime.fromtimestamp(bucket_second).strftime("%Y%m%d%H%M%S")
+            self._merge(
+                interval,
+                bucket,
+                open_price,
+                high_price,
+                low_price,
+                close_price,
+                abs(int(candle.volume)),
+            )
 
     def candles(self, interval: int) -> list[Candle]:
         if interval not in SUPPORTED_SECOND_INTERVALS:
             raise ValueError(f"지원하지 않는 초봉 간격입니다: {interval}")
         return list(self._candles[interval])
 
-    def _merge(self, interval: int, timestamp: str, price: float, volume: int) -> None:
+    def _merge(
+        self,
+        interval: int,
+        timestamp: str,
+        open_price: float,
+        high_price: float,
+        low_price: float,
+        close_price: float,
+        volume: int,
+    ) -> None:
         candles = self._candles[interval]
         existing_index = next(
             (index for index in range(len(candles) - 1, -1, -1) if candles[index].timestamp == timestamp),
@@ -73,10 +118,10 @@ class RealTimeCandleAggregator:
         if existing_index is None:
             candles.append(
                 Candle(
-                    high=price,
-                    low=price,
-                    close=price,
-                    open=price,
+                    high=high_price,
+                    low=low_price,
+                    close=close_price,
+                    open=open_price,
                     volume=volume,
                     timestamp=timestamp,
                 )
@@ -85,9 +130,9 @@ class RealTimeCandleAggregator:
         else:
             current = candles[existing_index]
             candles[existing_index] = Candle(
-                high=max(current.high, price),
-                low=min(current.low, price),
-                close=price,
+                high=max(current.high, high_price),
+                low=min(current.low, low_price),
+                close=close_price,
                 open=current.open,
                 volume=current.volume + volume,
                 timestamp=timestamp,

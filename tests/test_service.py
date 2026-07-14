@@ -166,6 +166,34 @@ class FakeRealtimeApi:
         return RealTimeQuote(symbol, 103, volume=3, timestamp="20260711101530")
 
 
+class FakeRestTickApi:
+    def __init__(self) -> None:
+        self.tick_requests = []
+        self.live_quotes = [
+            RealTimeQuote("005930", 106, volume=5, timestamp="20260711101532")
+        ]
+        self.latest_quote = self.live_quotes[-1]
+
+    def request_tick_candles(self, symbol, count=3000):
+        self.tick_requests.append((symbol, count))
+        return [
+            Candle(104, 104, 104, 104, 4, "20260711101531"),
+            Candle(103, 103, 103, 103, 3, "20260711101530"),
+            Candle(100, 100, 100, 100, 2, "20260711101530"),
+        ]
+
+    def pump_messages(self):
+        return
+
+    def drain_real_time_quotes(self, symbol):
+        quotes = [quote for quote in self.live_quotes if quote.symbol == symbol]
+        self.live_quotes = []
+        return quotes
+
+    def latest_real_time_quote(self, symbol):
+        return self.latest_quote if self.latest_quote.symbol == symbol else None
+
+
 class FakeWatchlistApi:
     def request_watchlist_quotes(self, symbols):
         return [
@@ -216,6 +244,36 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(candles[0].high, 103)
         self.assertEqual(candles[0].close, 103)
         self.assertEqual(candles[0].volume, 5)
+
+    def test_backfills_rest_second_chart_from_official_one_tick_history(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_tick_history_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        api = FakeRestTickApi()
+        service.connection_mode = "REST"
+        service.rest_api = api
+        service.symbol = "005930"
+        service.real_time_candles.reset("005930")
+
+        one_second = service.select_realtime_chart(1)
+        five_second = service.select_realtime_chart(5)
+        service.real_time_symbol = "005930"
+        service.refresh_real_time_quote()
+        combined = service.select_realtime_chart(1)
+
+        self.assertEqual(api.tick_requests, [("005930", 3000)])
+        self.assertEqual(len(one_second), 2)
+        self.assertEqual(one_second[0].open, 100)
+        self.assertEqual(one_second[0].high, 103)
+        self.assertEqual(one_second[0].close, 103)
+        self.assertEqual(one_second[0].volume, 5)
+        self.assertEqual(len(five_second), 1)
+        self.assertEqual(five_second[0].close, 104)
+        self.assertEqual(len(combined), 3)
+        self.assertEqual(combined[-1].close, 106)
+        self.assertEqual(combined[-1].volume, 5)
+        self.assertEqual(service.chart_source, "키움 ka10079 1틱 + 0B 실시간")
 
     def test_hour_chart_uses_sixty_minute_api_without_changing_strategy_candles(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_chart_test.sqlite3"

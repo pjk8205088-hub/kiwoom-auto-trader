@@ -88,6 +88,7 @@ class AutoTradingService:
         self.chart_source = "키움 분봉 API"
         self.real_time_candles = RealTimeCandleAggregator()
         self._last_aggregated_quote_key: tuple | None = None
+        self._tick_history_symbol = ""
         self.latest_dmi: DmiPoint | None = None
         self.last_decision: TradeDecision | None = None
         self.market_quote: MarketQuote | None = None
@@ -113,6 +114,7 @@ class AutoTradingService:
             self.chart_candles = []
             self.real_time_candles.reset(next_symbol)
             self._last_aggregated_quote_key = None
+            self._tick_history_symbol = ""
             self.market_quote = None
             self.real_time_quote = None
         self.symbol = next_symbol
@@ -320,6 +322,7 @@ class AutoTradingService:
         self.chart_source = "키움 분봉 API"
         self.real_time_candles.reset(self.symbol)
         self._last_aggregated_quote_key = None
+        self._tick_history_symbol = ""
         self.latest_dmi = None
         self.pattern_state = "NONE"
         self.strategy.reset()
@@ -532,8 +535,37 @@ class AutoTradingService:
             self.storage.log("WARN", "차트", self.last_api_message)
             return []
         self.chart_timeframe = f"{interval_seconds}s"
-        self.chart_source = "키움 실시간 체결 0B/주식체결"
+        target = normalize_symbol(self.symbol)
+        if self.connection_mode == "REST" and self._tick_history_symbol != target:
+            self._load_rest_tick_history(target)
+        if self.connection_mode == "REST" and self._tick_history_symbol == target:
+            self.chart_source = "키움 ka10079 1틱 + 0B 실시간"
+        else:
+            self.chart_source = "키움 실시간 체결 0B/주식체결"
         return self.real_time_candles.candles(interval_seconds)
+
+    def _load_rest_tick_history(self, symbol: str) -> None:
+        request_ticks = getattr(self.rest_api, "request_tick_candles", None)
+        if not callable(request_ticks) or not symbol or symbol == "000000":
+            return
+        try:
+            ticks = request_ticks(symbol, count=3000)
+        except API_ERRORS as exc:
+            self.last_api_message = f"REST 1틱 이력 조회 실패: {exc}"
+            self.storage.log("ERROR", "초봉", self.last_api_message)
+            return
+
+        if self.real_time_candles.symbol != symbol:
+            self.real_time_candles.reset(symbol)
+        for tick in reversed(ticks):
+            self.real_time_candles.add_tick_candle(symbol, tick)
+        self._tick_history_symbol = symbol
+        second_count = len(self.real_time_candles.candles(1))
+        self.last_api_message = (
+            f"{symbol} ka10079 1틱 {len(ticks)}개를 실제 체결시간 기준 "
+            f"1초봉 {second_count}개로 집계했습니다."
+        )
+        self.storage.log("INFO", "초봉", self.last_api_message)
 
     def chart_candles_for_display(self) -> list[Candle]:
         if self.chart_timeframe.endswith("s"):
@@ -590,6 +622,7 @@ class AutoTradingService:
             if target != self.real_time_symbol:
                 self.real_time_candles.reset(target)
                 self._last_aggregated_quote_key = None
+                self._tick_history_symbol = ""
             self.last_api_message = api.register_real_time_price(target)
             self.symbol = target
             self.real_time_symbol = target

@@ -6,6 +6,8 @@ from kiwoom_auto_trader.rest_api import (
     KiwoomRestApiError,
     KiwoomRestRateLimiter,
     RestResponse,
+    _decode_websocket_message,
+    _encode_websocket_message,
 )
 
 
@@ -210,6 +212,42 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertEqual(requester.calls[-1][2]["api-id"], "ka10080")
         self.assertEqual(requester.calls[-1][3]["tic_scope"], "60")
 
+    def test_requests_and_parses_official_one_tick_chart(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "stk_tic_chart_qry": [
+                            {
+                                "cur_prc": "+4385",
+                                "trde_qty": "+12",
+                                "cntr_tm": "20260714153500",
+                                "open_pric": "+4385",
+                                "high_pric": "+4385",
+                                "low_pric": "+4385",
+                            }
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        candles = client.request_tick_candles("012200")
+
+        self.assertEqual(requester.calls[-1][2]["api-id"], "ka10079")
+        self.assertEqual(requester.calls[-1][3]["tic_scope"], "1")
+        self.assertEqual(candles[0].close, 4385)
+        self.assertEqual(candles[0].volume, 12)
+        self.assertEqual(candles[0].timestamp, "20260714153500")
+
     def test_requests_and_parses_official_watchlist_information(self):
         requester = FakeRequester(
             [
@@ -303,6 +341,19 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         events = client.drain_real_time_quotes("005930")
         self.assertEqual(events, [quote])
         self.assertEqual(client.drain_real_time_quotes("005930"), [])
+
+    def test_echoes_plain_and_json_websocket_ping_messages(self):
+        client = KiwoomRestApiClient(mock=False, rate_limiter=NoopLimiter())
+
+        plain_ping = _decode_websocket_message("PING")
+        json_ping = _decode_websocket_message(b'{"trnm":"PING"}')
+
+        self.assertEqual(plain_ping, "PING")
+        self.assertEqual(_encode_websocket_message(plain_ping), "PING")
+        self.assertEqual(client._handle_websocket_message(plain_ping), "PING")
+        self.assertEqual(json_ping, {"trnm": "PING"})
+        self.assertEqual(_encode_websocket_message(json_ping), '{"trnm": "PING"}')
+        self.assertEqual(client._handle_websocket_message(json_ping), json_ping)
 
     def test_explains_live_key_used_against_mock_server(self):
         requester = FakeRequester(

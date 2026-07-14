@@ -26,6 +26,28 @@ class ChartingTests(unittest.TestCase):
         self.assertEqual(five_second[0].close, 99)
         self.assertEqual(five_second[0].volume, 9)
 
+    def test_aggregates_official_one_tick_history_into_second_candles(self):
+        aggregator = RealTimeCandleAggregator()
+        now = datetime(2026, 7, 11, 10, 15, 30)
+
+        aggregator.add_tick_candle(
+            "005930",
+            Candle(101, 99, 100, 100, 2, "20260711101530"),
+            now,
+        )
+        aggregator.add_tick_candle(
+            "005930",
+            Candle(104, 102, 103, 103, 3, "20260711101530"),
+            now,
+        )
+
+        candle = aggregator.candles(1)[0]
+        self.assertEqual(candle.open, 100)
+        self.assertEqual(candle.high, 104)
+        self.assertEqual(candle.low, 99)
+        self.assertEqual(candle.close, 103)
+        self.assertEqual(candle.volume, 5)
+
     def test_calculates_moving_average_without_fabricating_early_values(self):
         candles = [
             Candle(high=value, low=value, close=value)

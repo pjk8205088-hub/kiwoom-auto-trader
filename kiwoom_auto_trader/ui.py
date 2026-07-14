@@ -1440,7 +1440,11 @@ class TraderApp(tk.Tk):
         self._refresh()
         if not candles:
             if self.chart_timeframe_var.get().endswith("s"):
-                messagebox.showwarning("실시간 체결 대기", "키움 실시간 체결이 수신되면 초봉이 생성됩니다.")
+                messagebox.showwarning(
+                    "초봉 데이터 대기",
+                    "키움 ka10079 1틱 이력과 0B 실시간 체결을 아직 받지 못했습니다.\n"
+                    "장중 새 체결이 발생하면 초봉이 자동으로 이어집니다.",
+                )
             else:
                 messagebox.showwarning("차트 데이터 없음", "키움에서 선택한 주기의 차트 데이터를 받지 못했습니다.")
             return
@@ -1510,7 +1514,7 @@ class TraderApp(tk.Tk):
             width = max(1, canvas.winfo_width())
             height = max(1, canvas.winfo_height())
             empty_text = (
-                "실시간 체결 대기"
+                "초봉 데이터 대기\nka10079 1틱 이력 또는 장중 0B 체결 확인"
                 if self.service.chart_timeframe.endswith("s")
                 else "차트 데이터 대기"
             )
