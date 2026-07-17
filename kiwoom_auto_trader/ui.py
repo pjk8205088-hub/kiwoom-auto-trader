@@ -5,7 +5,7 @@ import tkinter as tk
 import webbrowser
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from .charting import moving_average, timeframe_label
 from .kiwoom_api import (
@@ -72,6 +72,11 @@ def _percentage_input_allowed(value: str) -> bool:
     if separator and fraction and not fraction.isdigit():
         return False
     return bool(whole or separator)
+
+
+def _account_password_input_allowed(value: str) -> bool:
+    text = str(value or "")
+    return not text or (len(text) <= 8 and text.isdigit())
 
 
 def _parse_money_input(value: str) -> float:
@@ -454,6 +459,8 @@ class TraderApp(tk.Tk):
         self.account_var = tk.StringVar(value="")
         self.account_first_var = tk.StringVar(value="")
         self.account_last_var = tk.StringVar(value="")
+        self.account_password_var = tk.StringVar(value="")
+        self.account_password_status_var = tk.StringVar(value="미확인")
         self.order_qty_var = tk.StringVar(value="0")
         self.order_qty_display_var = tk.StringVar(value="0주")
         self.current_price_display_var = tk.StringVar(value="미조회")
@@ -555,6 +562,29 @@ class TraderApp(tk.Tk):
             justify="center",
             state="readonly",
         ).pack(side="left", padx=(2, 8))
+        ttk.Label(kiwoom_controls, text="계좌 비밀번호").pack(side="left", padx=(6, 4))
+        self.account_password_entry = ttk.Entry(
+            kiwoom_controls,
+            textvariable=self.account_password_var,
+            width=10,
+            justify="center",
+            show="*",
+            validate="key",
+            validatecommand=(self.register(_account_password_input_allowed), "%P"),
+        )
+        self.account_password_entry.pack(side="left")
+        self.account_password_button = ttk.Button(
+            kiwoom_controls,
+            text="비밀번호 세팅",
+            command=self._set_account_password,
+        )
+        self.account_password_button.pack(side="left", padx=(4, 4))
+        ttk.Label(
+            kiwoom_controls,
+            textvariable=self.account_password_status_var,
+            width=8,
+            anchor="w",
+        ).pack(side="left")
         self.allow_real_order_checkbutton = ttk.Checkbutton(
             kiwoom_controls,
             text="실거래 주문 허용(위험)",
@@ -1053,6 +1083,8 @@ class TraderApp(tk.Tk):
     def _connect_account(self, expected_user_id: str) -> None:
         self._set_login_buttons_state("disabled")
         self._account_access_verified = False
+        self.account_password_var.set("")
+        self.account_password_status_var.set("미확인")
         self._update_connection_badge(False)
         self._account_poll_count = 0
         message = self.service.start_account_connection(expected_user_id)
@@ -1082,6 +1114,8 @@ class TraderApp(tk.Tk):
     def _connect_rest_account(self, app_key: str, secret_key: str, mock: bool) -> None:
         self._set_login_buttons_state("disabled")
         self._account_access_verified = False
+        self.account_password_var.set("")
+        self.account_password_status_var.set("REST 불필요")
         self._update_connection_badge(False)
         self.allow_real_order_var.set(False)
         server_type = "모의투자" if mock else "실전투자 조회 전용"
@@ -1568,37 +1602,63 @@ class TraderApp(tk.Tk):
     def _request_balance(self) -> None:
         if not self._require_live_connection():
             return
-        uses_account_password = self.service.account_info.connection_method != "REST API"
-        password = ""
-        if uses_account_password:
-            entered = simpledialog.askstring(
-                "계좌 비밀번호",
-                "OpenAPI+ 잔고 조회용 숫자 4~8자리를 입력해 주세요.\n입력값은 저장하지 않습니다.",
-                show="*",
-                parent=self,
+        if self.service.account_info.connection_method != "REST API":
+            if not self.account_password_var.get().strip():
+                messagebox.showwarning(
+                    "계좌 비밀번호 필요",
+                    "계좌번호 옆에 숫자 4~8자리 비밀번호를 입력하고 "
+                    "'비밀번호 세팅'을 눌러 주세요.",
+                )
+                self.account_password_entry.focus_set()
+                return
+            self._set_account_password()
+            return
+
+        balance = self.service.request_balance(self._account_for_api())
+        self._refresh()
+        if balance is not None:
+            self._show_account_info_window(refresh=True)
+
+    def _set_account_password(self) -> None:
+        if not self._require_live_connection():
+            self.account_password_var.set("")
+            return
+        if self.service.account_info.connection_method == "REST API":
+            self.account_password_var.set("")
+            self.account_password_status_var.set("REST 불필요")
+            self._request_balance()
+            return
+
+        password = self.account_password_var.get().strip()
+        self.account_password_var.set("")
+        if not is_valid_account_password(password):
+            password = ""
+            self.account_password_status_var.set("미확인")
+            messagebox.showwarning(
+                "계좌 비밀번호 확인",
+                "계좌 비밀번호는 숫자 4~8자리로 입력해 주세요.",
             )
-            if entered is None:
-                return
-            password = entered.strip()
-            entered = ""
-            if not is_valid_account_password(password):
-                messagebox.showwarning("계좌 비밀번호 확인", "계좌 비밀번호는 숫자 4~8자리로 입력해 주세요.")
-                return
-        if uses_account_password:
-            self._account_access_verified = False
-            self._update_connection_badge(False)
-            self.status_text.set("키움 계좌 비밀번호와 잔고 접근 권한을 확인하고 있습니다.")
-            self.update_idletasks()
+            self.account_password_entry.focus_set()
+            return
+
+        self._account_access_verified = False
+        self.account_password_status_var.set("확인 중")
+        self.account_password_entry.configure(state="disabled")
+        self.account_password_button.configure(state="disabled")
+        self._update_connection_badge(False)
+        self.status_text.set("키움 계좌 비밀번호와 잔고 접근 권한을 확인하고 있습니다.")
+        self.update_idletasks()
         try:
             balance = self.service.request_balance(self._account_for_api(), password)
         finally:
             password = ""
-        if uses_account_password:
-            self._account_access_verified = balance is not None
+
+        self._account_access_verified = balance is not None
+        self.account_password_status_var.set("확인됨" if balance is not None else "확인 실패")
         self._refresh()
         if balance is not None:
             self._show_account_info_window(refresh=True)
-        elif uses_account_password:
+        else:
             messagebox.showwarning("계좌 연결 실패", self.service.last_api_message)
 
     def _register_real_time(self) -> None:
@@ -2093,6 +2153,7 @@ class TraderApp(tk.Tk):
         connection_method = account.connection_method or "OpenAPI+"
         if not account.connected:
             self._account_access_verified = False
+        self._sync_account_password_controls(account)
         self._update_connection_badge(self._account_connection_confirmed(account), connection_method)
         real_order_state = "disabled" if connection_method == "REST API" else "normal"
         self.allow_real_order_checkbutton.configure(state=real_order_state)
@@ -2290,7 +2351,7 @@ class TraderApp(tk.Tk):
             balance_help = (
                 "'계좌잔고 불러오기'를 누르면 잔고가 표시됩니다."
                 if connection_method == "REST API"
-                else "계좌 비밀번호 입력 후 '계좌잔고 불러오기'를 누르면 잔고가 표시됩니다."
+                else "계좌 비밀번호 입력 후 '비밀번호 세팅'을 누르면 잔고가 표시됩니다."
             )
             return (
                 f"계좌 창: {connection_method} 연결됨({snapshot.account_info.server_type}) | "
@@ -2584,6 +2645,8 @@ class TraderApp(tk.Tk):
         if self.service.sync_account_connection():
             return True
         self._account_access_verified = False
+        self.account_password_var.set("")
+        self.account_password_status_var.set("미확인")
         self._selected_account_full = ""
         self._set_account_display("")
         if self._account_info_window is not None and self._account_info_window.winfo_exists():
@@ -2593,6 +2656,25 @@ class TraderApp(tk.Tk):
         self._update_connection_badge(False)
         self._update_trade_buttons()
         return False
+
+    def _sync_account_password_controls(self, account_info) -> None:
+        connection_method = account_info.connection_method or "OpenAPI+"
+        if not account_info.connected:
+            self.account_password_var.set("")
+            self.account_password_status_var.set("미확인")
+            state = "disabled"
+        elif connection_method == "REST API":
+            self.account_password_var.set("")
+            self.account_password_status_var.set("REST 불필요")
+            state = "disabled"
+        else:
+            state = "normal"
+            if self._account_access_verified:
+                self.account_password_status_var.set("확인됨")
+            elif self.account_password_status_var.get() not in {"확인 중", "확인 실패"}:
+                self.account_password_status_var.set("미확인")
+        self.account_password_entry.configure(state=state)
+        self.account_password_button.configure(state=state)
 
     def _update_connection_badge(self, connected: bool, connection_method: str = "") -> None:
         if connected:
@@ -2687,7 +2769,7 @@ class TraderApp(tk.Tk):
             balance_help = (
                 "연결 상태 확인 후 계좌잔고 불러오기를 눌러 주세요."
                 if account_info.connection_method == "REST API"
-                else "계좌 비밀번호 입력 후 잔고 불러오기를 눌러 주세요."
+                else "메인 화면에서 계좌 비밀번호 입력 후 비밀번호 세팅을 눌러 주세요."
             )
             rows.append(("계좌 금액", balance_help))
 

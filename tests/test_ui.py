@@ -1,14 +1,17 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
-from kiwoom_auto_trader.models import Candle, WatchlistQuote
+from kiwoom_auto_trader.models import BalanceSummary, Candle, WatchlistQuote
 from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
     TraderApp,
     _account_access_confirmed,
+    _account_password_input_allowed,
     _baseline_validation_message,
     _parse_money_input,
     _parse_order_quantity,
@@ -37,6 +40,52 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(_parse_order_quantity("25"), 25)
         self.assertEqual(_parse_order_quantity("2.5"), 0)
         self.assertEqual(_parse_order_quantity("-1"), 0)
+
+    def test_accepts_only_up_to_eight_password_digits_during_entry(self):
+        self.assertTrue(_account_password_input_allowed(""))
+        self.assertTrue(_account_password_input_allowed("1234"))
+        self.assertTrue(_account_password_input_allowed("12345678"))
+        self.assertFalse(_account_password_input_allowed("123456789"))
+        self.assertFalse(_account_password_input_allowed("12ab"))
+
+    def test_password_setting_verifies_balance_then_clears_plaintext(self):
+        class Variable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        balance = BalanceSummary(account="12345678", deposit=1_000_000)
+        request_balance = MagicMock(return_value=balance)
+        app = SimpleNamespace(
+            _require_live_connection=lambda: True,
+            service=SimpleNamespace(
+                account_info=SimpleNamespace(connection_method="OpenAPI+"),
+                request_balance=request_balance,
+            ),
+            account_password_var=Variable("1234"),
+            account_password_status_var=Variable("미확인"),
+            account_password_entry=MagicMock(),
+            account_password_button=MagicMock(),
+            _account_access_verified=False,
+            _update_connection_badge=MagicMock(),
+            status_text=Variable(),
+            update_idletasks=MagicMock(),
+            _account_for_api=lambda: "12345678",
+            _refresh=MagicMock(),
+            _show_account_info_window=MagicMock(),
+        )
+
+        TraderApp._set_account_password(app)
+
+        request_balance.assert_called_once_with("12345678", "1234")
+        self.assertEqual(app.account_password_var.get(), "")
+        self.assertEqual(app.account_password_status_var.get(), "확인됨")
+        self.assertTrue(app._account_access_verified)
 
     def test_parses_comma_formatted_operating_capital(self):
         self.assertEqual(_parse_money_input("1,000,000"), 1_000_000)
