@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import tkinter as tk
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -11,7 +12,14 @@ from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
     is_valid_account_password,
 )
-from .models import Candle, DmiPoint, PatternState, StrategySettings, WatchlistQuote
+from .models import (
+    Candle,
+    DmiPoint,
+    PatternState,
+    StrategySettings,
+    TradingBaseline,
+    WatchlistQuote,
+)
 from .price_triggers import OneShotPriceTrigger, OneShotPriceTriggerBook
 from .rest_api import KIWOOM_REST_PORTAL
 from .service import AutoTradingService
@@ -64,6 +72,32 @@ def _percentage_input_allowed(value: str) -> bool:
     if separator and fraction and not fraction.isdigit():
         return False
     return bool(whole or separator)
+
+
+def _parse_money_input(value: str) -> float:
+    text = str(value or "").replace(",", "").strip()
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def _baseline_validation_message(
+    capital_limit: float,
+    reference_price: float,
+    available_funds: float,
+) -> str:
+    if available_funds <= 0:
+        return "계좌의 주문가능금액을 먼저 불러와 주세요."
+    if capital_limit <= 0:
+        return "종목별 운용 한도금액을 0원보다 크게 입력해 주세요."
+    if reference_price <= 0:
+        return "키움 현재가를 먼저 불러와 주세요."
+    if capital_limit >= available_funds:
+        return "운용 한도금액은 계좌 주문가능금액보다 작아야 합니다."
+    if capital_limit < reference_price:
+        return "운용 한도금액은 현재 주식 1주 가격보다 작을 수 없습니다."
+    return ""
 
 
 class KiwoomLoginDialog(tk.Toplevel):
@@ -347,6 +381,7 @@ class TraderApp(tk.Tk):
         self._chart_visible_count = 100
         self.price_triggers = OneShotPriceTriggerBook()
         self._processing_price_triggers = False
+        self._trading_baseline: TradingBaseline | None = None
         self._build_ui()
         self._refresh()
 
@@ -410,7 +445,7 @@ class TraderApp(tk.Tk):
         self.symbol_var = tk.StringVar(value="000000")
         self.symbol_name_var = tk.StringVar(value="")
         self.capital_var = tk.StringVar(value="1000000")
-        self.price_var = tk.StringVar(value="72000")
+        self.baseline_status_var = tk.StringVar(value="미설정")
         self.dmi_period_var = tk.StringVar(value="14")
         self.dmi_state_var = tk.StringVar(value="계산 전")
         self.dmi_plus_var = tk.StringVar(value="-")
@@ -443,8 +478,36 @@ class TraderApp(tk.Tk):
             expand=True,
         )
         ttk.Button(symbol_name_row, text="종목 세팅", width=9, command=self._set_symbol).pack(side="right")
-        self._field(controls, "종목별 운용 한도금액", self.capital_var, 2)
-        self._field(controls, "모의 현재가(테스트용)", self.price_var, 3)
+        ttk.Label(controls, text="종목별 운용 한도금액").grid(row=0, column=2, sticky="w")
+        self.capital_entry = ttk.Entry(controls, textvariable=self.capital_var, width=14)
+        self.capital_entry.grid(row=1, column=2, sticky="ew", padx=(0, 8))
+
+        ttk.Label(controls, text="금액·기준가 고정").grid(row=0, column=3, sticky="w")
+        baseline_controls = ttk.Frame(controls)
+        baseline_controls.grid(row=1, column=3, sticky="ew", padx=(0, 8))
+        baseline_buttons = ttk.Frame(baseline_controls)
+        baseline_buttons.pack(anchor="w")
+        self.baseline_set_button = ttk.Button(
+            baseline_buttons,
+            text="금액 세팅",
+            width=8,
+            command=self._set_trading_baseline,
+        )
+        self.baseline_set_button.pack(side="left")
+        self.baseline_reset_button = ttk.Button(
+            baseline_buttons,
+            text="리세팅",
+            width=6,
+            command=self._reset_trading_baseline,
+            state="disabled",
+        )
+        self.baseline_reset_button.pack(side="left", padx=(4, 0))
+        ttk.Label(
+            baseline_controls,
+            textvariable=self.baseline_status_var,
+            foreground="#555555",
+            font=("Malgun Gothic", 8),
+        ).pack(anchor="w", pady=(3, 0))
         self._field(controls, "DMI 계산 기간", self.dmi_period_var, 4)
         ttk.Label(controls, text="DMI 강/약 상태").grid(row=0, column=5, sticky="w")
         self.dmi_state_badge = tk.Label(
@@ -538,8 +601,8 @@ class TraderApp(tk.Tk):
             padx=2,
         )
 
-        self._build_percent_trigger_box(order_controls, "BUY", 2)
-        self._build_percent_trigger_box(order_controls, "SELL", 3)
+        self._build_percent_trigger_box(order_controls, "SELL", 2)
+        self._build_percent_trigger_box(order_controls, "BUY", 3)
 
         api_actions = ttk.Frame(controls)
         api_actions.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
@@ -781,10 +844,123 @@ class TraderApp(tk.Tk):
             row=1, column=column, sticky="ew", padx=(0, 8)
         )
 
+    def _selected_trading_baseline(self) -> TradingBaseline | None:
+        baseline = self._trading_baseline
+        if baseline is None or baseline.symbol != normalize_symbol(self.symbol_var.get()):
+            return None
+        return baseline
+
+    def _operating_capital(self) -> float:
+        baseline = self._selected_trading_baseline()
+        return (
+            baseline.capital_limit
+            if baseline is not None
+            else _parse_money_input(self.capital_var.get())
+        )
+
+    def _load_trading_baseline(self, symbol: str) -> None:
+        normalized = normalize_symbol(symbol)
+        previous = self._trading_baseline
+        baseline = (
+            self.service.storage.trading_baseline(normalized)
+            if normalized and normalized != "000000"
+            else None
+        )
+        if baseline is None and previous is not None and previous.symbol != normalized:
+            self.capital_var.set("1000000")
+        self._apply_trading_baseline(baseline)
+
+    def _apply_trading_baseline(self, baseline: TradingBaseline | None) -> None:
+        self._trading_baseline = baseline
+        if baseline is None:
+            self.capital_entry.configure(state="normal")
+            self.baseline_status_var.set("미설정")
+            self.baseline_set_button.configure(state="normal")
+            self.baseline_reset_button.configure(state="disabled")
+            return
+        self.capital_var.set(f"{baseline.capital_limit:.0f}")
+        self.capital_entry.configure(state="readonly")
+        self.baseline_status_var.set(
+            f"{baseline.set_at[:10]} / 기준 {baseline.reference_price:,.0f}원"
+        )
+        self.baseline_set_button.configure(state="disabled")
+        self.baseline_reset_button.configure(state="normal")
+
+    def _set_trading_baseline(self) -> None:
+        if not self._require_live_connection():
+            return
+        if not self._selected_symbol_ready():
+            messagebox.showwarning("종목 세팅 필요", "6자리 종목번호와 회사명을 먼저 세팅해 주세요.")
+            return
+        if not self._account_connection_confirmed(self.service.account_info):
+            messagebox.showwarning("계좌 연결 필요", "계좌 연결과 잔고 확인을 먼저 완료해 주세요.")
+            return
+        balance = self.service.balance_summary
+        if balance is None:
+            messagebox.showwarning(
+                "계좌 잔고 필요",
+                "'계좌잔고 불러오기'로 주문가능금액을 먼저 확인해 주세요.",
+            )
+            return
+
+        current_price = self._selected_current_price()
+        if current_price <= 0:
+            self.service.request_current_price(self.symbol_var.get())
+            current_price = self._selected_current_price()
+        available_funds = (
+            balance.orderable_amount if balance.orderable_amount > 0 else balance.deposit
+        )
+        capital_limit = _parse_money_input(self.capital_var.get())
+        validation_message = _baseline_validation_message(
+            capital_limit,
+            current_price,
+            available_funds,
+        )
+        if validation_message:
+            messagebox.showwarning("금액 세팅 확인", validation_message)
+            self._refresh()
+            return
+
+        baseline = TradingBaseline(
+            symbol=normalize_symbol(self.symbol_var.get()),
+            capital_limit=capital_limit,
+            reference_price=current_price,
+            set_at=datetime.now().isoformat(timespec="seconds"),
+        )
+        self.service.storage.save_trading_baseline(baseline)
+        self._clear_all_price_triggers()
+        self._apply_trading_baseline(baseline)
+        self.service.configure(baseline.symbol, baseline.capital_limit, self._settings())
+        self.service.storage.log(
+            "INFO",
+            "금액세팅",
+            f"{baseline.symbol} 운용 한도 {baseline.capital_limit:,.0f}원과 "
+            f"기준가 {baseline.reference_price:,.0f}원을 {baseline.set_at[:10]}에 고정했습니다.",
+        )
+        self._refresh()
+
+    def _reset_trading_baseline(self) -> None:
+        baseline = self._selected_trading_baseline()
+        if baseline is None:
+            return
+        if self.service.running:
+            self.service.stop()
+        self.service.storage.remove_trading_baseline(baseline.symbol)
+        self._clear_all_price_triggers()
+        self._apply_trading_baseline(None)
+        self.service.configure(baseline.symbol, self._operating_capital(), self._settings())
+        self.service.storage.log(
+            "WARN",
+            "금액세팅",
+            f"{baseline.symbol}의 고정 운용금액과 기준가를 리세팅했습니다.",
+        )
+        self._refresh()
+
     def _build_percent_trigger_box(self, parent: ttk.Frame, side: str, column: int) -> None:
         is_buy = side == "BUY"
-        title = "일회성 자동매수" if is_buy else "일회성 자동매도"
+        title = "하한가 시작" if is_buy else "상한가 시작"
         sign = "-" if is_buy else "+"
+        button_text = "하락 설정" if is_buy else "상승 설정"
         percentage_var = self.buy_percent_var if is_buy else self.sell_percent_var
         status_var = self.buy_trigger_status_var if is_buy else self.sell_trigger_status_var
 
@@ -800,7 +976,12 @@ class TraderApp(tk.Tk):
             validatecommand=(self.register(_percentage_input_allowed), "%P"),
         ).grid(row=0, column=1, padx=(4, 2))
         ttk.Label(box, text="%").grid(row=0, column=2, padx=(0, 6))
-        button = ttk.Button(box, text="설정", width=7, command=lambda: self._arm_price_trigger(side))
+        button = ttk.Button(
+            box,
+            text=button_text,
+            width=8,
+            command=lambda: self._arm_price_trigger(side),
+        )
         button.grid(row=0, column=3)
         ttk.Label(box, textvariable=status_var, foreground="#555555").grid(
             row=1,
@@ -831,7 +1012,7 @@ class TraderApp(tk.Tk):
 
     def _save_settings(self) -> None:
         settings = StrategySettings(dmi_period=max(1, int(float(self.dmi_period_var.get()))))
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), settings)
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), settings)
         if self.symbol_var.get().strip() != self.service.symbol:
             self.symbol_var.set(self.service.symbol)
         if self.service.symbol_name:
@@ -1166,7 +1347,8 @@ class TraderApp(tk.Tk):
             return
 
         self.symbol_var.set(symbol)
-        self.service.configure(symbol, float(self.capital_var.get()), self._settings())
+        self._load_trading_baseline(symbol)
+        self.service.configure(symbol, self._operating_capital(), self._settings())
         self.service.request_current_price(symbol)
         timeframe = self.chart_timeframe_var.get()
         if timeframe.endswith("s"):
@@ -1270,15 +1452,17 @@ class TraderApp(tk.Tk):
         if len(digits) != 6 or digits == "000000":
             self.symbol_name_var.set("")
             self._clear_all_price_triggers()
+            self._load_trading_baseline("000000")
             self.current_price_display_var.set("미조회")
             messagebox.showwarning("종목번호 확인", "000000이 아닌 6자리 종목번호를 입력해 주세요.")
             return
 
         normalized = normalize_symbol(digits)
         previous_symbol = self.service.symbol
-        self.service.configure(normalized, float(self.capital_var.get()), self._settings())
-        name = self.service.lookup_symbol_name(normalized)
         self.symbol_var.set(normalized)
+        self._load_trading_baseline(normalized)
+        self.service.configure(normalized, self._operating_capital(), self._settings())
+        name = self.service.lookup_symbol_name(normalized)
         self.symbol_name_var.set(name or "조회 실패")
         if normalized != previous_symbol:
             self._clear_all_price_triggers()
@@ -1325,7 +1509,12 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _run_tick(self) -> None:
-        self.service.step(float(self.price_var.get()))
+        current_price = self._selected_current_price()
+        if current_price <= 0:
+            self.service.last_api_message = "키움 실제 현재가를 불러온 뒤 자동운용을 시작해 주세요."
+            self._refresh()
+            return
+        self.service.step(current_price)
         self._refresh()
 
     def _request_current_price(self) -> None:
@@ -1334,14 +1523,14 @@ class TraderApp(tk.Tk):
         if not self._selected_symbol_ready():
             messagebox.showwarning("종목 세팅 필요", "6자리 종목번호를 입력하고 '종목 세팅'을 먼저 눌러 주세요.")
             return
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.service.request_current_price(self.symbol_var.get())
         self._refresh()
 
     def _request_three_minute(self) -> None:
         if not self._require_live_connection():
             return
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.chart_timeframe_var.set("3m")
         self.service.request_chart_candles(3, self.symbol_var.get())
         self._refresh()
@@ -1362,7 +1551,7 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _load_selected_chart(self) -> list[Candle]:
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         timeframe = self.chart_timeframe_var.get()
         if timeframe.endswith("s"):
             if self.service.real_time_symbol != normalize_symbol(self.symbol_var.get()):
@@ -1415,7 +1604,7 @@ class TraderApp(tk.Tk):
     def _register_real_time(self) -> None:
         if not self._require_live_connection():
             return
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.service.register_real_time_price(self.symbol_var.get())
         self._refresh()
 
@@ -1428,7 +1617,7 @@ class TraderApp(tk.Tk):
     def _evaluate_market_strategy(self) -> None:
         if not self._require_live_connection():
             return
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.service.evaluate_strategy_with_market_data(self.symbol_var.get())
         self._refresh()
         self.main_notebook.select(self.dmi_chart_tab)
@@ -1847,7 +2036,7 @@ class TraderApp(tk.Tk):
             return
         if allow_real and not self._confirm_real_order("시장가 주문"):
             return
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.service.send_kiwoom_order(
             account=self._account_for_api(),
             side=side,
@@ -1877,7 +2066,7 @@ class TraderApp(tk.Tk):
             return
         if allow_real and not self._confirm_real_order("전략 판단 후 주문"):
             return
-        self.service.configure(self.symbol_var.get(), float(self.capital_var.get()), self._settings())
+        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.service.evaluate_and_send_order_with_market_data(
             account=self._account_for_api(),
             quantity=self._order_quantity(),
@@ -2122,14 +2311,24 @@ class TraderApp(tk.Tk):
         account = clean_account_number(self._account_for_api())
         name = snapshot.symbol_name or self.symbol_name_var.get().strip()
         quantity_ok = self._order_quantity_valid()
+        baseline_ready = self._selected_trading_baseline() is not None
         account_connected = self._account_connection_confirmed(snapshot.account_info)
         server_ready = (
             snapshot.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
         )
-        if account_connected and account and name and quantity_ok and server_ready:
+        baseline = self._selected_trading_baseline()
+        if (
+            account_connected
+            and account
+            and name
+            and quantity_ok
+            and baseline is not None
+            and server_ready
+        ):
             order_mode = "모의주문" if snapshot.account_info.server_type == "모의투자" else "실거래 주문"
             return (
                 f"거래 준비 완료: {snapshot.symbol} {name} | 계좌 {mask_account_number(account)} | "
+                f"고정 운용금액 {baseline.capital_limit:,.0f}원 | "
                 f"{self._order_quantity()}주 시장가 매수/매도 및 전략 판단 후 {order_mode} 가능"
             )
         missing = []
@@ -2143,6 +2342,8 @@ class TraderApp(tk.Tk):
             missing.append("회사명")
         if not quantity_ok:
             missing.append("주문수량")
+        if not baseline_ready:
+            missing.append("금액 세팅")
         if snapshot.account_info.server_type == "실거래" and not self.allow_real_order_var.get():
             if snapshot.account_info.connection_method == "REST API":
                 missing.append("REST 실전 조회 전용(주문 잠금)")
@@ -2153,6 +2354,7 @@ class TraderApp(tk.Tk):
     def _trading_ready(self) -> bool:
         account = clean_account_number(self._account_for_api())
         name = self.symbol_name_var.get().strip()
+        baseline_ready = self._selected_trading_baseline() is not None
         server_ready = (
             self.service.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
         )
@@ -2162,6 +2364,7 @@ class TraderApp(tk.Tk):
             and name
             and name != "키움 로그인 후 조회 필요"
             and self._order_quantity_valid()
+            and baseline_ready
             and server_ready
         )
 
@@ -2206,7 +2409,14 @@ class TraderApp(tk.Tk):
             messagebox.showwarning("계좌 연결 필요", "계좌 연결과 잔고 확인을 먼저 완료해 주세요.")
             return
 
-        current_price = self._selected_current_price()
+        baseline = self._selected_trading_baseline()
+        if baseline is None:
+            messagebox.showwarning(
+                "금액 세팅 필요",
+                "계좌 주문가능금액과 현재가를 확인한 뒤 '금액 세팅'을 먼저 눌러 주세요.",
+            )
+            return
+
         quantity = self._order_quantity()
         percentage_var = self.buy_percent_var if side == "BUY" else self.sell_percent_var
         try:
@@ -2214,7 +2424,7 @@ class TraderApp(tk.Tk):
             candidate = OneShotPriceTrigger.create(
                 side,
                 self.symbol_var.get(),
-                current_price,
+                baseline.reference_price,
                 percent,
                 quantity,
             )
@@ -2239,7 +2449,7 @@ class TraderApp(tk.Tk):
             action = "매수" if side == "BUY" else "매도"
             if not messagebox.askyesno(
                 "실거래 일회성 자동주문 확인",
-                f"현재가 {candidate.base_price:,.0f}원 기준 {candidate.percent:.2f}% 조건으로\n"
+                f"고정 기준가 {candidate.base_price:,.0f}원 기준 {candidate.percent:.2f}% 조건으로\n"
                 f"목표가 {candidate.target_price:,.0f}원 도달 시 {candidate.quantity}주를 자동 {action}합니다.\n\n"
                 "조건 충족 시 추가 확인 없이 실제 주문이 1회 전송됩니다. 설정하시겠습니까?",
             ):
@@ -2276,14 +2486,15 @@ class TraderApp(tk.Tk):
         trigger = self.price_triggers.get(side)
         status_var = self.buy_trigger_status_var if side == "BUY" else self.sell_trigger_status_var
         button = self.buy_trigger_button if side == "BUY" else self.sell_trigger_button
+        direction = "하락" if side == "BUY" else "상승"
         if trigger is None:
             status_var.set("미설정")
-            button.configure(text="설정")
+            button.configure(text=f"{direction} 설정")
             return
         status_var.set(
             f"기준 {trigger.base_price:,.0f} → 목표 {trigger.target_price:,.0f}원 / {trigger.quantity}주"
         )
-        button.configure(text="재설정")
+        button.configure(text=f"{direction} 재설정")
 
     def _clear_price_trigger(self, side: str) -> None:
         self.price_triggers.clear(side)
@@ -2336,7 +2547,7 @@ class TraderApp(tk.Tk):
                     self.service.storage.log("ERROR", action, "모의투자 연결이 아니어서 주문하지 않았습니다.")
                     continue
 
-                self.service.configure(trigger.symbol, float(self.capital_var.get()), self._settings())
+                self.service.configure(trigger.symbol, self._operating_capital(), self._settings())
                 self.service.current_price = current_price
                 self.service.storage.log(
                     "WARN" if trigger.allow_real_order else "INFO",

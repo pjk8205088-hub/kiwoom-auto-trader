@@ -713,6 +713,18 @@ class AutoTradingService:
                         f"주문 수량 {quantity}주는 운용 한도를 초과합니다. "
                         f"현재가 기준 최대 {risk_check.quantity}주까지 가능합니다."
                     )
+                if self.balance_summary is not None:
+                    available_funds = (
+                        self.balance_summary.orderable_amount
+                        if self.balance_summary.orderable_amount > 0
+                        else self.balance_summary.deposit
+                    )
+                    estimated_cost = quantity * self.current_price
+                    if estimated_cost > available_funds:
+                        raise KiwoomOpenApiError(
+                            f"예상 매수금액 {estimated_cost:,.0f}원이 계좌 주문가능금액 "
+                            f"{available_funds:,.0f}원을 초과합니다."
+                        )
             elif self.balance_summary is not None and quantity > holding_quantity:
                 raise KiwoomOpenApiError(
                     f"매도 수량 {quantity}주가 조회된 보유 수량 {holding_quantity}주를 초과합니다."

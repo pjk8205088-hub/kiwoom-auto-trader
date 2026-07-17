@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from .models import OrderResult, SystemLog
+from .models import OrderResult, SystemLog, TradingBaseline
 
 
 class Storage:
@@ -113,6 +113,42 @@ class Storage:
                 )
             )
 
+    def save_trading_baseline(self, baseline: TradingBaseline) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                """
+                insert into trading_baselines
+                    (symbol, capital_limit, reference_price, set_at)
+                values (?, ?, ?, ?)
+                on conflict(symbol) do update set
+                    capital_limit = excluded.capital_limit,
+                    reference_price = excluded.reference_price,
+                    set_at = excluded.set_at
+                """,
+                (
+                    baseline.symbol,
+                    baseline.capital_limit,
+                    baseline.reference_price,
+                    baseline.set_at,
+                ),
+            )
+
+    def trading_baseline(self, symbol: str) -> TradingBaseline | None:
+        with self._connection() as conn:
+            row = conn.execute(
+                """
+                select symbol, capital_limit, reference_price, set_at
+                from trading_baselines
+                where symbol = ?
+                """,
+                (symbol,),
+            ).fetchone()
+        return TradingBaseline(*row) if row else None
+
+    def remove_trading_baseline(self, symbol: str) -> None:
+        with self._connection() as conn:
+            conn.execute("delete from trading_baselines where symbol = ?", (symbol,))
+
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
 
@@ -159,6 +195,16 @@ class Storage:
                     symbol text not null unique,
                     name text not null default '',
                     created_at text not null
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists trading_baselines (
+                    symbol text primary key,
+                    capital_limit real not null,
+                    reference_price real not null,
+                    set_at text not null
                 )
                 """
             )

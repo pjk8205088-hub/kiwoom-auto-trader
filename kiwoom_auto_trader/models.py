@@ -42,6 +42,14 @@ class SymbolConfig:
 
 
 @dataclass(frozen=True)
+class TradingBaseline:
+    symbol: str
+    capital_limit: float
+    reference_price: float
+    set_at: str
+
+
+@dataclass(frozen=True)
 class TradeDecision:
     action: Action
     reason: str

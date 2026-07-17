@@ -9,6 +9,8 @@ from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
     TraderApp,
     _account_access_confirmed,
+    _baseline_validation_message,
+    _parse_money_input,
     _parse_order_quantity,
     _percentage_input_allowed,
 )
@@ -35,6 +37,19 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(_parse_order_quantity("25"), 25)
         self.assertEqual(_parse_order_quantity("2.5"), 0)
         self.assertEqual(_parse_order_quantity("-1"), 0)
+
+    def test_parses_comma_formatted_operating_capital(self):
+        self.assertEqual(_parse_money_input("1,000,000"), 1_000_000)
+        self.assertEqual(_parse_money_input("잘못된 금액"), 0)
+
+    def test_validates_fixed_capital_against_price_and_account_funds(self):
+        self.assertEqual(_baseline_validation_message(500_000, 72_000, 1_000_000), "")
+        self.assertIn(
+            "주문가능금액보다 작아야",
+            _baseline_validation_message(1_000_000, 72_000, 1_000_000),
+        )
+        self.assertIn("1주 가격", _baseline_validation_message(70_000, 72_000, 1_000_000))
+        self.assertIn("현재가", _baseline_validation_message(500_000, 0, 1_000_000))
 
     def test_reads_single_line_key_file_without_persisting_path(self):
         with tempfile.TemporaryDirectory() as directory:
