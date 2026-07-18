@@ -12,6 +12,7 @@ from kiwoom_auto_trader.ui import (
     TraderApp,
     _account_access_confirmed,
     _account_password_input_allowed,
+    _account_password_session_ready,
     _baseline_validation_message,
     _parse_money_input,
     _parse_order_quantity,
@@ -48,7 +49,19 @@ class UiHelperTests(unittest.TestCase):
         self.assertFalse(_account_password_input_allowed("123456789"))
         self.assertFalse(_account_password_input_allowed("12ab"))
 
-    def test_password_setting_verifies_balance_then_clears_plaintext(self):
+    def test_password_session_requires_matching_openapi_account(self):
+        self.assertTrue(
+            _account_password_session_ready("OpenAPI+", "12345678", "12345678", "1234")
+        )
+        self.assertFalse(
+            _account_password_session_ready("OpenAPI+", "12345678", "87654321", "1234")
+        )
+        self.assertFalse(
+            _account_password_session_ready("OpenAPI+", "12345678", "12345678", "12ab")
+        )
+        self.assertTrue(_account_password_session_ready("REST API", "12345678", "", ""))
+
+    def test_password_setting_keeps_verified_value_in_process_session(self):
         class Variable:
             def __init__(self, value=""):
                 self.value = value
@@ -72,6 +85,8 @@ class UiHelperTests(unittest.TestCase):
             account_password_entry=MagicMock(),
             account_password_button=MagicMock(),
             _account_access_verified=False,
+            _session_password_account="",
+            _suppress_password_trace=False,
             _update_connection_badge=MagicMock(),
             status_text=Variable(),
             update_idletasks=MagicMock(),
@@ -80,12 +95,100 @@ class UiHelperTests(unittest.TestCase):
             _show_account_info_window=MagicMock(),
         )
 
+        def clear_session(status="미확인", clear_entry=True):
+            app._session_password_account = ""
+            app._account_access_verified = False
+            if clear_entry:
+                app.account_password_var.set("")
+            app.account_password_status_var.set(status)
+
+        app._clear_account_password_session = clear_session
+
         TraderApp._set_account_password(app)
 
         request_balance.assert_called_once_with("12345678", "1234")
-        self.assertEqual(app.account_password_var.get(), "")
+        self.assertEqual(app.account_password_var.get(), "1234")
+        self.assertEqual(app._session_password_account, "12345678")
         self.assertEqual(app.account_password_status_var.get(), "확인됨")
         self.assertTrue(app._account_access_verified)
+
+    def test_password_controls_activate_only_after_account_number_loads(self):
+        class Variable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        selected_account = {"value": ""}
+        entry = MagicMock()
+        button = MagicMock()
+        app = SimpleNamespace(
+            account_password_var=Variable(""),
+            account_password_status_var=Variable("미확인"),
+            account_password_entry=entry,
+            account_password_button=button,
+            _account_access_verified=False,
+            _session_password_account="",
+            _account_for_api=lambda: selected_account["value"],
+            _password_session_ready=lambda: False,
+        )
+
+        def clear_session(status="미확인", clear_entry=True):
+            app._account_access_verified = False
+            app._session_password_account = ""
+            if clear_entry:
+                app.account_password_var.set("")
+            app.account_password_status_var.set(status)
+
+        app._clear_account_password_session = clear_session
+        info = SimpleNamespace(connected=True, connection_method="OpenAPI+")
+
+        TraderApp._sync_account_password_controls(app, info)
+
+        entry.configure.assert_called_with(state="disabled")
+        button.configure.assert_called_with(state="disabled", text="비밀번호 세팅")
+        self.assertEqual(app.account_password_status_var.get(), "계좌 대기")
+
+        entry.reset_mock()
+        button.reset_mock()
+        selected_account["value"] = "12345678"
+        TraderApp._sync_account_password_controls(app, info)
+
+        entry.configure.assert_called_with(state="normal")
+        button.configure.assert_called_with(state="normal", text="비밀번호 세팅")
+
+    def test_editing_verified_password_immediately_locks_orders(self):
+        class Variable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        app = SimpleNamespace(
+            _suppress_password_trace=False,
+            account_password_var=Variable("5678"),
+            account_password_status_var=Variable("확인됨"),
+            _session_password_account="12345678",
+            _account_access_verified=True,
+            _update_connection_badge=MagicMock(),
+            _update_trade_buttons=MagicMock(),
+        )
+
+        TraderApp._on_account_password_changed(app)
+
+        self.assertEqual(app._session_password_account, "")
+        self.assertFalse(app._account_access_verified)
+        self.assertEqual(app.account_password_status_var.get(), "입력 중")
+        app._update_connection_badge.assert_called_once_with(False)
+        app._update_trade_buttons.assert_called_once_with()
 
     def test_parses_comma_formatted_operating_capital(self):
         self.assertEqual(_parse_money_input("1,000,000"), 1_000_000)

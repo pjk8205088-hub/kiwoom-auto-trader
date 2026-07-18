@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
+from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo, KiwoomOpenApiError
 from kiwoom_auto_trader.models import (
     BalanceSummary,
     Candle,
@@ -125,6 +125,26 @@ class FakeRestApi:
             self.sell_failures_remaining -= 1
             raise KiwoomRestApiError("테스트용 모의 매도 요청 실패")
         return "REST 모의 주문 접수 완료"
+
+
+class FakeOpenApiOrderApi:
+    def __init__(self) -> None:
+        self.balance_calls = []
+        self.order_requests = []
+
+    def request_balance(self, account: str, password: str = "") -> BalanceSummary:
+        self.balance_calls.append((account, password))
+        if password != "9876":
+            raise KiwoomOpenApiError("계좌 비밀번호 확인 실패")
+        return BalanceSummary(
+            account=account,
+            deposit=1_000_000,
+            orderable_amount=1_000_000,
+        )
+
+    def send_order(self, request) -> str:
+        self.order_requests.append(request)
+        return "OpenAPI+ 모의 주문 접수 완료"
 
 
 class FakeChartApi:
@@ -446,6 +466,62 @@ class AutoTradingServiceTests(unittest.TestCase):
         fake_rest.order_calls = 0
         service.send_kiwoom_order("1234567890", "BUY", 1)
         self.assertEqual(fake_rest.order_calls, 1)
+
+    def test_openapi_order_rechecks_balance_with_session_password(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_password_order_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_openapi = FakeOpenApiOrderApi()
+        service.kiwoom_api = fake_openapi
+        service.connection_mode = "ACTIVEX"
+        service.account_info = KiwoomAccountInfo(
+            True,
+            ["1234567890"],
+            user_id="test-user",
+            server_type="모의투자",
+            reported_account_count=1,
+        )
+        service.symbol = "005930"
+        service.current_price = 100_000
+        service.max_capital = 1_000_000
+
+        message = service.send_kiwoom_order(
+            "1234567890",
+            "BUY",
+            1,
+            account_password="9876",
+        )
+
+        self.assertEqual(fake_openapi.balance_calls, [("1234567890", "9876")])
+        self.assertEqual(len(fake_openapi.order_requests), 1)
+        self.assertTrue(service.last_order_account_access_verified)
+        self.assertIn("접수 완료", message)
+
+        service.evaluate_strategy_with_market_data = lambda _symbol: TradeDecision(
+            "BUY",
+            "자동주문 테스트",
+            "BULLISH",
+        )
+        decision = service.evaluate_and_send_order_with_market_data(
+            "1234567890",
+            quantity=1,
+            account_password="9876",
+        )
+
+        self.assertEqual(decision.action, "BUY")
+        self.assertEqual(
+            fake_openapi.balance_calls,
+            [("1234567890", "9876"), ("1234567890", "9876")],
+        )
+        self.assertEqual(len(fake_openapi.order_requests), 2)
+        self.assertNotIn("9876", repr(service.storage.recent_logs(50)))
+
+        blocked = service.send_kiwoom_order("1234567890", "BUY", 1)
+
+        self.assertEqual(len(fake_openapi.order_requests), 2)
+        self.assertFalse(service.last_order_account_access_verified)
+        self.assertIn("비밀번호", blocked)
 
     def test_blocks_manual_buy_over_configured_capital_limit(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_cap_test.sqlite3"

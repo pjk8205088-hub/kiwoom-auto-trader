@@ -79,6 +79,21 @@ def _account_password_input_allowed(value: str) -> bool:
     return not text or (len(text) <= 8 and text.isdigit())
 
 
+def _account_password_session_ready(
+    connection_method: str,
+    account: str,
+    password_account: str,
+    password: str,
+) -> bool:
+    if connection_method == "REST API":
+        return True
+    return bool(
+        is_valid_account_password(password)
+        and clean_account_number(account)
+        and clean_account_number(account) == clean_account_number(password_account)
+    )
+
+
 def _parse_money_input(value: str) -> float:
     text = str(value or "").replace(",", "").strip()
     try:
@@ -371,6 +386,8 @@ class TraderApp(tk.Tk):
         self._account_poll_count = 0
         self._selected_account_full = ""
         self._account_access_verified = False
+        self._session_password_account = ""
+        self._suppress_password_trace = False
         self._account_info_window: tk.Toplevel | None = None
         self._candle_chart_window: tk.Toplevel | None = None
         self._candle_chart_canvas: tk.Canvas | None = None
@@ -388,6 +405,11 @@ class TraderApp(tk.Tk):
         self._processing_price_triggers = False
         self._trading_baseline: TradingBaseline | None = None
         self._build_ui()
+        self._account_password_trace_id = self.account_password_var.trace_add(
+            "write",
+            self._on_account_password_changed,
+        )
+        self.protocol("WM_DELETE_WINDOW", self._close_app)
         self._refresh()
 
     def _build_ui(self) -> None:
@@ -573,6 +595,7 @@ class TraderApp(tk.Tk):
             validatecommand=(self.register(_account_password_input_allowed), "%P"),
         )
         self.account_password_entry.pack(side="left")
+        self.account_password_entry.bind("<Return>", lambda _event: self._set_account_password())
         self.account_password_button = ttk.Button(
             kiwoom_controls,
             text="비밀번호 세팅",
@@ -1068,6 +1091,55 @@ class TraderApp(tk.Tk):
         self.service.emergency_stop()
         self._refresh()
 
+    def _close_app(self) -> None:
+        self._clear_account_password_session()
+        self.destroy()
+
+    def _on_account_password_changed(self, *_args) -> None:
+        if self._suppress_password_trace:
+            return
+        password = self.account_password_var.get().strip()
+        self._session_password_account = ""
+        self._account_access_verified = False
+        self.account_password_status_var.set("입력 중" if password else "미확인")
+        self._update_connection_badge(False)
+        self._update_trade_buttons()
+
+    def _clear_account_password_session(
+        self,
+        status: str = "미확인",
+        clear_entry: bool = True,
+    ) -> None:
+        self._session_password_account = ""
+        self._account_access_verified = False
+        if clear_entry:
+            self._suppress_password_trace = True
+            try:
+                self.account_password_var.set("")
+            finally:
+                self._suppress_password_trace = False
+        self.account_password_status_var.set(status)
+
+    def _password_session_ready(self) -> bool:
+        return _account_password_session_ready(
+            self.service.account_info.connection_method,
+            self._account_for_api(),
+            self._session_password_account,
+            self.account_password_var.get(),
+        )
+
+    def _account_password_for_order(self) -> str:
+        if self.service.account_info.connection_method == "REST API":
+            return ""
+        return self.account_password_var.get().strip() if self._password_session_ready() else ""
+
+    def _handle_order_account_verification(self) -> None:
+        if self.service.account_info.connection_method == "REST API":
+            return
+        if self.service.last_order_account_access_verified is False:
+            self._clear_account_password_session(status="확인 실패")
+            self.status_text.set(self.service.last_api_message)
+
     def _open_login_dialog(self) -> None:
         dialog = KiwoomLoginDialog(self)
         self.wait_window(dialog)
@@ -1082,9 +1154,9 @@ class TraderApp(tk.Tk):
 
     def _connect_account(self, expected_user_id: str) -> None:
         self._set_login_buttons_state("disabled")
-        self._account_access_verified = False
-        self.account_password_var.set("")
-        self.account_password_status_var.set("미확인")
+        self._clear_account_password_session()
+        self._selected_account_full = ""
+        self._set_account_display("")
         self._update_connection_badge(False)
         self._account_poll_count = 0
         message = self.service.start_account_connection(expected_user_id)
@@ -1113,9 +1185,7 @@ class TraderApp(tk.Tk):
 
     def _connect_rest_account(self, app_key: str, secret_key: str, mock: bool) -> None:
         self._set_login_buttons_state("disabled")
-        self._account_access_verified = False
-        self.account_password_var.set("")
-        self.account_password_status_var.set("REST 불필요")
+        self._clear_account_password_session(status="REST 불필요")
         self._update_connection_badge(False)
         self.allow_real_order_var.set(False)
         server_type = "모의투자" if mock else "실전투자 조회 전용"
@@ -1154,8 +1224,9 @@ class TraderApp(tk.Tk):
                 self._selected_account_full = self.service.account_info.accounts[0]
             self._set_account_display(self._selected_account_full)
         if not self.service.account_info.connected:
-            self._account_access_verified = False
+            self._clear_account_password_session()
         elif self.service.account_info.connection_method == "REST API":
+            self._clear_account_password_session(status="REST 불필요")
             self._account_access_verified = True
         self._refresh()
         if self._account_connection_confirmed(self.service.account_info):
@@ -1621,19 +1692,25 @@ class TraderApp(tk.Tk):
 
     def _set_account_password(self) -> None:
         if not self._require_live_connection():
-            self.account_password_var.set("")
+            self._clear_account_password_session()
             return
         if self.service.account_info.connection_method == "REST API":
-            self.account_password_var.set("")
-            self.account_password_status_var.set("REST 불필요")
+            self._clear_account_password_session(status="REST 불필요")
             self._request_balance()
             return
 
+        account = clean_account_number(self._account_for_api())
+        if not account:
+            self._clear_account_password_session(status="계좌 대기")
+            messagebox.showwarning(
+                "계좌번호 확인",
+                "키움 로그인 후 계좌번호가 표시되면 비밀번호를 입력해 주세요.",
+            )
+            return
+
         password = self.account_password_var.get().strip()
-        self.account_password_var.set("")
         if not is_valid_account_password(password):
-            password = ""
-            self.account_password_status_var.set("미확인")
+            self._clear_account_password_session(status="미확인", clear_entry=False)
             messagebox.showwarning(
                 "계좌 비밀번호 확인",
                 "계좌 비밀번호는 숫자 4~8자리로 입력해 주세요.",
@@ -1641,20 +1718,25 @@ class TraderApp(tk.Tk):
             self.account_password_entry.focus_set()
             return
 
-        self._account_access_verified = False
-        self.account_password_status_var.set("확인 중")
+        self._clear_account_password_session(status="확인 중", clear_entry=False)
         self.account_password_entry.configure(state="disabled")
         self.account_password_button.configure(state="disabled")
         self._update_connection_badge(False)
         self.status_text.set("키움 계좌 비밀번호와 잔고 접근 권한을 확인하고 있습니다.")
         self.update_idletasks()
+        balance = None
         try:
-            balance = self.service.request_balance(self._account_for_api(), password)
+            balance = self.service.request_balance(account, password)
+            if balance is not None:
+                self._session_password_account = account
+                self._account_access_verified = True
         finally:
             password = ""
 
-        self._account_access_verified = balance is not None
-        self.account_password_status_var.set("확인됨" if balance is not None else "확인 실패")
+        if balance is None:
+            self._clear_account_password_session(status="확인 실패")
+        else:
+            self.account_password_status_var.set("확인됨")
         self._refresh()
         if balance is not None:
             self._show_account_info_window(refresh=True)
@@ -2102,7 +2184,9 @@ class TraderApp(tk.Tk):
             side=side,
             quantity=self._order_quantity(),
             allow_real_order=allow_real,
+            account_password=self._account_password_for_order(),
         )
+        self._handle_order_account_verification()
         self._refresh()
 
     def _evaluate_and_send_order(self, auto: bool = False) -> None:
@@ -2131,7 +2215,9 @@ class TraderApp(tk.Tk):
             account=self._account_for_api(),
             quantity=self._order_quantity(),
             allow_real_order=allow_real,
+            account_password=self._account_password_for_order(),
         )
+        self._handle_order_account_verification()
         self._refresh()
 
     def _confirm_real_order(self, title: str) -> bool:
@@ -2621,7 +2707,9 @@ class TraderApp(tk.Tk):
                     side=trigger.side,
                     quantity=trigger.quantity,
                     allow_real_order=trigger.allow_real_order,
+                    account_password=self._account_password_for_order(),
                 )
+                self._handle_order_account_verification()
         finally:
             self._processing_price_triggers = False
         return True
@@ -2644,9 +2732,7 @@ class TraderApp(tk.Tk):
     def _ensure_live_connection(self) -> bool:
         if self.service.sync_account_connection():
             return True
-        self._account_access_verified = False
-        self.account_password_var.set("")
-        self.account_password_status_var.set("미확인")
+        self._clear_account_password_session()
         self._selected_account_full = ""
         self._set_account_display("")
         if self._account_info_window is not None and self._account_info_window.winfo_exists():
@@ -2660,21 +2746,34 @@ class TraderApp(tk.Tk):
     def _sync_account_password_controls(self, account_info) -> None:
         connection_method = account_info.connection_method or "OpenAPI+"
         if not account_info.connected:
-            self.account_password_var.set("")
-            self.account_password_status_var.set("미확인")
+            self._clear_account_password_session()
             state = "disabled"
         elif connection_method == "REST API":
-            self.account_password_var.set("")
-            self.account_password_status_var.set("REST 불필요")
+            self._clear_account_password_session(status="REST 불필요")
             state = "disabled"
         else:
-            state = "normal"
-            if self._account_access_verified:
+            account = clean_account_number(self._account_for_api())
+            if not account:
+                self._clear_account_password_session(status="계좌 대기")
+                state = "disabled"
+            else:
+                state = "normal"
+            if self._account_access_verified and self._password_session_ready():
                 self.account_password_status_var.set("확인됨")
-            elif self.account_password_status_var.get() not in {"확인 중", "확인 실패"}:
+            elif self.account_password_status_var.get() not in {
+                "계좌 대기",
+                "입력 중",
+                "확인 중",
+                "확인 실패",
+            }:
                 self.account_password_status_var.set("미확인")
         self.account_password_entry.configure(state=state)
-        self.account_password_button.configure(state=state)
+        button_text = (
+            "비밀번호 재설정"
+            if connection_method != "REST API" and self._password_session_ready()
+            else "비밀번호 세팅"
+        )
+        self.account_password_button.configure(state=state, text=button_text)
 
     def _update_connection_badge(self, connected: bool, connection_method: str = "") -> None:
         if connected:
@@ -2698,11 +2797,17 @@ class TraderApp(tk.Tk):
         account = self._account_for_api()
         if not account and account_info.accounts:
             account = account_info.accounts[0]
+        password_verified = self._account_access_verified and _account_password_session_ready(
+            account_info.connection_method,
+            account,
+            self._session_password_account,
+            self.account_password_var.get(),
+        )
         return _account_access_confirmed(
             account_info.connected,
             account_info.connection_method,
             account,
-            self._account_access_verified,
+            password_verified,
         )
 
     def _show_account_info_window(self, refresh: bool = False) -> None:
@@ -2815,6 +2920,10 @@ class TraderApp(tk.Tk):
 
     def _set_account_display(self, account: str) -> None:
         digits = display_account_number(account)
+        if self._session_password_account and clean_account_number(
+            self._session_password_account
+        ) != clean_account_number(account):
+            self._clear_account_password_session()
         self.account_first_var.set(digits[:4] if len(digits) >= 4 else "")
         self.account_last_var.set(digits[4:8] if len(digits) >= 8 else "")
         self.account_var.set(mask_account_number(digits) if digits else "")

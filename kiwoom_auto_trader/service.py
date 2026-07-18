@@ -11,7 +11,12 @@ from .charting import (
     RealTimeCandleAggregator,
     timeframe_label,
 )
-from .kiwoom_api import KiwoomAccountInfo, KiwoomOpenApiClient, KiwoomOpenApiError
+from .kiwoom_api import (
+    KiwoomAccountInfo,
+    KiwoomOpenApiClient,
+    KiwoomOpenApiError,
+    is_valid_account_password,
+)
 from .models import (
     BalanceSummary,
     Candle,
@@ -97,6 +102,7 @@ class AutoTradingService:
         self.real_time_quote: RealTimeQuote | None = None
         self.watchlist_quotes: dict[str, WatchlistQuote] = {}
         self.last_api_message = ""
+        self.last_order_account_access_verified: bool | None = None
 
     def configure(
         self,
@@ -327,6 +333,7 @@ class AutoTradingService:
         self.pattern_state = "NONE"
         self.strategy.reset()
         self.last_decision = None
+        self.last_order_account_access_verified = None
 
     def account_login_status(self) -> str:
         try:
@@ -685,11 +692,13 @@ class AutoTradingService:
         side: str,
         quantity: int,
         allow_real_order: bool = False,
+        account_password: str = "",
     ) -> str:
         account = clean_account_number(account)
         self.symbol = normalize_symbol(self.symbol) or self.symbol
         result_side = "BUY" if side == "BUY" else "SELL"
         api = self._active_api()
+        self.last_order_account_access_verified = None
         try:
             if not account:
                 raise KiwoomOpenApiError("주문할 계좌번호를 입력해 주세요.")
@@ -699,6 +708,30 @@ class AutoTradingService:
                 raise KiwoomOpenApiError("주문 수량은 1주 이상 선택해 주세요.")
             if self.symbol == "000000":
                 raise KiwoomOpenApiError("종목 세팅을 먼저 완료해 주세요.")
+
+            if self.account_info.connection_method != "REST API":
+                if not is_valid_account_password(account_password):
+                    self.last_order_account_access_verified = False
+                    raise KiwoomOpenApiError(
+                        "자동주문에 사용할 계좌 비밀번호를 숫자 4~8자리로 세팅해 주세요."
+                    )
+                try:
+                    self.balance_summary = api.request_balance(
+                        account,
+                        password=account_password,
+                    )
+                except API_ERRORS:
+                    self.last_order_account_access_verified = False
+                    raise
+                self.last_order_account_access_verified = True
+                self.storage.log(
+                    "INFO",
+                    "주문",
+                    f"{mask_account_number(account)} 주문 전 계좌 접근과 최신 잔고를 재확인했습니다.",
+                )
+            else:
+                self.last_order_account_access_verified = True
+
             holding_quantity = self._holding_quantity(self.symbol)
             if result_side == "BUY":
                 risk_check = self.risk.approve_buy(
@@ -791,6 +824,7 @@ class AutoTradingService:
         account: str,
         quantity: int,
         allow_real_order: bool = False,
+        account_password: str = "",
     ) -> TradeDecision | None:
         if quantity <= 0:
             self.last_api_message = "주문 수량은 1주 이상 선택해 주세요."
@@ -820,6 +854,7 @@ class AutoTradingService:
             side=decision.action,
             quantity=order_quantity,
             allow_real_order=allow_real_order,
+            account_password=account_password,
         )
         return decision
 
