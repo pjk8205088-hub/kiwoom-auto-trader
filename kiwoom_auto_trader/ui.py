@@ -299,8 +299,8 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         self.help_var.set(
             "실전투자 AppKey와 SecretKey를 사용하세요. 키움 포털에 현재 공인 IP가 "
             "등록되어 있어야 합니다. 연결 후 계좌·잔고·시세를 조회할 수 있습니다. "
-            "실제 주문은 메인 화면에서 매 실행 세션마다 별도 승인하고, 키움 정규장 장중 신호가 "
-            "확인된 경우에만 활성화됩니다."
+            "모의투자 연결 없이 실전투자로 바로 설정할 수 있습니다. 실제 주문은 자동매수·자동매도 "
+            "설정 시 실행 세션을 승인하고, 키움 정규장 장중 신호가 확인된 경우에만 활성화됩니다."
         )
 
     def _choose_key_file(self, target: tk.StringVar, key_name: str) -> None:
@@ -644,7 +644,7 @@ class TraderApp(tk.Tk):
         ).pack(side="left")
         self.allow_real_order_checkbutton = ttk.Checkbutton(
             kiwoom_controls,
-            text="실거래 세션 승인(위험)",
+            text="실거래 자동주문 승인",
             variable=self.allow_real_order_var,
             command=self._toggle_real_order_authorization,
         )
@@ -2762,27 +2762,39 @@ class TraderApp(tk.Tk):
             return
 
         allow_real_order = False
+        session_armed_by_setting = False
         if self.service.account_info.server_type != "모의투자":
-            if not self._real_order_session_ready():
-                messagebox.showwarning(
-                    "실거래 잠금",
-                    "실거래 세션 승인을 먼저 켜야 일회성 자동주문을 설정할 수 있습니다.",
-                )
-                return
+            session_approval_needed = not self._real_order_session_ready()
             action = "매수" if side == "BUY" else "매도"
             credential_note = (
                 "키움 REST 접근토큰으로 계좌와 잔고를 다시 확인합니다."
                 if self.service.account_info.connection_method == "REST API"
                 else "화면에서 세팅한 계좌 비밀번호로 주문 직전 잔고를 다시 확인합니다."
             )
+            session_note = (
+                "이 설정과 동시에 현재 실행의 실거래 자동주문 세션을 승인합니다.\n"
+                "모의투자 연결은 필요하지 않으며, 정규장 시작 전에는 주문하지 않고 대기합니다."
+                if session_approval_needed
+                else "현재 실행의 실거래 자동주문 세션 승인을 사용합니다."
+            )
             if not messagebox.askyesno(
                 "실거래 일회성 자동주문 확인",
                 f"고정 기준가 {candidate.base_price:,.0f}원 기준 {candidate.percent:.2f}% 조건으로\n"
                 f"목표가 {candidate.target_price:,.0f}원 도달 시 {candidate.quantity}주를 자동 {action}합니다.\n\n"
-                f"{credential_note}\n"
+                f"{credential_note}\n{session_note}\n"
                 "조건 충족 시 추가 확인 없이 실제 주문이 1회 전송됩니다. 설정하시겠습니까?",
             ):
                 return
+            if session_approval_needed:
+                self._real_order_session_armed = True
+                self.allow_real_order_var.set(True)
+                session_armed_by_setting = True
+                self.service.storage.log(
+                    "WARN",
+                    "주문",
+                    f"{mask_account_number(candidate.account)} 실거래 자동주문 세션을 "
+                    "가격 조건 설정과 함께 승인했습니다.",
+                )
             allow_real_order = True
 
         trigger = self.price_triggers.arm(
@@ -2799,6 +2811,10 @@ class TraderApp(tk.Tk):
             self.service.register_real_time_price(trigger.symbol)
         if self.service.real_time_symbol != trigger.symbol:
             self.price_triggers.clear(side)
+            if session_armed_by_setting:
+                self._clear_real_order_authorization(
+                    "실시간 시세 연결 실패로 방금 승인한 실거래 세션을 해제했습니다."
+                )
             self._update_price_trigger_status(side)
             messagebox.showwarning("실시간 시세 연결 실패", self.service.last_api_message)
             return
@@ -2828,6 +2844,8 @@ class TraderApp(tk.Tk):
             order_mode = "실주문 대기·REST 토큰"
         else:
             order_mode = "실주문 대기·비밀번호 확인"
+        if self._real_trading_account() and not self._regular_market_open():
+            order_mode += "·장 시작 대기"
         status_var.set(
             f"{order_mode} | {trigger.percent:g}% → {trigger.target_price:,.0f}원 | {trigger.quantity}주"
         )

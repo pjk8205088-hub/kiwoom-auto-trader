@@ -2,15 +2,17 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
 from kiwoom_auto_trader.models import (
     BalanceSummary,
     Candle,
     MarketSessionStatus,
+    TradingBaseline,
     WatchlistQuote,
 )
+from kiwoom_auto_trader.price_triggers import OneShotPriceTriggerBook
 from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
@@ -273,6 +275,87 @@ class UiHelperTests(unittest.TestCase):
         self.assertTrue(_regular_market_is_open(opened))
         self.assertFalse(_regular_market_is_open(waiting))
         self.assertFalse(_regular_market_is_open(None))
+
+    def test_live_rest_price_setting_arms_session_without_mock_connection(self):
+        class Variable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        account_info = SimpleNamespace(connection_method="REST API", server_type="실거래")
+        service = SimpleNamespace(
+            account_info=account_info,
+            real_time_symbol="005930",
+            storage=SimpleNamespace(log=MagicMock()),
+        )
+        app = SimpleNamespace(
+            service=service,
+            symbol_var=Variable("005930"),
+            buy_percent_var=Variable(""),
+            sell_percent_var=Variable("0.2"),
+            allow_real_order_var=Variable(False),
+            price_triggers=OneShotPriceTriggerBook(),
+            _real_order_session_armed=False,
+            _require_live_connection=lambda: True,
+            _selected_symbol_ready=lambda: True,
+            _account_connection_confirmed=lambda _info: True,
+            _password_session_ready=lambda: True,
+            _selected_trading_baseline=lambda: TradingBaseline(
+                "005930",
+                1_000_000,
+                70_000,
+                "2026-07-19",
+            ),
+            _order_quantity=lambda: 2,
+            _account_for_api=lambda: "12345678",
+            _real_order_session_ready=lambda: False,
+            _update_price_trigger_status=MagicMock(),
+            _refresh=MagicMock(),
+            _clear_real_order_authorization=MagicMock(),
+        )
+
+        with patch("kiwoom_auto_trader.ui.messagebox.askyesno", return_value=True):
+            TraderApp._arm_price_trigger(app, "SELL")
+
+        trigger = app.price_triggers.get("SELL")
+        self.assertIsNotNone(trigger)
+        self.assertTrue(trigger.allow_real_order)
+        self.assertEqual(trigger.account, "12345678")
+        self.assertTrue(app._real_order_session_armed)
+        self.assertTrue(app.allow_real_order_var.get())
+        service.storage.log.assert_any_call(
+            "WARN",
+            "주문",
+            "1234-5678 실거래 자동주문 세션을 가격 조건 설정과 함께 승인했습니다.",
+        )
+
+    def test_live_price_setting_waits_without_being_consumed_before_market_open(self):
+        triggers = OneShotPriceTriggerBook()
+        triggers.arm(
+            "BUY",
+            "005930",
+            70_000,
+            0.2,
+            2,
+            allow_real_order=True,
+            account="12345678",
+        )
+        app = SimpleNamespace(
+            _processing_price_triggers=False,
+            _real_trading_account=lambda: True,
+            _regular_market_open=lambda: False,
+            price_triggers=triggers,
+        )
+
+        processed = TraderApp._process_one_shot_price_triggers(app)
+
+        self.assertFalse(processed)
+        self.assertIsNotNone(triggers.get("BUY"))
 
     def test_main_status_hides_internal_mock_state_and_account_details(self):
         snapshot = ServiceSnapshot(
