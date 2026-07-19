@@ -149,6 +149,19 @@ class RealTimeQuote:
 
 
 @dataclass(frozen=True)
+class MarketSessionStatus:
+    operation_code: str
+    event_time: str = ""
+    expected_remaining_seconds: int = 0
+    received_at: str = ""
+    source: str = ""
+
+    @property
+    def is_open(self) -> bool:
+        return self.operation_code == "3"
+
+
+@dataclass(frozen=True)
 class KiwoomOrderRequest:
     account: str
     symbol: str

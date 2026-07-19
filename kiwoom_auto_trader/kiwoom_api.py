@@ -6,6 +6,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Any, Callable
 
 from .charting import SUPPORTED_MINUTE_INTERVALS
@@ -16,6 +17,7 @@ from .models import (
     Holding,
     KiwoomOrderRequest,
     MarketQuote,
+    MarketSessionStatus,
     RealTimeQuote,
     WatchlistQuote,
 )
@@ -194,6 +196,7 @@ class KiwoomOpenApiClient:
         self._tr_parsers: dict[str, Callable[[str, str, str], Any]] = {}
         self._real_quotes: dict[str, RealTimeQuote] = {}
         self._real_quote_events: deque[RealTimeQuote] = deque(maxlen=5000)
+        self._market_session_status: MarketSessionStatus | None = None
         self._last_login_error: int | None = None
         self._last_comm_connect_result: int | None = None
         self._login_window_status = ""
@@ -472,14 +475,20 @@ class KiwoomOpenApiClient:
             raise KiwoomOpenApiError("실시간 등록 종목코드를 입력해 주세요.")
         self._real_quotes.pop(symbol, None)
         self._real_quote_events.clear()
+        self._market_session_status = None
         result = api.SetRealReg(screen_no, symbol, "10;11;12;13;15;20", "0")
         if result not in (0, None):
             raise KiwoomOpenApiError(f"실시간 시세 등록 실패: {result}")
-        return f"{symbol} 실시간 시세를 등록했습니다."
+        market_result = api.SetRealReg("9002", "", "20;214;215", "0")
+        if market_result not in (0, None):
+            raise KiwoomOpenApiError(f"장시작시간 등록 실패: {market_result}")
+        return f"{symbol} 실시간 시세와 장시작시간을 등록했습니다."
 
     def unregister_real_time(self, screen_no: str = "9001") -> str:
         api = self._ensure_api()
         api.SetRealRemove(screen_no, "ALL")
+        api.SetRealRemove("9002", "ALL")
+        self._market_session_status = None
         return "실시간 시세 등록을 해제했습니다."
 
     def latest_real_time_quote(self, symbol: str) -> RealTimeQuote | None:
@@ -493,6 +502,9 @@ class KiwoomOpenApiClient:
             if quote.symbol == target:
                 quotes.append(quote)
         return quotes
+
+    def latest_market_session_status(self) -> MarketSessionStatus | None:
+        return self._market_session_status
 
     def lookup_symbol_name(self, symbol: str) -> str:
         api = self._ensure_api()
@@ -508,17 +520,27 @@ class KiwoomOpenApiClient:
         api = self._ensure_api()
         if not self.is_connected():
             raise KiwoomOpenApiError("키움 OpenAPI 로그인 후 주문할 수 있습니다.")
-        if request.require_mock_server and not self.is_mock_server():
-            raise KiwoomOpenApiError(
-                "현재 접속 서버가 모의투자 서버가 아닙니다. 모의주문은 모의투자 접속에서만 허용됩니다."
-            )
-        if not request.allow_real_order and not request.require_mock_server:
-            raise KiwoomOpenApiError("실거래 주문 잠금이 켜져 있어 주문을 차단했습니다.")
+        mock_server = self.is_mock_server()
+        if mock_server:
+            if request.allow_real_order or not request.require_mock_server:
+                raise KiwoomOpenApiError("모의투자 서버에서는 실거래 주문 요청을 사용할 수 없습니다.")
+            order_mode = "모의"
+        else:
+            if not request.allow_real_order or request.require_mock_server:
+                raise KiwoomOpenApiError("실거래 주문은 앱의 실거래 세션 승인이 있어야 합니다.")
+            if not self._market_session_status or not self._market_session_status.is_open:
+                raise KiwoomOpenApiError(
+                    "키움 장시작시간에서 정규장 장중 신호를 확인하지 못해 실거래 주문을 차단했습니다."
+                )
+            order_mode = "실전"
         if request.quantity <= 0:
             raise KiwoomOpenApiError("주문 수량은 1주 이상이어야 합니다.")
+        if request.side not in {"BUY", "SELL"}:
+            raise KiwoomOpenApiError("주문 구분은 매수 또는 매도여야 합니다.")
 
         order_type = 1 if request.side == "BUY" else 2
-        rqname = "모의매수주문" if request.side == "BUY" else "모의매도주문"
+        side_name = "매수" if request.side == "BUY" else "매도"
+        rqname = f"{order_mode}{side_name}주문"
         symbol = normalize_symbol(request.symbol)
         self._request_limiter.acquire()
         result = api.SendOrder(
@@ -714,6 +736,15 @@ class KiwoomOpenApiClient:
             self._tr_results[rqname] = KiwoomOpenApiError(str(exc))
 
     def _handle_real_data(self, code: str, real_type: str, real_data: str) -> None:
+        if "장시작시간" in real_type:
+            self._market_session_status = MarketSessionStatus(
+                operation_code=str(self._get_real_data(code, 215) or "").strip(),
+                event_time=str(self._get_real_data(code, 20) or "").strip(),
+                expected_remaining_seconds=_to_int(self._get_real_data(code, 214)),
+                received_at=datetime.now().strftime("%Y%m%d%H%M%S"),
+                source="키움 OpenAPI+ 장시작시간",
+            )
+            return
         if "주식" not in real_type and "체결" not in real_type:
             return
         current = _to_price(self._get_real_data(code, 10))

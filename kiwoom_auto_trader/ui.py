@@ -15,6 +15,7 @@ from .kiwoom_api import (
 from .models import (
     Candle,
     DmiPoint,
+    MarketSessionStatus,
     PatternState,
     StrategySettings,
     TradingBaseline,
@@ -40,7 +41,7 @@ PATTERN_VALUE_TO_LABEL: dict[PatternState, str] = {
 ACTION_LABELS = {"BUY": "매수", "SELL": "매도", "HOLD": "대기", "NONE": "없음"}
 SIDE_LABELS = {"BUY": "매수", "SELL": "매도"}
 LEVEL_LABELS = {"INFO": "정보", "WARN": "주의", "ERROR": "오류"}
-REST_LIVE_LABEL = "실전투자 (조회 전용)"
+REST_LIVE_LABEL = "실전투자"
 REST_MOCK_LABEL = "모의투자"
 
 
@@ -118,6 +119,20 @@ def _baseline_validation_message(
     if capital_limit < reference_price:
         return "운용 한도금액은 현재 주식 1주 가격보다 작을 수 없습니다."
     return ""
+
+
+def _regular_market_is_open(status: MarketSessionStatus | None) -> bool:
+    return bool(status and status.is_open)
+
+
+def _market_session_text(status: MarketSessionStatus | None) -> str:
+    if status is None:
+        return "키움 장 시작 신호 대기"
+    if status.is_open:
+        return "정규장 장중"
+    if status.operation_code == "0":
+        return "정규장 시작 전"
+    return f"정규장 비운영({status.operation_code or '미확인'})"
 
 
 class KiwoomLoginDialog(tk.Toplevel):
@@ -279,10 +294,12 @@ class KiwoomRestLoginDialog(tk.Toplevel):
             )
             return
         self.heading_var.set("키움 REST API 실전투자 연결")
-        self.connect_button_var.set("실전 조회 연결")
+        self.connect_button_var.set("실전투자 연결")
         self.help_var.set(
             "실전투자 AppKey와 SecretKey를 사용하세요. 키움 포털에 현재 공인 IP가 "
-            "등록되어 있어야 합니다. 실전 계좌·잔고·시세 조회만 활성화되며 실제 주문은 잠겨 있습니다."
+            "등록되어 있어야 합니다. 연결 후 계좌·잔고·시세를 조회할 수 있습니다. "
+            "실제 주문은 메인 화면에서 매 실행 세션마다 별도 승인하고, 키움 정규장 장중 신호가 "
+            "확인된 경우에만 활성화됩니다."
         )
 
     def _choose_key_file(self, target: tk.StringVar, key_name: str) -> None:
@@ -404,6 +421,8 @@ class TraderApp(tk.Tk):
         self.price_triggers = OneShotPriceTriggerBook()
         self._processing_price_triggers = False
         self._trading_baseline: TradingBaseline | None = None
+        self._real_order_session_armed = False
+        self._last_auto_market_code: str | None = None
         self._build_ui()
         self._account_password_trace_id = self.account_password_var.trace_add(
             "write",
@@ -492,6 +511,7 @@ class TraderApp(tk.Tk):
         self.sell_trigger_status_var = tk.StringVar(value="미설정")
         self.allow_real_order_var = tk.BooleanVar(value=False)
         self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
+        self.market_session_var = tk.StringVar(value="장 상태: 키움 신호 대기")
         self.account_summary_var = tk.StringVar(
             value="계좌 창: 로그인 전입니다. 키움 로그인 후 계좌번호 앞4자리+뒤4자리와 잔고가 표시됩니다."
         )
@@ -562,9 +582,10 @@ class TraderApp(tk.Tk):
         ttk.Button(actions, text="자동 운용 중지", command=self._stop).pack(side="left", padx=6)
         ttk.Checkbutton(
             actions,
-            text="자동운용 시 3분봉 DMI 강약 전환을 키움 모의주문에 연결",
+            text="자동운용 시 3분봉 DMI 강약 전환을 키움 주문에 연결",
             variable=self.kiwoom_auto_order_var,
         ).pack(side="left", padx=(12, 0))
+        ttk.Label(actions, textvariable=self.market_session_var).pack(side="left", padx=(14, 0))
 
         kiwoom_controls = ttk.Frame(controls)
         kiwoom_controls.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(12, 0))
@@ -610,9 +631,9 @@ class TraderApp(tk.Tk):
         ).pack(side="left")
         self.allow_real_order_checkbutton = ttk.Checkbutton(
             kiwoom_controls,
-            text="실거래 주문 허용(위험)",
+            text="실거래 세션 승인(위험)",
             variable=self.allow_real_order_var,
-            command=self._refresh,
+            command=self._toggle_real_order_authorization,
         )
         self.allow_real_order_checkbutton.pack(side="left", padx=(12, 0))
 
@@ -998,6 +1019,9 @@ class TraderApp(tk.Tk):
             return
         if self.service.running:
             self.service.stop()
+        self._clear_real_order_authorization(
+            "고정 운용금액 리세팅으로 실거래 세션 승인을 해제했습니다."
+        )
         self.service.storage.remove_trading_baseline(baseline.symbol)
         self._clear_all_price_triggers()
         self._apply_trading_baseline(None)
@@ -1080,20 +1104,101 @@ class TraderApp(tk.Tk):
             if not self._trading_ready():
                 messagebox.showwarning("자동운용 준비 필요", self.trade_ready_var.get())
                 return
+            if self.service.real_time_symbol != normalize_symbol(self.symbol_var.get()):
+                self.service.register_real_time_price(self.symbol_var.get())
+            if self._real_trading_account() and not self._regular_market_open():
+                self.service.storage.log(
+                    "INFO",
+                    "자동주문",
+                    "자동운용을 준비했습니다. 키움 장시작시간 신호가 정규장 장중(3)으로 "
+                    "바뀌면 DMI 전략 판단과 주문을 시작합니다.",
+                )
         self.service.start()
         self._refresh()
 
     def _stop(self) -> None:
         self.service.stop()
+        self._clear_real_order_authorization("자동운용 중지로 실거래 세션 승인을 해제했습니다.")
         self._refresh()
 
     def _emergency_stop(self) -> None:
         self.service.emergency_stop()
+        self._clear_real_order_authorization("긴급 정지로 실거래 세션 승인을 해제했습니다.")
+        self._clear_all_price_triggers()
         self._refresh()
 
     def _close_app(self) -> None:
+        self._clear_real_order_authorization()
         self._clear_account_password_session()
         self.destroy()
+
+    def _real_trading_account(self) -> bool:
+        return self.service.account_info.server_type == "실거래"
+
+    def _real_order_session_ready(self) -> bool:
+        if not self._real_trading_account():
+            return False
+        return bool(self.allow_real_order_var.get() and self._real_order_session_armed)
+
+    def _regular_market_open(self) -> bool:
+        if not self._real_trading_account():
+            return True
+        return _regular_market_is_open(self.service.latest_market_session_status())
+
+    def _clear_real_order_authorization(self, log_message: str = "") -> None:
+        was_armed = self._real_order_session_armed or self.allow_real_order_var.get()
+        self._real_order_session_armed = False
+        self.allow_real_order_var.set(False)
+        self._last_auto_market_code = None
+        if was_armed and log_message:
+            self.service.storage.log("WARN", "주문", log_message)
+
+    def _toggle_real_order_authorization(self) -> None:
+        if not self.allow_real_order_var.get():
+            self._clear_real_order_authorization("사용자가 실거래 세션 승인을 해제했습니다.")
+            if self.service.running and self._real_trading_account():
+                self.service.stop()
+            self._refresh()
+            return
+
+        account = self._account_for_api()
+        baseline = self._selected_trading_baseline()
+        if (
+            not self._real_trading_account()
+            or not self._account_connection_confirmed(self.service.account_info)
+            or not account
+            or not self._selected_symbol_ready()
+            or not self._order_quantity_valid()
+            or baseline is None
+        ):
+            self.allow_real_order_var.set(False)
+            self._real_order_session_armed = False
+            messagebox.showwarning(
+                "실거래 준비 필요",
+                "실전 계좌 연결, 종목 세팅, 1주 이상 주문 수량, 금액 세팅을 먼저 완료해 주세요.",
+            )
+            self._refresh()
+            return
+
+        confirmed = messagebox.askyesno(
+            "실거래 자동주문 세션 승인",
+            f"계좌 {mask_account_number(account)} / 종목 {self.symbol_var.get()} "
+            f"{self.symbol_name_var.get()}\n"
+            f"주문 수량 {self._order_quantity()}주 / 고정 운용금액 {baseline.capital_limit:,.0f}원\n\n"
+            "키움 정규장 장중 신호가 확인되면 DMI 전환 또는 설정한 가격 조건에 따라 "
+            "추가 확인 없이 실제 시장가 주문이 전송될 수 있습니다.\n"
+            "이 승인은 앱 종료, 자동운용 중지, 연결 해제 또는 긴급 정지 시 사라집니다.\n\n"
+            "계좌, 종목, 수량과 운용금액을 확인했으며 이번 실행 세션의 실거래를 승인하시겠습니까?",
+        )
+        self._real_order_session_armed = confirmed
+        self.allow_real_order_var.set(confirmed)
+        if confirmed:
+            self.service.storage.log(
+                "WARN",
+                "주문",
+                f"{mask_account_number(account)} 실거래 자동주문 세션을 사용자가 승인했습니다.",
+            )
+        self._refresh()
 
     def _on_account_password_changed(self, *_args) -> None:
         if self._suppress_password_trace:
@@ -1154,6 +1259,7 @@ class TraderApp(tk.Tk):
 
     def _connect_account(self, expected_user_id: str) -> None:
         self._set_login_buttons_state("disabled")
+        self._clear_real_order_authorization()
         self._clear_account_password_session()
         self._selected_account_full = ""
         self._set_account_display("")
@@ -1185,10 +1291,10 @@ class TraderApp(tk.Tk):
 
     def _connect_rest_account(self, app_key: str, secret_key: str, mock: bool) -> None:
         self._set_login_buttons_state("disabled")
+        self._clear_real_order_authorization()
         self._clear_account_password_session(status="REST 불필요")
         self._update_connection_badge(False)
-        self.allow_real_order_var.set(False)
-        server_type = "모의투자" if mock else "실전투자 조회 전용"
+        server_type = "모의투자" if mock else "실전투자"
         self.status_text.set(f"키움 REST API {server_type} 토큰과 계좌를 확인하고 있습니다.")
         self.update_idletasks()
         account_info = self.service.start_rest_connection(app_key, secret_key, mock=mock)
@@ -1564,6 +1670,12 @@ class TraderApp(tk.Tk):
 
         normalized = normalize_symbol(digits)
         previous_symbol = self.service.symbol
+        if normalized != previous_symbol:
+            if self.service.running:
+                self.service.stop()
+            self._clear_real_order_authorization(
+                "종목 변경으로 실거래 세션 승인을 해제했습니다."
+            )
         self.symbol_var.set(normalized)
         self._load_trading_baseline(normalized)
         self.service.configure(normalized, self._operating_capital(), self._settings())
@@ -2172,9 +2284,15 @@ class TraderApp(tk.Tk):
     def _send_order(self, side: str) -> None:
         if not self._require_live_connection():
             return
-        allow_real = self.allow_real_order_var.get()
+        allow_real = self._real_order_session_ready()
         if not self._trading_ready():
             messagebox.showwarning("주문 준비 필요", self.trade_ready_var.get())
+            return
+        if allow_real and not self._regular_market_open():
+            messagebox.showwarning(
+                "정규장 장중 확인 필요",
+                "키움 장시작시간(0s)에서 정규장 장중 신호를 확인한 뒤 실거래 주문할 수 있습니다.",
+            )
             return
         if allow_real and not self._confirm_real_order("시장가 주문"):
             return
@@ -2199,16 +2317,15 @@ class TraderApp(tk.Tk):
             if not auto:
                 messagebox.showwarning("주문 준비 필요", self.trade_ready_var.get())
             return
-        allow_real = self.allow_real_order_var.get()
-        if auto and allow_real:
-            self.service.storage.log(
-                "WARN",
-                "주문",
-                "자동운용 중 실거래 주문은 차단했습니다. 실거래는 수동 주문 버튼에서만 최종 확인 후 가능합니다.",
-            )
-            self._refresh()
+        allow_real = self._real_order_session_ready()
+        if allow_real and not self._regular_market_open():
+            if not auto:
+                messagebox.showwarning(
+                    "정규장 장중 확인 필요",
+                    "키움 장시작시간(0s)에서 정규장 장중 신호를 확인한 뒤 실거래 주문할 수 있습니다.",
+                )
             return
-        if allow_real and not self._confirm_real_order("전략 판단 후 주문"):
+        if allow_real and not auto and not self._confirm_real_order("전략 판단 후 주문"):
             return
         self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.service.evaluate_and_send_order_with_market_data(
@@ -2225,7 +2342,7 @@ class TraderApp(tk.Tk):
             "실거래 주문 최종 확인",
             f"{title}을 실행하려고 합니다.\n"
             f"종목 {self.symbol_var.get()} / 주문수량 {self._order_quantity()}주\n"
-            "실거래 주문 허용이 켜져 있어 모의투자 서버가 아닌 경우 실제 주문이 전송될 수 있습니다.\n"
+            "실거래 세션 승인이 켜져 있어 실제 시장가 주문이 전송될 수 있습니다.\n"
             "계좌, 종목, 수량을 다시 확인했습니다. 계속하시겠습니까?",
         )
 
@@ -2241,8 +2358,19 @@ class TraderApp(tk.Tk):
             self._account_access_verified = False
         self._sync_account_password_controls(account)
         self._update_connection_badge(self._account_connection_confirmed(account), connection_method)
-        real_order_state = "disabled" if connection_method == "REST API" else "normal"
+        real_order_state = (
+            "normal"
+            if account.connected
+            and account.server_type == "실거래"
+            and self._account_connection_confirmed(account)
+            else "disabled"
+        )
+        if real_order_state == "disabled" and self.allow_real_order_var.get():
+            self._clear_real_order_authorization()
         self.allow_real_order_checkbutton.configure(state=real_order_state)
+        self.market_session_var.set(
+            f"장 상태: {_market_session_text(snapshot.market_session_status)}"
+        )
         self._update_dmi_display(snapshot.dmi)
         self.status_text.set(self._format_main_status(snapshot))
         if snapshot.symbol_name and self.symbol_name_var.get() != snapshot.symbol_name:
@@ -2320,6 +2448,8 @@ class TraderApp(tk.Tk):
                 f"잔고 {len(snapshot.balance_summary.holdings)}종목 "
                 f"평가 {snapshot.balance_summary.total_evaluation:,.0f}"
             )
+        if account.server_type == "실거래":
+            parts.append(f"장 상태 {_market_session_text(snapshot.market_session_status)}")
         return " | ".join(parts)
 
     def _auto_tick(self) -> None:
@@ -2330,6 +2460,26 @@ class TraderApp(tk.Tk):
         if self.service.running:
             if self.kiwoom_auto_order_var.get():
                 if self._trading_ready():
+                    market_status = self.service.latest_market_session_status()
+                    if self._real_trading_account():
+                        market_code = market_status.operation_code if market_status else ""
+                        if market_code != self._last_auto_market_code:
+                            self._last_auto_market_code = market_code
+                            if _regular_market_is_open(market_status):
+                                self.service.storage.log(
+                                    "WARN",
+                                    "자동주문",
+                                    "키움 정규장 장중 신호를 확인해 실거래 자동운용을 시작합니다.",
+                                )
+                            else:
+                                self.service.storage.log(
+                                    "INFO",
+                                    "자동주문",
+                                    f"{_market_session_text(market_status)} 상태이므로 주문 없이 대기합니다.",
+                                )
+                        if not _regular_market_is_open(market_status):
+                            self._refresh()
+                            return
                     self._evaluate_and_send_order(auto=True)
                 else:
                     self.service.stop()
@@ -2461,7 +2611,7 @@ class TraderApp(tk.Tk):
         baseline_ready = self._selected_trading_baseline() is not None
         account_connected = self._account_connection_confirmed(snapshot.account_info)
         server_ready = (
-            snapshot.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
+            snapshot.account_info.server_type == "모의투자" or self._real_order_session_ready()
         )
         baseline = self._selected_trading_baseline()
         if (
@@ -2492,10 +2642,9 @@ class TraderApp(tk.Tk):
         if not baseline_ready:
             missing.append("금액 세팅")
         if snapshot.account_info.server_type == "실거래" and not self.allow_real_order_var.get():
-            if snapshot.account_info.connection_method == "REST API":
-                missing.append("REST 실전 조회 전용(주문 잠금)")
-            else:
-                missing.append("실거래 주문 잠금 해제")
+            missing.append("실거래 세션 승인")
+        elif snapshot.account_info.server_type == "실거래" and not self._real_order_session_armed:
+            missing.append("실거래 세션 승인 확인")
         return f"거래 준비: {', '.join(missing)} 확인이 필요합니다."
 
     def _trading_ready(self) -> bool:
@@ -2503,7 +2652,7 @@ class TraderApp(tk.Tk):
         name = self.symbol_name_var.get().strip()
         baseline_ready = self._selected_trading_baseline() is not None
         server_ready = (
-            self.service.account_info.server_type == "모의투자" or self.allow_real_order_var.get()
+            self.service.account_info.server_type == "모의투자" or self._real_order_session_ready()
         )
         return bool(
             self._account_connection_confirmed(self.service.account_info)
@@ -2523,6 +2672,12 @@ class TraderApp(tk.Tk):
 
     def _change_order_quantity(self, delta: int) -> None:
         quantity = max(0, self._order_quantity() + int(delta))
+        if quantity != self._order_quantity() and self._real_order_session_ready():
+            if self.service.running:
+                self.service.stop()
+            self._clear_real_order_authorization(
+                "주문 수량 변경으로 실거래 세션 승인을 해제했습니다."
+            )
         self.order_qty_var.set(str(quantity))
         self.order_qty_display_var.set(f"{quantity}주")
         self._refresh()
@@ -2581,16 +2736,10 @@ class TraderApp(tk.Tk):
 
         allow_real_order = False
         if self.service.account_info.server_type != "모의투자":
-            if self.service.account_info.connection_method == "REST API":
-                messagebox.showwarning(
-                    "REST 실거래 잠금",
-                    "현재 버전은 REST API 실거래 주문이 잠겨 있습니다. 모의투자에서 먼저 검증해 주세요.",
-                )
-                return
-            if not self.allow_real_order_var.get():
+            if not self._real_order_session_ready():
                 messagebox.showwarning(
                     "실거래 잠금",
-                    "실거래 주문 허용을 먼저 켜야 일회성 자동주문을 설정할 수 있습니다.",
+                    "실거래 세션 승인을 먼저 켜야 일회성 자동주문을 설정할 수 있습니다.",
                 )
                 return
             action = "매수" if side == "BUY" else "매도"
@@ -2661,6 +2810,8 @@ class TraderApp(tk.Tk):
     def _process_one_shot_price_triggers(self) -> bool:
         if self._processing_price_triggers:
             return False
+        if self._real_trading_account() and not self._regular_market_open():
+            return False
         current_price = self._selected_current_price()
         if current_price <= 0:
             return False
@@ -2684,8 +2835,8 @@ class TraderApp(tk.Tk):
                 if trigger.allow_real_order:
                     real_ready = (
                         self.service.account_info.server_type != "모의투자"
-                        and self.service.account_info.connection_method != "REST API"
-                        and self.allow_real_order_var.get()
+                        and self._real_order_session_ready()
+                        and self._regular_market_open()
                     )
                     if not real_ready:
                         self.service.storage.log("ERROR", action, "실거래 안전장치가 해제되어 주문하지 않았습니다.")
@@ -2732,6 +2883,7 @@ class TraderApp(tk.Tk):
     def _ensure_live_connection(self) -> bool:
         if self.service.sync_account_connection():
             return True
+        self._clear_real_order_authorization()
         self._clear_account_password_session()
         self._selected_account_full = ""
         self._set_account_display("")
@@ -2906,10 +3058,10 @@ class TraderApp(tk.Tk):
     @staticmethod
     def _account_capability_label(account_info) -> str:
         if account_info.connection_method == "REST API" and account_info.server_type == "실거래":
-            return "계좌 / 현재가 / 0B 실시간 / 3분봉 / 잔고 (주문 잠금)"
+            return "계좌 / 현재가 / 0B 실시간 / 0s 장 상태 / 3분봉 / 잔고 / 실주문(세션 승인·정규장)"
         if account_info.connection_method == "REST API":
-            return "계좌 / 현재가 / 0B 실시간 / 3분봉 / 잔고 / 모의주문"
-        return "계좌 / 현재가 / 실시간 시세 / 3분봉 / 잔고 / 모의주문"
+            return "계좌 / 현재가 / 0B 실시간 / 0s 장 상태 / 3분봉 / 잔고 / 모의주문"
+        return "계좌 / 현재가 / 장 상태 / 실시간 시세 / 3분봉 / 잔고 / 주문"
 
     def _account_for_api(self) -> str:
         entered = clean_account_number(self.account_var.get())

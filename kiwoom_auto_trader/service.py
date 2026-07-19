@@ -23,6 +23,7 @@ from .models import (
     DmiPoint,
     KiwoomOrderRequest,
     MarketQuote,
+    MarketSessionStatus,
     OrderResult,
     PatternState,
     RealTimeQuote,
@@ -54,6 +55,7 @@ class ServiceSnapshot:
     decision: TradeDecision | None
     account_info: KiwoomAccountInfo
     dmi: DmiPoint | None = None
+    market_session_status: MarketSessionStatus | None = None
     market_quote: MarketQuote | None = None
     balance_summary: BalanceSummary | None = None
     real_time_quote: RealTimeQuote | None = None
@@ -343,6 +345,16 @@ class AutoTradingService:
 
     def _active_api(self):
         return self.rest_api if self.connection_mode == "REST" else self.kiwoom_api
+
+    def latest_market_session_status(self) -> MarketSessionStatus | None:
+        getter = getattr(self._active_api(), "latest_market_session_status", None)
+        if not callable(getter):
+            return None
+        try:
+            return getter()
+        except API_ERRORS as exc:
+            self.last_api_message = str(exc)
+            return None
 
     def lookup_symbol_name(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)
@@ -730,7 +742,13 @@ class AutoTradingService:
                     f"{mask_account_number(account)} 주문 전 계좌 접근과 최신 잔고를 재확인했습니다.",
                 )
             else:
+                self.balance_summary = api.request_balance(account)
                 self.last_order_account_access_verified = True
+                self.storage.log(
+                    "INFO",
+                    "주문",
+                    f"{mask_account_number(account)} REST 주문 전 최신 잔고와 주문가능금액을 재확인했습니다.",
+                )
 
             holding_quantity = self._holding_quantity(self.symbol)
             if result_side == "BUY":
@@ -887,6 +905,7 @@ class AutoTradingService:
             decision=self.last_decision,
             account_info=self.account_info,
             dmi=self.latest_dmi,
+            market_session_status=self.latest_market_session_status(),
             market_quote=self.market_quote,
             balance_summary=self.balance_summary,
             real_time_quote=self.refresh_real_time_quote(),

@@ -19,6 +19,7 @@ from .models import (
     Holding,
     KiwoomOrderRequest,
     MarketQuote,
+    MarketSessionStatus,
     RealTimeQuote,
     WatchlistQuote,
 )
@@ -150,6 +151,7 @@ class KiwoomRestApiClient:
         self._real_time_symbol = ""
         self._real_time_quote: RealTimeQuote | None = None
         self._real_quote_events: deque[RealTimeQuote] = deque(maxlen=5000)
+        self._market_session_status: MarketSessionStatus | None = None
         self._websocket_thread: threading.Thread | None = None
         self._websocket = None
         self._websocket_stop = threading.Event()
@@ -210,6 +212,7 @@ class KiwoomRestApiClient:
         with self._websocket_lock:
             self._real_time_quote = None
             self._real_quote_events.clear()
+            self._market_session_status = None
         self._websocket_error = ""
         self._websocket_ready.clear()
         self._account_info = KiwoomAccountInfo(
@@ -447,6 +450,7 @@ class KiwoomRestApiClient:
         with self._websocket_lock:
             self._real_time_quote = None
             self._real_quote_events.clear()
+            self._market_session_status = None
         self._websocket_error = ""
         self._websocket_ready.clear()
         stop_event = threading.Event()
@@ -469,6 +473,7 @@ class KiwoomRestApiClient:
         with self._websocket_lock:
             self._real_time_quote = None
             self._real_quote_events.clear()
+            self._market_session_status = None
         self._websocket_error = ""
         self._websocket_ready.clear()
         return f"{symbol or 'REST'} WebSocket 실시간 시세를 중지했습니다."
@@ -489,15 +494,41 @@ class KiwoomRestApiClient:
             self._real_quote_events.clear()
         return quotes
 
+    def latest_market_session_status(self) -> MarketSessionStatus | None:
+        with self._websocket_lock:
+            return self._market_session_status
+
+    def is_regular_market_open(self) -> bool:
+        status = self.latest_market_session_status()
+        return bool(
+            status
+            and status.is_open
+            and self._websocket_ready.is_set()
+            and not self._websocket_error
+        )
+
     def send_order(self, request: KiwoomOrderRequest) -> str:
         if not self.is_connected():
             raise KiwoomRestApiError("REST API 토큰 연결 후 주문할 수 있습니다.")
-        if not self.mock:
-            raise KiwoomRestApiError("REST API 실거래 주문은 이 버전에서 잠겨 있습니다.")
-        if request.allow_real_order or not request.require_mock_server:
-            raise KiwoomRestApiError("REST API 실거래 주문 잠금이 켜져 있습니다.")
+        if self.mock:
+            if request.allow_real_order or not request.require_mock_server:
+                raise KiwoomRestApiError("모의투자 서버에서는 실거래 주문 요청을 사용할 수 없습니다.")
+            order_mode = "모의"
+        else:
+            if not request.allow_real_order or request.require_mock_server:
+                raise KiwoomRestApiError(
+                    "REST API 실거래 주문은 앱의 실거래 세션 승인이 있어야 합니다."
+                )
+            if not self.is_regular_market_open():
+                raise KiwoomRestApiError(
+                    "키움 장시작시간(0s)에서 정규장 장중 신호(장운영구분 3)를 확인하지 못해 "
+                    "실거래 주문을 차단했습니다."
+                )
+            order_mode = "실거래"
         if request.quantity <= 0:
             raise KiwoomRestApiError("주문 수량은 1주 이상이어야 합니다.")
+        if request.side not in {"BUY", "SELL"}:
+            raise KiwoomRestApiError("주문 구분은 매수 또는 매도여야 합니다.")
         if clean_account_number(request.account) != self._account:
             raise KiwoomRestApiError("REST API 토큰의 계좌번호와 주문 계좌가 일치하지 않습니다.")
 
@@ -518,7 +549,7 @@ class KiwoomRestApiClient:
         if not order_no:
             raise KiwoomRestApiError("REST API 주문번호가 수신되지 않았습니다.")
         side_name = "매수" if request.side == "BUY" else "매도"
-        return f"REST 모의 {side_name}주문 접수 완료 (주문번호 {order_no})"
+        return f"REST {order_mode} {side_name}주문 접수 완료 (주문번호 {order_no})"
 
     def pump_messages(self) -> None:
         return
@@ -564,6 +595,7 @@ class KiwoomRestApiClient:
         finally:
             if self._websocket is websocket:
                 self._websocket = None
+            self._websocket_ready.clear()
 
     def _handle_websocket_message(self, response: Any) -> dict[str, Any] | str | None:
         if isinstance(response, str):
@@ -597,10 +629,26 @@ class KiwoomRestApiClient:
         if not isinstance(rows, list):
             return None
         for row in rows:
-            if not isinstance(row, dict) or str(row.get("type") or "").upper() != "0B":
+            if not isinstance(row, dict):
+                continue
+            row_type = str(row.get("type") or "").upper()
+            values = row.get("values") or {}
+            if not isinstance(values, dict):
+                continue
+            if row_type == "0S":
+                status = MarketSessionStatus(
+                    operation_code=str(values.get("215") or "").strip(),
+                    event_time=str(values.get("20") or "").strip(),
+                    expected_remaining_seconds=_integer(values.get("214")),
+                    received_at=datetime.now().strftime("%Y%m%d%H%M%S"),
+                    source="키움 REST 장시작시간(0s)",
+                )
+                with self._websocket_lock:
+                    self._market_session_status = status
+                continue
+            if row_type != "0B":
                 continue
             symbol = normalize_symbol(row.get("item"))
-            values = row.get("values") or {}
             if symbol != self._real_time_symbol or not isinstance(values, dict):
                 continue
             trade_time = str(values.get("20") or "").strip()
@@ -629,7 +677,10 @@ class KiwoomRestApiClient:
             "trnm": "REG",
             "grp_no": "1",
             "refresh": "1",
-            "data": [{"item": [target], "type": ["0B"]}],
+            "data": [
+                {"item": [target], "type": ["0B"]},
+                {"item": [""], "type": ["0s"]},
+            ],
         }
 
     def _remove_real_time_message(self, symbol: str = "") -> dict[str, Any]:
@@ -637,7 +688,10 @@ class KiwoomRestApiClient:
         return {
             "trnm": "REMOVE",
             "grp_no": "1",
-            "data": [{"item": [target], "type": ["0B"]}],
+            "data": [
+                {"item": [target], "type": ["0B"]},
+                {"item": [""], "type": ["0s"]},
+            ],
         }
 
     def _stop_websocket(self) -> None:

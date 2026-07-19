@@ -107,6 +107,8 @@ class FakeKiwoomApi:
             13: "123456",
             15: "12",
             20: "101530",
+            214: "0",
+            215: "3",
         }
         return values.get(fid, "")
 
@@ -280,6 +282,18 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
 
         self.assertIn("등록", message)
         self.assertEqual(fake.real_reg_calls[0][1], "005930")
+        self.assertEqual(fake.real_reg_calls[1], ("9002", "", "20;214;215", "0"))
+
+    def test_parses_openapi_market_open_status(self):
+        fake = FakeKiwoomApi()
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        client._handle_real_data("", "장시작시간", "")
+
+        status = client.latest_market_session_status()
+        self.assertIsNotNone(status)
+        self.assertTrue(status.is_open)
+        self.assertEqual(status.event_time, "101530")
 
     def test_buffers_openapi_realtime_trades_for_second_candles(self):
         fake = FakeKiwoomApi()

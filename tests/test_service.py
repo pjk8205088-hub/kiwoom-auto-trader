@@ -75,6 +75,12 @@ class FakeRestApi:
         self.sell_failures_remaining = 0
         self.order_calls = 0
         self.order_requests = []
+        self.balance_calls = []
+        self.balance_summary = BalanceSummary(
+            account="1234567890",
+            deposit=2_000_000,
+            orderable_amount=2_000_000,
+        )
         self.info = KiwoomAccountInfo(
             False,
             [],
@@ -124,7 +130,12 @@ class FakeRestApi:
         if request.side == "SELL" and self.sell_failures_remaining > 0:
             self.sell_failures_remaining -= 1
             raise KiwoomRestApiError("테스트용 모의 매도 요청 실패")
-        return "REST 모의 주문 접수 완료"
+        mode = "실거래" if request.allow_real_order else "모의"
+        return f"REST {mode} 주문 접수 완료"
+
+    def request_balance(self, account: str, password: str = "") -> BalanceSummary:
+        self.balance_calls.append((account, password))
+        return self.balance_summary
 
 
 class FakeOpenApiOrderApi:
@@ -393,7 +404,7 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertFalse(service.sync_account_connection())
         self.assertFalse(service.account_info.connected)
 
-    def test_connects_rest_live_account_in_read_only_server_mode(self):
+    def test_connects_rest_live_account_in_live_server_mode(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_rest_live_test.sqlite3"
         if db.exists():
             db.unlink()
@@ -405,6 +416,30 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertTrue(info.connected)
         self.assertFalse(service.rest_api.mock)
         self.assertEqual(info.server_type, "실거래")
+
+    def test_live_rest_order_passes_explicit_real_order_flags(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_rest_order_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key", mock=False)
+        service.symbol = "005930"
+        service.current_price = 72_000
+        service.max_capital = 1_000_000
+
+        message = service.send_kiwoom_order(
+            "1234567890",
+            "BUY",
+            1,
+            allow_real_order=True,
+        )
+
+        self.assertIn("실거래", message)
+        self.assertEqual(fake_rest.balance_calls, [("1234567890", "")])
+        self.assertTrue(fake_rest.order_requests[0].allow_real_order)
+        self.assertFalse(fake_rest.order_requests[0].require_mock_server)
 
     def test_market_strategy_calculates_dmi_transitions_from_real_candles(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_pattern_test.sqlite3"
@@ -457,6 +492,12 @@ class AutoTradingServiceTests(unittest.TestCase):
         service.start_rest_connection("app-key", "secret-key")
         service.symbol = "005930"
         service.current_price = 72_000
+        fake_rest.balance_summary = BalanceSummary(
+            account="1234567890",
+            deposit=2_000_000,
+            orderable_amount=2_000_000,
+            holdings=(Holding("005930", "삼성전자", 10, 70_000, 72_000, 20_000, 2.8),),
+        )
         fake_rest.sell_failures_remaining = 2
 
         message = service.send_kiwoom_order("1234567890", "SELL", 1)
@@ -464,6 +505,11 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(fake_rest.order_calls, 3)
         self.assertIn("접수 완료", message)
         fake_rest.order_calls = 0
+        fake_rest.balance_summary = BalanceSummary(
+            account="1234567890",
+            deposit=2_000_000,
+            orderable_amount=2_000_000,
+        )
         service.send_kiwoom_order("1234567890", "BUY", 1)
         self.assertEqual(fake_rest.order_calls, 1)
 
@@ -556,6 +602,7 @@ class AutoTradingServiceTests(unittest.TestCase):
             deposit=450_000,
             orderable_amount=450_000,
         )
+        fake_rest.balance_summary = service.balance_summary
 
         message = service.send_kiwoom_order("1234567890", "BUY", 5)
 
@@ -603,6 +650,7 @@ class AutoTradingServiceTests(unittest.TestCase):
             account="1234567890",
             holdings=(Holding("005930", "삼성전자", 10, 70000, 72000, 20000, 2.8),),
         )
+        fake_rest.balance_summary = service.balance_summary
         service.evaluate_strategy_with_market_data = lambda _symbol: TradeDecision(
             "SELL",
             "테스트 매도",

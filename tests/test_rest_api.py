@@ -334,6 +334,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         quote = client.latest_real_time_quote("005930")
         self.assertEqual(registration["data"][0]["item"], ["005930"])
         self.assertEqual(registration["data"][0]["type"], ["0B"])
+        self.assertEqual(registration["data"][1], {"item": [""], "type": ["0s"]})
         self.assertIsNotNone(quote)
         self.assertEqual(quote.current_price, 72000)
         self.assertEqual(quote.change_rate, 1.25)
@@ -377,11 +378,36 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         with self.assertRaisesRegex(KiwoomRestApiError, "모의투자용 AppKey"):
             client.connect("app-key", "secret-key")
 
-    def test_live_client_uses_production_domain_and_blocks_orders(self):
+    def test_parses_official_market_open_message(self):
+        client = KiwoomRestApiClient(mock=False, rate_limiter=NoopLimiter())
+
+        client._handle_websocket_message({"trnm": "REG", "return_code": 0})
+        client._handle_websocket_message(
+            {
+                "trnm": "REAL",
+                "data": [
+                    {
+                        "type": "0s",
+                        "name": "장시작시간",
+                        "item": "",
+                        "values": {"20": "090000", "214": "0", "215": "3"},
+                    }
+                ],
+            }
+        )
+
+        status = client.latest_market_session_status()
+        self.assertIsNotNone(status)
+        self.assertTrue(status.is_open)
+        self.assertEqual(status.event_time, "090000")
+        self.assertTrue(client.is_regular_market_open())
+
+    def test_live_client_requires_explicit_session_and_market_open_signal(self):
         requester = FakeRequester(
             [
                 response({"token": "live-token", "expires_dt": "20991231235959"}),
                 response({"acctNo": "1234567890"}),
+                response({"ord_no": "9000001"}),
             ]
         )
         client = KiwoomRestApiClient(
@@ -394,7 +420,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
 
         self.assertEqual(info.server_type, "실거래")
         self.assertTrue(requester.calls[0][1].startswith("https://api.kiwoom.com/"))
-        with self.assertRaisesRegex(KiwoomRestApiError, "실거래 주문.*잠겨"):
+        with self.assertRaisesRegex(KiwoomRestApiError, "세션 승인"):
             client.send_order(
                 KiwoomOrderRequest(
                     account="1234567890",
@@ -403,6 +429,35 @@ class KiwoomRestApiClientTests(unittest.TestCase):
                     quantity=1,
                 )
             )
+        approved_request = KiwoomOrderRequest(
+            account="1234567890",
+            symbol="005930",
+            side="BUY",
+            quantity=1,
+            allow_real_order=True,
+            require_mock_server=False,
+        )
+        with self.assertRaisesRegex(KiwoomRestApiError, "장중 신호"):
+            client.send_order(approved_request)
+
+        client._handle_websocket_message({"trnm": "REG", "return_code": 0})
+        client._handle_websocket_message(
+            {
+                "trnm": "REAL",
+                "data": [
+                    {
+                        "type": "0s",
+                        "item": "",
+                        "values": {"20": "090000", "214": "0", "215": "3"},
+                    }
+                ],
+            }
+        )
+        message = client.send_order(approved_request)
+
+        self.assertIn("REST 실거래 매수주문", message)
+        self.assertEqual(requester.calls[-1][2]["api-id"], "kt10000")
+        self.assertEqual(requester.calls[-1][3]["trde_tp"], "3")
 
     def test_explains_registered_ip_mismatch(self):
         requester = FakeRequester(

@@ -5,7 +5,12 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
-from kiwoom_auto_trader.models import BalanceSummary, Candle, WatchlistQuote
+from kiwoom_auto_trader.models import (
+    BalanceSummary,
+    Candle,
+    MarketSessionStatus,
+    WatchlistQuote,
+)
 from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
@@ -17,6 +22,7 @@ from kiwoom_auto_trader.ui import (
     _parse_money_input,
     _parse_order_quantity,
     _percentage_input_allowed,
+    _regular_market_is_open,
 )
 
 
@@ -246,7 +252,7 @@ class UiHelperTests(unittest.TestCase):
 
         self.assertIsNone(key_pair)
 
-    def test_labels_live_rest_account_as_order_locked(self):
+    def test_labels_live_rest_account_as_session_approved_order_capable(self):
         info = KiwoomAccountInfo(
             True,
             ["1234567890"],
@@ -256,7 +262,17 @@ class UiHelperTests(unittest.TestCase):
 
         label = TraderApp._account_capability_label(info)
 
-        self.assertIn("주문 잠금", label)
+        self.assertIn("실주문", label)
+        self.assertIn("세션 승인", label)
+        self.assertNotIn("주문 잠금", label)
+
+    def test_recognizes_only_official_regular_market_open_code(self):
+        opened = MarketSessionStatus("3", event_time="090000")
+        waiting = MarketSessionStatus("0", event_time="085900")
+
+        self.assertTrue(_regular_market_is_open(opened))
+        self.assertFalse(_regular_market_is_open(waiting))
+        self.assertFalse(_regular_market_is_open(None))
 
     def test_main_status_hides_internal_mock_state_and_account_details(self):
         snapshot = ServiceSnapshot(
