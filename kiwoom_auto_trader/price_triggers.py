@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 
 from .models import OrderSide
-from .symbols import normalize_symbol
+from .symbols import clean_account_number, normalize_symbol
 
 
 MAX_TRIGGER_PERCENT = 100.0
@@ -19,6 +19,7 @@ class OneShotPriceTrigger:
     target_price: float
     quantity: int
     allow_real_order: bool = False
+    account: str = ""
 
     @classmethod
     def create(
@@ -29,6 +30,7 @@ class OneShotPriceTrigger:
         percent: float,
         quantity: int,
         allow_real_order: bool = False,
+        account: str = "",
     ) -> OneShotPriceTrigger:
         if side not in ("BUY", "SELL"):
             raise ValueError("자동주문 구분은 BUY 또는 SELL이어야 합니다.")
@@ -52,6 +54,7 @@ class OneShotPriceTrigger:
             target_price=target_price,
             quantity=int(quantity),
             allow_real_order=bool(allow_real_order),
+            account=clean_account_number(account),
         )
 
     def reached(self, current_price: float) -> bool:
@@ -74,6 +77,7 @@ class OneShotPriceTriggerBook:
         percent: float,
         quantity: int,
         allow_real_order: bool = False,
+        account: str = "",
     ) -> OneShotPriceTrigger:
         trigger = OneShotPriceTrigger.create(
             side,
@@ -82,6 +86,7 @@ class OneShotPriceTriggerBook:
             percent,
             quantity,
             allow_real_order,
+            account,
         )
         self._triggers[side] = trigger
         return trigger

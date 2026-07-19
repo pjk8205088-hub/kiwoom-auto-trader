@@ -424,6 +424,14 @@ class TraderApp(tk.Tk):
         self._real_order_session_armed = False
         self._last_auto_market_code: str | None = None
         self._build_ui()
+        self._buy_percent_trace_id = self.buy_percent_var.trace_add(
+            "write",
+            lambda *_args: self._on_price_trigger_percent_changed("BUY"),
+        )
+        self._sell_percent_trace_id = self.sell_percent_var.trace_add(
+            "write",
+            lambda *_args: self._on_price_trigger_percent_changed("SELL"),
+        )
         self._account_password_trace_id = self.account_password_var.trace_add(
             "write",
             self._on_account_password_changed,
@@ -507,8 +515,8 @@ class TraderApp(tk.Tk):
         self.current_price_display_var = tk.StringVar(value="미조회")
         self.buy_percent_var = tk.StringVar(value="")
         self.sell_percent_var = tk.StringVar(value="")
-        self.buy_trigger_status_var = tk.StringVar(value="미설정")
-        self.sell_trigger_status_var = tk.StringVar(value="미설정")
+        self.buy_trigger_status_var = tk.StringVar(value="입력 후 설정 필요")
+        self.sell_trigger_status_var = tk.StringVar(value="입력 후 설정 필요")
         self.allow_real_order_var = tk.BooleanVar(value=False)
         self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
         self.market_session_var = tk.StringVar(value="장 상태: 키움 신호 대기")
@@ -1035,9 +1043,13 @@ class TraderApp(tk.Tk):
 
     def _build_percent_trigger_box(self, parent: ttk.Frame, side: str, column: int) -> None:
         is_buy = side == "BUY"
-        title = "하한가 시작" if is_buy else "상한가 시작"
+        title = (
+            "하한가 시작 자동매수 주문거래"
+            if is_buy
+            else "상한가 시작 자동매도 주문거래"
+        )
         sign = "-" if is_buy else "+"
-        button_text = "하락 설정" if is_buy else "상승 설정"
+        button_text = "자동매수 설정" if is_buy else "자동매도 설정"
         percentage_var = self.buy_percent_var if is_buy else self.sell_percent_var
         status_var = self.buy_trigger_status_var if is_buy else self.sell_trigger_status_var
 
@@ -1056,7 +1068,7 @@ class TraderApp(tk.Tk):
         button = ttk.Button(
             box,
             text=button_text,
-            width=8,
+            width=12,
             command=lambda: self._arm_price_trigger(side),
         )
         button.grid(row=0, column=3)
@@ -2710,6 +2722,15 @@ class TraderApp(tk.Tk):
         if not self._account_connection_confirmed(self.service.account_info):
             messagebox.showwarning("계좌 연결 필요", "계좌 연결과 잔고 확인을 먼저 완료해 주세요.")
             return
+        if (
+            self.service.account_info.connection_method != "REST API"
+            and not self._password_session_ready()
+        ):
+            messagebox.showwarning(
+                "계좌 비밀번호 확인 필요",
+                "화면의 계좌 비밀번호를 숫자 4~8자리로 입력하고 '비밀번호 세팅'을 먼저 눌러 주세요.",
+            )
+            return
 
         baseline = self._selected_trading_baseline()
         if baseline is None:
@@ -2729,6 +2750,7 @@ class TraderApp(tk.Tk):
                 baseline.reference_price,
                 percent,
                 quantity,
+                account=self._account_for_api(),
             )
         except (TypeError, ValueError) as exc:
             messagebox.showwarning("자동주문 설정 확인", str(exc))
@@ -2743,10 +2765,16 @@ class TraderApp(tk.Tk):
                 )
                 return
             action = "매수" if side == "BUY" else "매도"
+            credential_note = (
+                "키움 REST 접근토큰으로 계좌와 잔고를 다시 확인합니다."
+                if self.service.account_info.connection_method == "REST API"
+                else "화면에서 세팅한 계좌 비밀번호로 주문 직전 잔고를 다시 확인합니다."
+            )
             if not messagebox.askyesno(
                 "실거래 일회성 자동주문 확인",
                 f"고정 기준가 {candidate.base_price:,.0f}원 기준 {candidate.percent:.2f}% 조건으로\n"
                 f"목표가 {candidate.target_price:,.0f}원 도달 시 {candidate.quantity}주를 자동 {action}합니다.\n\n"
+                f"{credential_note}\n"
                 "조건 충족 시 추가 확인 없이 실제 주문이 1회 전송됩니다. 설정하시겠습니까?",
             ):
                 return
@@ -2759,6 +2787,7 @@ class TraderApp(tk.Tk):
             candidate.percent,
             candidate.quantity,
             allow_real_order,
+            candidate.account,
         )
         self._update_price_trigger_status(side)
         if self.service.real_time_symbol != trigger.symbol:
@@ -2782,15 +2811,33 @@ class TraderApp(tk.Tk):
         trigger = self.price_triggers.get(side)
         status_var = self.buy_trigger_status_var if side == "BUY" else self.sell_trigger_status_var
         button = self.buy_trigger_button if side == "BUY" else self.sell_trigger_button
-        direction = "하락" if side == "BUY" else "상승"
+        action = "자동매수" if side == "BUY" else "자동매도"
         if trigger is None:
-            status_var.set("미설정")
-            button.configure(text=f"{direction} 설정")
+            value = (self.buy_percent_var if side == "BUY" else self.sell_percent_var).get().strip()
+            status_var.set(f"{value}% 입력됨 · 설정 버튼 필요" if value else "입력 후 설정 필요")
+            button.configure(text=f"{action} 설정")
             return
+        if self.service.account_info.server_type == "모의투자":
+            order_mode = "모의주문 대기"
+        elif self.service.account_info.connection_method == "REST API":
+            order_mode = "실주문 대기·REST 토큰"
+        else:
+            order_mode = "실주문 대기·비밀번호 확인"
         status_var.set(
-            f"기준 {trigger.base_price:,.0f} → 목표 {trigger.target_price:,.0f}원 / {trigger.quantity}주"
+            f"{order_mode} | {trigger.percent:g}% → {trigger.target_price:,.0f}원 | {trigger.quantity}주"
         )
-        button.configure(text=f"{direction} 재설정")
+        button.configure(text=f"{action} 재설정")
+
+    def _on_price_trigger_percent_changed(self, side: str) -> None:
+        trigger = self.price_triggers.get(side)
+        if trigger is not None:
+            self.price_triggers.clear(side)
+            self.service.storage.log(
+                "WARN",
+                "자동매수" if side == "BUY" else "자동매도",
+                "등락률 입력값이 변경되어 기존 자동주문 설정을 해제했습니다.",
+            )
+        self._update_price_trigger_status(side)
 
     def _clear_price_trigger(self, side: str) -> None:
         self.price_triggers.clear(side)
@@ -2831,6 +2878,23 @@ class TraderApp(tk.Tk):
                 action = "자동매수" if trigger.side == "BUY" else "자동매도"
                 if not self._account_connection_confirmed(self.service.account_info):
                     self.service.storage.log("ERROR", action, "계좌 연결이 해제되어 일회성 설정만 종료했습니다.")
+                    continue
+                if trigger.account and clean_account_number(self._account_for_api()) != trigger.account:
+                    self.service.storage.log(
+                        "ERROR",
+                        action,
+                        "자동주문을 설정한 계좌와 현재 선택 계좌가 달라 주문하지 않았습니다.",
+                    )
+                    continue
+                if (
+                    self.service.account_info.connection_method != "REST API"
+                    and not self._password_session_ready()
+                ):
+                    self.service.storage.log(
+                        "ERROR",
+                        action,
+                        "화면의 계좌 비밀번호 확인 상태가 해제되어 주문하지 않았습니다.",
+                    )
                     continue
                 if trigger.allow_real_order:
                     real_ready = (

@@ -33,6 +33,20 @@ class OneShotPriceTriggerTests(unittest.TestCase):
         self.assertEqual(book.pop_triggered("000660", 20_000), ())
         self.assertIsNotNone(book.get("SELL"))
 
+    def test_keeps_the_account_selected_when_the_order_is_armed(self):
+        trigger = OneShotPriceTrigger.create(
+            "SELL",
+            "005930",
+            10_000,
+            0.2,
+            3,
+            allow_real_order=True,
+            account="1234-5678",
+        )
+
+        self.assertEqual(trigger.account, "12345678")
+        self.assertEqual(trigger.target_price, 10_020)
+
     def test_rejects_placeholder_symbol_invalid_percent_and_zero_quantity(self):
         with self.assertRaisesRegex(ValueError, "종목번호"):
             OneShotPriceTrigger.create("BUY", "000000", 10_000, 3, 1)
