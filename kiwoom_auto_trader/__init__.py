@@ -1,3 +1,4 @@
-"""Kiwoom Auto Trader mock-mode MVP."""
+"""Kiwoom Auto Trader application metadata."""
 
-__version__ = "0.1.0"
+__version__ = "0.31.0"
+RELEASE_LABEL = "v31"

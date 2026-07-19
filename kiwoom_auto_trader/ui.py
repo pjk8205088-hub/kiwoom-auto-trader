@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from . import RELEASE_LABEL
 from .charting import moving_average, timeframe_label
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
@@ -391,7 +392,7 @@ class KiwoomRestLoginDialog(tk.Toplevel):
 class TraderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("키움 자동매매")
+        self.title(f"키움 자동매매 {RELEASE_LABEL}")
         self.geometry("1280x820")
         self.minsize(1180, 700)
 
@@ -447,7 +448,11 @@ class TraderApp(tk.Tk):
         header = ttk.Frame(self, padding=12)
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
-        ttk.Label(header, text="키움 자동매매", font=("Malgun Gothic", 16, "bold")).grid(
+        ttk.Label(
+            header,
+            text=f"키움 자동매매 {RELEASE_LABEL}",
+            font=("Malgun Gothic", 16, "bold"),
+        ).grid(
             row=0, column=0, sticky="w"
         )
         self.account_button = ttk.Button(header, text="OpenAPI+ 로그인", command=self._open_login_dialog)
