@@ -158,6 +158,7 @@ class KiwoomRestApiClient:
         self._websocket_ready = threading.Event()
         self._websocket_lock = threading.Lock()
         self._websocket_error = ""
+        self.last_order_no = ""
 
     def connect(self, app_key: str, secret_key: str) -> KiwoomAccountInfo:
         app_key = app_key.strip()
@@ -214,6 +215,7 @@ class KiwoomRestApiClient:
             self._real_quote_events.clear()
             self._market_session_status = None
         self._websocket_error = ""
+        self.last_order_no = ""
         self._websocket_ready.clear()
         self._account_info = KiwoomAccountInfo(
             False,
@@ -508,6 +510,7 @@ class KiwoomRestApiClient:
         )
 
     def send_order(self, request: KiwoomOrderRequest) -> str:
+        self.last_order_no = ""
         if not self.is_connected():
             raise KiwoomRestApiError("REST API 토큰 연결 후 주문할 수 있습니다.")
         if self.mock:
@@ -548,6 +551,7 @@ class KiwoomRestApiClient:
         order_no = str(body.get("ord_no") or "").strip()
         if not order_no:
             raise KiwoomRestApiError("REST API 주문번호가 수신되지 않았습니다.")
+        self.last_order_no = order_no
         side_name = "매수" if request.side == "BUY" else "매도"
         return f"REST {order_mode} {side_name}주문 접수 완료 (주문번호 {order_no})"
 

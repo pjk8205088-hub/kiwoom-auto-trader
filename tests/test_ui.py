@@ -20,6 +20,7 @@ from kiwoom_auto_trader.ui import (
     _account_access_confirmed,
     _account_password_input_allowed,
     _account_password_session_ready,
+    _automatic_trade_readiness,
     _baseline_validation_message,
     _parse_money_input,
     _parse_order_quantity,
@@ -29,6 +30,31 @@ from kiwoom_auto_trader.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_automatic_trade_readiness_is_independent_of_market_hours(self):
+        ready, missing = _automatic_trade_readiness(
+            account_ready=True,
+            symbol_ready=True,
+            quantity_ready=True,
+            baseline_ready=True,
+            authorization_ready=True,
+            automation_configured=True,
+        )
+
+        self.assertTrue(ready)
+        self.assertEqual(missing, ())
+
+        ready, missing = _automatic_trade_readiness(
+            account_ready=True,
+            symbol_ready=False,
+            quantity_ready=False,
+            baseline_ready=True,
+            authorization_ready=True,
+            automation_configured=True,
+        )
+
+        self.assertFalse(ready)
+        self.assertEqual(missing, ("종목 세팅", "주문 수량"))
+
     def test_marks_openapi_account_connected_only_after_password_verification(self):
         self.assertFalse(_account_access_confirmed(True, "OpenAPI+", "12345678", False))
         self.assertTrue(_account_access_confirmed(True, "OpenAPI+", "12345678", True))

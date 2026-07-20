@@ -162,6 +162,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertEqual(balance.d2_estimated_deposit, 280000)
         self.assertEqual(balance.holdings[0].quantity, 10)
         self.assertIn("0000123", order_message)
+        self.assertEqual(client.last_order_no, "0000123")
         cash_call = next(call for call in requester.calls if call[2]["api-id"] == "kt00001")
         self.assertEqual(cash_call[3], {"qry_tp": "3"})
         self.assertEqual(requester.calls[-1][2]["api-id"], "kt10000")

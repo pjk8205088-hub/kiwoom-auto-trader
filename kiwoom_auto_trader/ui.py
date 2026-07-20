@@ -136,6 +136,26 @@ def _market_session_text(status: MarketSessionStatus | None) -> str:
     return f"정규장 비운영({status.operation_code or '미확인'})"
 
 
+def _automatic_trade_readiness(
+    account_ready: bool,
+    symbol_ready: bool,
+    quantity_ready: bool,
+    baseline_ready: bool,
+    authorization_ready: bool,
+    automation_configured: bool,
+) -> tuple[bool, tuple[str, ...]]:
+    checks = (
+        (account_ready, "계좌 연결"),
+        (symbol_ready, "종목 세팅"),
+        (quantity_ready, "주문 수량"),
+        (baseline_ready, "금액 세팅"),
+        (authorization_ready, "실거래 승인"),
+        (automation_configured, "자동매수·자동매도 조건"),
+    )
+    missing = tuple(label for ready, label in checks if not ready)
+    return not missing, missing
+
+
 class KiwoomLoginDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, default_user_id: str = "") -> None:
         super().__init__(parent)
@@ -397,7 +417,10 @@ class TraderApp(tk.Tk):
         self.minsize(1180, 700)
 
         db_path = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_ko.sqlite3"
-        self.service = AutoTradingService(storage=Storage(db_path))
+        trade_history_path = Path.home() / "Documents" / "KiwoomAutoTrader" / "매수매도_이력.csv"
+        self.service = AutoTradingService(
+            storage=Storage(db_path, trade_history_path=trade_history_path)
+        )
         self._refresh_after_id: str | None = None
         self._chart_refresh_after_id: str | None = None
         self._account_after_id: str | None = None
@@ -525,6 +548,9 @@ class TraderApp(tk.Tk):
         self.allow_real_order_var = tk.BooleanVar(value=False)
         self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
         self.market_session_var = tk.StringVar(value="장 상태: 키움 신호 대기")
+        self.auto_started_at_var = tk.StringVar(value="자동운용 시작 시각: 아직 시작하지 않음")
+        self.auto_trade_capability_var = tk.StringVar(value="자동매매 OFF")
+        self.auto_trade_detail_var = tk.StringVar(value="준비 확인: 계좌 연결이 필요합니다.")
         self.account_summary_var = tk.StringVar(
             value="계좌 창: 로그인 전입니다. 키움 로그인 후 계좌번호 앞4자리+뒤4자리와 잔고가 표시됩니다."
         )
@@ -591,14 +617,45 @@ class TraderApp(tk.Tk):
 
         actions = ttk.Frame(controls)
         actions.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(12, 0))
-        ttk.Button(actions, text="자동 운용 시작", command=self._start).pack(side="left")
-        ttk.Button(actions, text="자동 운용 중지", command=self._stop).pack(side="left", padx=6)
+        actions.columnconfigure(4, weight=1)
+        ttk.Button(actions, text="자동 운용 시작", command=self._start).grid(row=0, column=0, sticky="w")
+        ttk.Button(actions, text="자동 운용 중지", command=self._stop).grid(
+            row=0,
+            column=1,
+            sticky="w",
+            padx=6,
+        )
+        self.auto_trade_capability_badge = tk.Label(
+            actions,
+            textvariable=self.auto_trade_capability_var,
+            bg="#b3261e",
+            fg="white",
+            font=("Malgun Gothic", 9, "bold"),
+            padx=10,
+            pady=3,
+        )
+        self.auto_trade_capability_badge.grid(row=0, column=2, sticky="w", padx=(6, 8))
         ttk.Checkbutton(
             actions,
             text="자동운용 시 3분봉 DMI 강약 전환을 키움 주문에 연결",
             variable=self.kiwoom_auto_order_var,
-        ).pack(side="left", padx=(12, 0))
-        ttk.Label(actions, textvariable=self.market_session_var).pack(side="left", padx=(14, 0))
+        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
+        ttk.Label(actions, textvariable=self.market_session_var).grid(
+            row=0,
+            column=4,
+            sticky="e",
+            padx=(14, 0),
+        )
+        ttk.Label(
+            actions,
+            textvariable=self.auto_started_at_var,
+            foreground="#444444",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
+        ttk.Label(
+            actions,
+            textvariable=self.auto_trade_detail_var,
+            foreground="#555555",
+        ).grid(row=1, column=2, columnspan=3, sticky="w", padx=(6, 0), pady=(5, 0))
 
         kiwoom_controls = ttk.Frame(controls)
         kiwoom_controls.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(12, 0))
@@ -925,6 +982,94 @@ class TraderApp(tk.Tk):
         )
         self.logs = self._table(self.operations_tab, "시스템 로그", ("시간", "레벨", "분류", "메시지"), 2)
 
+        self.trade_history_tab = ttk.Frame(self.main_notebook, padding=(10, 10, 10, 8))
+        self.trade_history_tab.columnconfigure(0, weight=1)
+        self.trade_history_tab.rowconfigure(1, weight=1)
+        self.main_notebook.add(self.trade_history_tab, text="매수·매도 이력")
+
+        trade_toolbar = ttk.Frame(self.trade_history_tab)
+        trade_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        trade_toolbar.columnconfigure(0, weight=1)
+        self.trade_history_file_var = tk.StringVar(
+            value=f"CSV 로그: {self.service.storage.trade_history_path}"
+        )
+        ttk.Label(trade_toolbar, textvariable=self.trade_history_file_var).grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        ttk.Button(
+            trade_toolbar,
+            text="CSV 로그 열기",
+            command=self._open_trade_history_file,
+        ).grid(row=0, column=1, sticky="e")
+
+        trade_columns = (
+            "시간",
+            "구분",
+            "종목번호",
+            "종목명",
+            "수량",
+            "요청시세",
+            "예상총액",
+            "결과",
+            "주문번호",
+            "거래환경",
+            "메시지",
+        )
+        trade_table_frame = ttk.Frame(self.trade_history_tab)
+        trade_table_frame.grid(row=1, column=0, sticky="nsew")
+        trade_table_frame.columnconfigure(0, weight=1)
+        trade_table_frame.rowconfigure(0, weight=1)
+        self.trade_history = ttk.Treeview(
+            trade_table_frame,
+            columns=trade_columns,
+            show="headings",
+            height=18,
+        )
+        trade_widths = {
+            "시간": 145,
+            "구분": 60,
+            "종목번호": 80,
+            "종목명": 120,
+            "수량": 60,
+            "요청시세": 90,
+            "예상총액": 110,
+            "결과": 65,
+            "주문번호": 95,
+            "거래환경": 75,
+            "메시지": 340,
+        }
+        for name in trade_columns:
+            self.trade_history.heading(name, text=name)
+            self.trade_history.column(
+                name,
+                width=trade_widths[name],
+                minwidth=55,
+                stretch=name in {"종목명", "메시지"},
+                anchor="w" if name in {"시간", "종목명", "메시지"} else "center",
+            )
+        self.trade_history.tag_configure("BUY", foreground="#b51f63")
+        self.trade_history.tag_configure("SELL", foreground="#1769a7")
+        self.trade_history.tag_configure("FAILED", foreground="#a12622")
+        self.trade_history.grid(row=0, column=0, sticky="nsew")
+        trade_scroll_y = ttk.Scrollbar(
+            trade_table_frame,
+            orient="vertical",
+            command=self.trade_history.yview,
+        )
+        trade_scroll_y.grid(row=0, column=1, sticky="ns")
+        trade_scroll_x = ttk.Scrollbar(
+            trade_table_frame,
+            orient="horizontal",
+            command=self.trade_history.xview,
+        )
+        trade_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.trade_history.configure(
+            yscrollcommand=trade_scroll_y.set,
+            xscrollcommand=trade_scroll_x.set,
+        )
+
     def _field(self, parent: ttk.Frame, label: str, variable: tk.StringVar, column: int) -> None:
         ttk.Label(parent, text=label).grid(row=0, column=column, sticky="w")
         ttk.Entry(parent, textvariable=variable, width=14).grid(
@@ -1103,6 +1248,13 @@ class TraderApp(tk.Tk):
         scrollbar.grid(row=0, column=1, sticky="ns")
         table.configure(yscrollcommand=scrollbar.set)
         return table
+
+    def _open_trade_history_file(self) -> None:
+        path = self.service.storage.trade_history_path
+        if not path.exists():
+            messagebox.showwarning("매수·매도 이력", "아직 생성된 CSV 이력 파일이 없습니다.")
+            return
+        webbrowser.open(path.resolve().as_uri())
 
     def _save_settings(self) -> None:
         settings = StrategySettings(dmi_period=max(1, int(float(self.dmi_period_var.get()))))
@@ -2388,6 +2540,11 @@ class TraderApp(tk.Tk):
         self.market_session_var.set(
             f"장 상태: {_market_session_text(snapshot.market_session_status)}"
         )
+        if snapshot.started_at is not None:
+            started_label = snapshot.started_at.strftime("%Y-%m-%d %H:%M:%S")
+            running_label = "운용 중" if snapshot.running else "최근 시작"
+            self.auto_started_at_var.set(f"자동운용 시작 시각: {started_label} · {running_label}")
+        self._update_auto_trade_capability(snapshot)
         self._update_dmi_display(snapshot.dmi)
         self.status_text.set(self._format_main_status(snapshot))
         if snapshot.symbol_name and self.symbol_name_var.get() != snapshot.symbol_name:
@@ -2407,6 +2564,15 @@ class TraderApp(tk.Tk):
         self._replace_rows(self.holdings, self._format_holdings(holdings))
         self._replace_rows(self.orders, self._format_orders(snapshot.orders))
         self._replace_rows(self.logs, self._format_logs(snapshot.logs))
+        self._replace_trade_history_rows(self._format_trade_history(snapshot.trade_history))
+        if self.service.storage.trade_history_file_error:
+            self.trade_history_file_var.set(
+                f"CSV 로그 오류: {self.service.storage.trade_history_file_error}"
+            )
+        else:
+            self.trade_history_file_var.set(
+                f"CSV 로그: {self.service.storage.trade_history_path}"
+            )
         if self._watchlist_window is not None and self._watchlist_window.winfo_exists():
             self._render_watchlist_rows()
         self.after_idle(self._draw_main_dmi_chart)
@@ -2433,6 +2599,31 @@ class TraderApp(tk.Tk):
         else:
             self.dmi_state_var.set("중립")
             self.dmi_state_badge.configure(bg="#777777", fg="white")
+
+    def _update_auto_trade_capability(self, snapshot) -> None:
+        real_account = snapshot.account_info.server_type == "실거래"
+        authorization_ready = not real_account or self._real_order_session_ready()
+        automation_configured = bool(
+            self.kiwoom_auto_order_var.get()
+            or self.price_triggers.get("BUY")
+            or self.price_triggers.get("SELL")
+        )
+        ready, missing = _automatic_trade_readiness(
+            account_ready=self._account_connection_confirmed(snapshot.account_info),
+            symbol_ready=self._selected_symbol_ready(),
+            quantity_ready=self._order_quantity_valid(),
+            baseline_ready=self._selected_trading_baseline() is not None,
+            authorization_ready=authorization_ready,
+            automation_configured=automation_configured,
+        )
+        if ready:
+            self.auto_trade_capability_var.set("자동매매 가능 ON")
+            self.auto_trade_capability_badge.configure(bg="#16833a", fg="white")
+            self.auto_trade_detail_var.set("준비 완료 · 장 운영 시간과 무관한 준비 상태")
+            return
+        self.auto_trade_capability_var.set("자동매매 OFF")
+        self.auto_trade_capability_badge.configure(bg="#b3261e", fg="white")
+        self.auto_trade_detail_var.set(f"준비 필요: {', '.join(missing)}")
 
     @staticmethod
     def _format_main_status(snapshot) -> str:
@@ -2546,6 +2737,15 @@ class TraderApp(tk.Tk):
         for row in rows:
             table.insert("", "end", values=row)
 
+    def _replace_trade_history_rows(self, rows: list[tuple]) -> None:
+        for item in self.trade_history.get_children():
+            self.trade_history.delete(item)
+        for row in rows:
+            side = row[1]
+            result = row[7]
+            tag = "FAILED" if result == "실패" else ("BUY" if side == "매수" else "SELL")
+            self.trade_history.insert("", "end", values=row, tags=(tag,))
+
     def _format_orders(self, rows: list[tuple]) -> list[tuple]:
         formatted = []
         for timestamp, symbol, side, quantity, price, success, message in rows:
@@ -2557,6 +2757,38 @@ class TraderApp(tk.Tk):
                     quantity,
                     f"{price:,.0f}",
                     "성공" if success else "실패",
+                    message,
+                )
+            )
+        return formatted
+
+    def _format_trade_history(self, rows: list[tuple]) -> list[tuple]:
+        formatted = []
+        for (
+            timestamp,
+            side,
+            symbol,
+            symbol_name,
+            quantity,
+            price,
+            total_amount,
+            success,
+            order_no,
+            order_mode,
+            message,
+        ) in rows:
+            formatted.append(
+                (
+                    str(timestamp).replace("T", " "),
+                    SIDE_LABELS.get(side, side),
+                    normalize_symbol(symbol),
+                    symbol_name or "-",
+                    f"{int(quantity):,}주",
+                    f"{float(price):,.0f}원" if price else "-",
+                    f"{float(total_amount):,.0f}원" if total_amount else "-",
+                    "접수" if success else "실패",
+                    order_no or "-",
+                    order_mode or "-",
                     message,
                 )
             )

@@ -183,6 +183,10 @@ class OrderResult:
     success: bool
     message: str
     timestamp: datetime
+    symbol_name: str = ""
+    total_amount: float = 0.0
+    order_no: str = ""
+    order_mode: str = ""
 
 
 @dataclass(frozen=True)

@@ -241,6 +241,27 @@ class FakeWatchlistApi:
 
 
 class AutoTradingServiceTests(unittest.TestCase):
+    def test_start_records_time_once_and_snapshot_keeps_it_after_stop(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "start-time.sqlite3")
+            )
+
+            service.start()
+            first_started_at = service.started_at
+            service.start()
+            service.stop()
+
+            self.assertIsNotNone(first_started_at)
+            self.assertEqual(service.started_at, first_started_at)
+            self.assertEqual(service.snapshot().started_at, first_started_at)
+            self.assertTrue(
+                any(
+                    "시작 시각" in row[3]
+                    for row in service.storage.recent_logs(10)
+                )
+            )
+
     def test_persists_normalized_watchlist_symbol_and_refreshes_quotes(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_watchlist_test.sqlite3"
         if db.exists():

@@ -54,6 +54,7 @@ class ServiceSnapshot:
     average_price: float
     decision: TradeDecision | None
     account_info: KiwoomAccountInfo
+    started_at: datetime | None = None
     dmi: DmiPoint | None = None
     market_session_status: MarketSessionStatus | None = None
     market_quote: MarketQuote | None = None
@@ -64,6 +65,7 @@ class ServiceSnapshot:
     chart_source: str = ""
     last_api_message: str = ""
     orders: list[tuple] = field(default_factory=list)
+    trade_history: list[tuple] = field(default_factory=list)
     logs: list[tuple] = field(default_factory=list)
 
 
@@ -105,6 +107,7 @@ class AutoTradingService:
         self.watchlist_quotes: dict[str, WatchlistQuote] = {}
         self.last_api_message = ""
         self.last_order_account_access_verified: bool | None = None
+        self.started_at: datetime | None = None
 
     def configure(
         self,
@@ -136,8 +139,15 @@ class AutoTradingService:
 
     def start(self) -> None:
         self.order_manager.resume()
+        if self.running:
+            return
         self.running = True
-        self.storage.log("INFO", "시스템", "자동 운용을 시작했습니다.")
+        self.started_at = datetime.now()
+        self.storage.log(
+            "INFO",
+            "시스템",
+            f"자동 운용을 시작했습니다. 시작 시각 {self.started_at.strftime('%Y-%m-%d %H:%M:%S')}",
+        )
 
     def stop(self) -> None:
         self.running = False
@@ -710,6 +720,11 @@ class AutoTradingService:
         self.symbol = normalize_symbol(self.symbol) or self.symbol
         result_side = "BUY" if side == "BUY" else "SELL"
         api = self._active_api()
+        order_price = float(self.current_price)
+        order_total = max(0, int(quantity)) * max(0.0, order_price)
+        order_symbol_name = self.symbol_name or known_symbol_name(self.symbol)
+        order_mode = self.account_info.server_type or ("실거래" if allow_real_order else "모의투자")
+        order_no = ""
         self.last_order_account_access_verified = None
         try:
             if not account:
@@ -800,6 +815,7 @@ class AutoTradingService:
             for attempt in range(1, max_attempts + 1):
                 try:
                     self.last_api_message = api.send_order(request)
+                    order_no = str(getattr(api, "last_order_no", "") or "").strip()
                     break
                 except API_ERRORS as exc:
                     if attempt >= max_attempts:
@@ -818,6 +834,10 @@ class AutoTradingService:
                     True,
                     self.last_api_message,
                     datetime.now(),
+                    symbol_name=order_symbol_name,
+                    total_amount=order_total,
+                    order_no=order_no,
+                    order_mode=order_mode,
                 )
             )
             self.storage.log("WARN" if allow_real_order else "INFO", "주문", self.last_api_message)
@@ -832,6 +852,10 @@ class AutoTradingService:
                     False,
                     self.last_api_message,
                     datetime.now(),
+                    symbol_name=order_symbol_name,
+                    total_amount=order_total,
+                    order_no=order_no,
+                    order_mode=order_mode,
                 )
             )
             self.storage.log("ERROR", "주문", self.last_api_message)
@@ -904,6 +928,7 @@ class AutoTradingService:
             average_price=position.average_price,
             decision=self.last_decision,
             account_info=self.account_info,
+            started_at=self.started_at,
             dmi=self.latest_dmi,
             market_session_status=self.latest_market_session_status(),
             market_quote=self.market_quote,
@@ -914,6 +939,7 @@ class AutoTradingService:
             chart_source=self.chart_source,
             last_api_message=self.last_api_message,
             orders=self.storage.recent_orders(10),
+            trade_history=self.storage.recent_trade_history(200),
             logs=self.storage.recent_logs(10),
         )
 
