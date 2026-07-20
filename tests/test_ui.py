@@ -352,6 +352,7 @@ class UiHelperTests(unittest.TestCase):
         self.assertIsNotNone(trigger)
         self.assertTrue(trigger.allow_real_order)
         self.assertEqual(trigger.account, "12345678")
+        self.assertEqual(trigger.target_price, 69_860)
         self.assertTrue(app._real_order_session_armed)
         self.assertTrue(app.allow_real_order_var.get())
         service.storage.log.assert_any_call(

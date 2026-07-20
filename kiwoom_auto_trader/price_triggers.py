@@ -44,7 +44,7 @@ class OneShotPriceTrigger:
         if quantity <= 0:
             raise ValueError("주문 수량은 1주 이상 선택해 주세요.")
 
-        direction = -1.0 if side == "BUY" else 1.0
+        direction = 1.0 if side == "BUY" else -1.0
         target_price = base_price * (1.0 + direction * percent / 100.0)
         return cls(
             side=side,
@@ -61,8 +61,8 @@ class OneShotPriceTrigger:
         if not math.isfinite(current_price) or current_price <= 0:
             return False
         if self.side == "BUY":
-            return current_price <= self.target_price
-        return current_price >= self.target_price
+            return current_price >= self.target_price
+        return current_price <= self.target_price
 
 
 class OneShotPriceTriggerBook:

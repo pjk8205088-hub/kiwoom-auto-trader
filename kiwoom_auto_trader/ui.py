@@ -745,8 +745,8 @@ class TraderApp(tk.Tk):
             padx=2,
         )
 
-        self._build_percent_trigger_box(order_controls, "SELL", 2)
-        self._build_percent_trigger_box(order_controls, "BUY", 3)
+        self._build_percent_trigger_box(order_controls, "BUY", 2)
+        self._build_percent_trigger_box(order_controls, "SELL", 3)
 
         api_actions = ttk.Frame(controls)
         api_actions.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
@@ -1194,11 +1194,11 @@ class TraderApp(tk.Tk):
     def _build_percent_trigger_box(self, parent: ttk.Frame, side: str, column: int) -> None:
         is_buy = side == "BUY"
         title = (
-            "하한가 시작 자동매수 주문거래"
+            "상승 시 자동매수 주문거래"
             if is_buy
-            else "상한가 시작 자동매도 주문거래"
+            else "하락 시 자동매도 주문거래"
         )
-        sign = "-" if is_buy else "+"
+        sign = "+" if is_buy else "-"
         button_text = "자동매수 설정" if is_buy else "자동매도 설정"
         percentage_var = self.buy_percent_var if is_buy else self.sell_percent_var
         status_var = self.buy_trigger_status_var if is_buy else self.sell_trigger_status_var
@@ -2995,6 +2995,8 @@ class TraderApp(tk.Tk):
 
         allow_real_order = False
         session_armed_by_setting = False
+        direction = "상승" if side == "BUY" else "하락"
+        direction_sign = "+" if side == "BUY" else "-"
         if self.service.account_info.server_type != "모의투자":
             session_approval_needed = not self._real_order_session_ready()
             action = "매수" if side == "BUY" else "매도"
@@ -3011,7 +3013,8 @@ class TraderApp(tk.Tk):
             )
             if not messagebox.askyesno(
                 "실거래 일회성 자동주문 확인",
-                f"고정 기준가 {candidate.base_price:,.0f}원 기준 {candidate.percent:.2f}% 조건으로\n"
+                f"고정 기준가 {candidate.base_price:,.0f}원 대비 "
+                f"{direction_sign}{candidate.percent:.2f}% {direction} 조건으로\n"
                 f"목표가 {candidate.target_price:,.0f}원 도달 시 {candidate.quantity}주를 자동 {action}합니다.\n\n"
                 f"{credential_note}\n{session_note}\n"
                 "조건 충족 시 추가 확인 없이 실제 주문이 1회 전송됩니다. 설정하시겠습니까?",
@@ -3055,8 +3058,9 @@ class TraderApp(tk.Tk):
         self.service.storage.log(
             "WARN" if trigger.allow_real_order else "INFO",
             action,
-            f"일회성 설정: 기준 {trigger.base_price:,.0f}원 / 목표 {trigger.target_price:,.0f}원 / "
-            f"{trigger.percent:.2f}% / {trigger.quantity}주",
+            f"일회성 {direction} {action} 설정: 기준 {trigger.base_price:,.0f}원 / "
+            f"목표 {trigger.target_price:,.0f}원 / {direction_sign}{trigger.percent:.2f}% / "
+            f"{trigger.quantity}주",
         )
         self._refresh()
 
@@ -3065,6 +3069,8 @@ class TraderApp(tk.Tk):
         status_var = self.buy_trigger_status_var if side == "BUY" else self.sell_trigger_status_var
         button = self.buy_trigger_button if side == "BUY" else self.sell_trigger_button
         action = "자동매수" if side == "BUY" else "자동매도"
+        direction = "상승" if side == "BUY" else "하락"
+        direction_sign = "+" if side == "BUY" else "-"
         if trigger is None:
             value = (self.buy_percent_var if side == "BUY" else self.sell_percent_var).get().strip()
             status_var.set(f"{value}% 입력됨 · 설정 버튼 필요" if value else "입력 후 설정 필요")
@@ -3079,7 +3085,8 @@ class TraderApp(tk.Tk):
         if self._real_trading_account() and not self._regular_market_open():
             order_mode += "·장 시작 대기"
         status_var.set(
-            f"{order_mode} | {trigger.percent:g}% → {trigger.target_price:,.0f}원 | {trigger.quantity}주"
+            f"{order_mode} | {direction} {direction_sign}{trigger.percent:g}% → "
+            f"{trigger.target_price:,.0f}원 | {trigger.quantity}주"
         )
         button.configure(text=f"{action} 재설정")
 
@@ -3166,10 +3173,13 @@ class TraderApp(tk.Tk):
 
                 self.service.configure(trigger.symbol, self._operating_capital(), self._settings())
                 self.service.current_price = current_price
+                direction = "상승" if trigger.side == "BUY" else "하락"
+                direction_sign = "+" if trigger.side == "BUY" else "-"
                 self.service.storage.log(
                     "WARN" if trigger.allow_real_order else "INFO",
                     action,
-                    f"현재가 {current_price:,.0f}원이 목표 {trigger.target_price:,.0f}원에 도달했습니다. "
+                    f"현재가 {current_price:,.0f}원이 {direction} "
+                    f"{direction_sign}{trigger.percent:g}% 목표 {trigger.target_price:,.0f}원에 도달했습니다. "
                     "설정을 해제하고 주문을 1회 요청합니다.",
                 )
                 self.service.send_kiwoom_order(
