@@ -32,6 +32,7 @@ KIWOOM_REST_MOCK_URL = "https://mockapi.kiwoom.com"
 KIWOOM_REST_LIVE_SOCKET_URL = "wss://api.kiwoom.com:10000/api/dostk/websocket"
 KIWOOM_REST_MOCK_SOCKET_URL = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
 DEFAULT_REST_TIMEOUT_SECONDS = 10.0
+REALTIME_TRADE_SESSION_TTL_SECONDS = 30.0
 
 
 class KiwoomRestApiError(RuntimeError):
@@ -152,6 +153,8 @@ class KiwoomRestApiClient:
         self._real_time_quote: RealTimeQuote | None = None
         self._real_quote_events: deque[RealTimeQuote] = deque(maxlen=5000)
         self._market_session_status: MarketSessionStatus | None = None
+        self._market_session_confirmed_at = 0.0
+        self._market_session_from_trade = False
         self._websocket_thread: threading.Thread | None = None
         self._websocket = None
         self._websocket_stop = threading.Event()
@@ -214,6 +217,8 @@ class KiwoomRestApiClient:
             self._real_time_quote = None
             self._real_quote_events.clear()
             self._market_session_status = None
+            self._market_session_confirmed_at = 0.0
+            self._market_session_from_trade = False
         self._websocket_error = ""
         self.last_order_no = ""
         self._websocket_ready.clear()
@@ -453,6 +458,8 @@ class KiwoomRestApiClient:
             self._real_time_quote = None
             self._real_quote_events.clear()
             self._market_session_status = None
+            self._market_session_confirmed_at = 0.0
+            self._market_session_from_trade = False
         self._websocket_error = ""
         self._websocket_ready.clear()
         stop_event = threading.Event()
@@ -476,6 +483,8 @@ class KiwoomRestApiClient:
             self._real_time_quote = None
             self._real_quote_events.clear()
             self._market_session_status = None
+            self._market_session_confirmed_at = 0.0
+            self._market_session_from_trade = False
         self._websocket_error = ""
         self._websocket_ready.clear()
         return f"{symbol or 'REST'} WebSocket 실시간 시세를 중지했습니다."
@@ -501,13 +510,21 @@ class KiwoomRestApiClient:
             return self._market_session_status
 
     def is_regular_market_open(self) -> bool:
-        status = self.latest_market_session_status()
-        return bool(
+        with self._websocket_lock:
+            status = self._market_session_status
+            confirmed_at = self._market_session_confirmed_at
+            from_trade = self._market_session_from_trade
+        if not (
             status
             and status.is_open
             and self._websocket_ready.is_set()
             and not self._websocket_error
-        )
+        ):
+            return False
+        if from_trade:
+            age = max(0.0, self._clock() - confirmed_at)
+            return age <= REALTIME_TRADE_SESSION_TTL_SECONDS
+        return True
 
     def send_order(self, request: KiwoomOrderRequest) -> str:
         self.last_order_no = ""
@@ -524,7 +541,7 @@ class KiwoomRestApiClient:
                 )
             if not self.is_regular_market_open():
                 raise KiwoomRestApiError(
-                    "키움 장시작시간(0s)에서 정규장 장중 신호(장운영구분 3)를 확인하지 못해 "
+                    "키움 실시간 장 상태(0s 또는 0B 장구분)에서 정규장 장중 신호를 확인하지 못해 "
                     "실거래 주문을 차단했습니다."
                 )
             order_mode = "실거래"
@@ -649,6 +666,8 @@ class KiwoomRestApiClient:
                 )
                 with self._websocket_lock:
                     self._market_session_status = status
+                    self._market_session_confirmed_at = self._clock()
+                    self._market_session_from_trade = False
                 continue
             if row_type != "0B":
                 continue
@@ -669,10 +688,25 @@ class KiwoomRestApiClient:
                 change_rate=_number(values.get("12")),
                 volume=_integer(values.get("15")),
                 timestamp=timestamp,
+                market_session_code=str(values.get("290") or "").strip(),
             )
+            trade_session_code = quote.market_session_code
+            operation_code = {"1": "0", "2": "3", "3": "8"}.get(trade_session_code)
+            trade_status = None
+            if operation_code is not None:
+                trade_status = MarketSessionStatus(
+                    operation_code=operation_code,
+                    event_time=trade_time,
+                    received_at=datetime.now().strftime("%Y%m%d%H%M%S"),
+                    source=f"키움 REST 주식체결(0B) 장구분 {trade_session_code}",
+                )
             with self._websocket_lock:
                 self._real_time_quote = quote
                 self._real_quote_events.append(quote)
+                if trade_status is not None:
+                    self._market_session_status = trade_status
+                    self._market_session_confirmed_at = self._clock()
+                    self._market_session_from_trade = True
         return None
 
     def _register_real_time_message(self, symbol: str = "") -> dict[str, Any]:

@@ -146,6 +146,7 @@ class RealTimeQuote:
     change_rate: float = 0.0
     volume: int = 0
     timestamp: str = ""
+    market_session_code: str = ""
 
 
 @dataclass(frozen=True)

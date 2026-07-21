@@ -126,10 +126,17 @@ def _regular_market_is_open(status: MarketSessionStatus | None) -> bool:
     return bool(status and status.is_open)
 
 
-def _market_session_text(status: MarketSessionStatus | None) -> str:
+def _market_session_text(
+    status: MarketSessionStatus | None,
+    regular_market_open: bool | None = None,
+) -> str:
     if status is None:
         return "키움 장 시작 신호 대기"
     if status.is_open:
+        if regular_market_open is False:
+            return "장중 실시간 체결 갱신 대기"
+        if "0B" in status.source.upper():
+            return "정규장 장중(실시간 체결 확인)"
         return "정규장 장중"
     if status.operation_code == "0":
         return "정규장 시작 전"
@@ -446,7 +453,7 @@ class TraderApp(tk.Tk):
         self._processing_price_triggers = False
         self._trading_baseline: TradingBaseline | None = None
         self._real_order_session_armed = False
-        self._last_auto_market_code: str | None = None
+        self._last_auto_market_state: tuple[str, str, bool] | None = None
         self._build_ui()
         self._buy_percent_trace_id = self.buy_percent_var.trace_add(
             "write",
@@ -1279,8 +1286,8 @@ class TraderApp(tk.Tk):
                 self.service.storage.log(
                     "INFO",
                     "자동주문",
-                    "자동운용을 준비했습니다. 키움 장시작시간 신호가 정규장 장중(3)으로 "
-                    "바뀌면 DMI 전략 판단과 주문을 시작합니다.",
+                    "자동운용을 준비했습니다. 키움 장시작시간(0s) 또는 "
+                    "주식체결(0B) 장중 신호가 확인되면 DMI 전략 판단과 주문을 시작합니다.",
                 )
         self.service.start()
         self._refresh()
@@ -1312,13 +1319,16 @@ class TraderApp(tk.Tk):
     def _regular_market_open(self) -> bool:
         if not self._real_trading_account():
             return True
+        checker = getattr(self.service, "is_regular_market_open", None)
+        if callable(checker):
+            return bool(checker())
         return _regular_market_is_open(self.service.latest_market_session_status())
 
     def _clear_real_order_authorization(self, log_message: str = "") -> None:
         was_armed = self._real_order_session_armed or self.allow_real_order_var.get()
         self._real_order_session_armed = False
         self.allow_real_order_var.set(False)
-        self._last_auto_market_code = None
+        self._last_auto_market_state = None
         if was_armed and log_message:
             self.service.storage.log("WARN", "주문", log_message)
 
@@ -2460,7 +2470,8 @@ class TraderApp(tk.Tk):
         if allow_real and not self._regular_market_open():
             messagebox.showwarning(
                 "정규장 장중 확인 필요",
-                "키움 장시작시간(0s)에서 정규장 장중 신호를 확인한 뒤 실거래 주문할 수 있습니다.",
+                "키움 장시작시간(0s) 또는 주식체결(0B)에서 정규장 장중을 "
+                "확인한 뒤 실거래 주문할 수 있습니다.",
             )
             return
         if allow_real and not self._confirm_real_order("시장가 주문"):
@@ -2491,7 +2502,8 @@ class TraderApp(tk.Tk):
             if not auto:
                 messagebox.showwarning(
                     "정규장 장중 확인 필요",
-                    "키움 장시작시간(0s)에서 정규장 장중 신호를 확인한 뒤 실거래 주문할 수 있습니다.",
+                    "키움 장시작시간(0s) 또는 주식체결(0B)에서 정규장 장중을 "
+                    "확인한 뒤 실거래 주문할 수 있습니다.",
                 )
             return
         if allow_real and not auto and not self._confirm_real_order("전략 판단 후 주문"):
@@ -2538,7 +2550,7 @@ class TraderApp(tk.Tk):
             self._clear_real_order_authorization()
         self.allow_real_order_checkbutton.configure(state=real_order_state)
         self.market_session_var.set(
-            f"장 상태: {_market_session_text(snapshot.market_session_status)}"
+            f"장 상태: {_market_session_text(snapshot.market_session_status, snapshot.regular_market_open)}"
         )
         if snapshot.started_at is not None:
             started_label = snapshot.started_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -2657,7 +2669,9 @@ class TraderApp(tk.Tk):
                 f"평가 {snapshot.balance_summary.total_evaluation:,.0f}"
             )
         if account.server_type == "실거래":
-            parts.append(f"장 상태 {_market_session_text(snapshot.market_session_status)}")
+            parts.append(
+                f"장 상태 {_market_session_text(snapshot.market_session_status, snapshot.regular_market_open)}"
+            )
         return " | ".join(parts)
 
     def _auto_tick(self) -> None:
@@ -2671,21 +2685,25 @@ class TraderApp(tk.Tk):
                     market_status = self.service.latest_market_session_status()
                     if self._real_trading_account():
                         market_code = market_status.operation_code if market_status else ""
-                        if market_code != self._last_auto_market_code:
-                            self._last_auto_market_code = market_code
-                            if _regular_market_is_open(market_status):
+                        market_source = market_status.source if market_status else ""
+                        market_open = self._regular_market_open()
+                        market_state = (market_code, market_source, market_open)
+                        if market_state != self._last_auto_market_state:
+                            self._last_auto_market_state = market_state
+                            if market_open:
                                 self.service.storage.log(
                                     "WARN",
                                     "자동주문",
-                                    "키움 정규장 장중 신호를 확인해 실거래 자동운용을 시작합니다.",
+                                    "키움 정규장 장중 실시간 신호를 확인해 실거래 자동운용을 시작합니다.",
                                 )
                             else:
                                 self.service.storage.log(
                                     "INFO",
                                     "자동주문",
-                                    f"{_market_session_text(market_status)} 상태이므로 주문 없이 대기합니다.",
+                                    f"{_market_session_text(market_status, market_open)} 상태이므로 "
+                                    "주문 없이 대기합니다.",
                                 )
-                        if not _regular_market_is_open(market_status):
+                        if not market_open:
                             self._refresh()
                             return
                     self._evaluate_and_send_order(auto=True)

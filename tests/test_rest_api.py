@@ -5,6 +5,7 @@ from kiwoom_auto_trader.rest_api import (
     KiwoomRestApiClient,
     KiwoomRestApiError,
     KiwoomRestRateLimiter,
+    REALTIME_TRADE_SESSION_TTL_SECONDS,
     RestResponse,
     _decode_websocket_message,
     _encode_websocket_message,
@@ -402,6 +403,116 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertTrue(status.is_open)
         self.assertEqual(status.event_time, "090000")
         self.assertTrue(client.is_regular_market_open())
+
+    def test_uses_fresh_official_0b_market_division_as_regular_session_evidence(self):
+        clock = FakeClock()
+        client = KiwoomRestApiClient(
+            mock=False,
+            rate_limiter=NoopLimiter(),
+            clock=clock,
+        )
+        client._real_time_symbol = "012200"
+        client._handle_websocket_message({"trnm": "REG", "return_code": 0})
+
+        client._handle_websocket_message(
+            {
+                "trnm": "REAL",
+                "data": [
+                    {
+                        "type": "0B",
+                        "name": "주식체결",
+                        "item": "012200",
+                        "values": {
+                            "20": "132014",
+                            "10": "+4165",
+                            "12": "+1.22",
+                            "15": "+12",
+                            "290": "2",
+                        },
+                    }
+                ],
+            }
+        )
+
+        quote = client.latest_real_time_quote("012200")
+        status = client.latest_market_session_status()
+        self.assertEqual(quote.current_price, 4165)
+        self.assertEqual(quote.market_session_code, "2")
+        self.assertTrue(status.is_open)
+        self.assertIn("0B", status.source)
+        self.assertTrue(client.is_regular_market_open())
+
+        clock.now += REALTIME_TRADE_SESSION_TTL_SECONDS + 1
+        self.assertFalse(client.is_regular_market_open())
+
+    def test_official_0b_after_hours_division_closes_regular_session(self):
+        client = KiwoomRestApiClient(mock=False, rate_limiter=NoopLimiter())
+        client._real_time_symbol = "012200"
+        client._handle_websocket_message({"trnm": "REG", "return_code": 0})
+
+        client._handle_websocket_message(
+            {
+                "trnm": "REAL",
+                "data": [
+                    {
+                        "type": "0B",
+                        "item": "012200",
+                        "values": {"20": "153100", "10": "+4165", "290": "3"},
+                    }
+                ],
+            }
+        )
+
+        status = client.latest_market_session_status()
+        self.assertEqual(status.operation_code, "8")
+        self.assertFalse(client.is_regular_market_open())
+
+    def test_fresh_0b_regular_session_allows_official_buy_and_sell_requests(self):
+        clock = FakeClock()
+        requester = FakeRequester(
+            [
+                response({"token": "live-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response({"ord_no": "9000001"}),
+                response({"ord_no": "9000002"}),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+            clock=clock,
+        )
+        client.connect("app-key", "secret-key")
+        client._real_time_symbol = "012200"
+        client._handle_websocket_message({"trnm": "REG", "return_code": 0})
+        client._handle_websocket_message(
+            {
+                "trnm": "REAL",
+                "data": [
+                    {
+                        "type": "0B",
+                        "item": "012200",
+                        "values": {"20": "132014", "10": "+4165", "290": "2"},
+                    }
+                ],
+            }
+        )
+
+        common = {
+            "account": "1234567890",
+            "symbol": "012200",
+            "quantity": 2,
+            "allow_real_order": True,
+            "require_mock_server": False,
+        }
+        buy_message = client.send_order(KiwoomOrderRequest(side="BUY", **common))
+        sell_message = client.send_order(KiwoomOrderRequest(side="SELL", **common))
+
+        self.assertIn("매수주문 접수 완료", buy_message)
+        self.assertIn("매도주문 접수 완료", sell_message)
+        self.assertEqual(requester.calls[-2][2]["api-id"], "kt10000")
+        self.assertEqual(requester.calls[-1][2]["api-id"], "kt10001")
 
     def test_live_client_requires_explicit_session_and_market_open_signal(self):
         requester = FakeRequester(

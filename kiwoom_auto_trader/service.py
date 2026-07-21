@@ -57,6 +57,7 @@ class ServiceSnapshot:
     started_at: datetime | None = None
     dmi: DmiPoint | None = None
     market_session_status: MarketSessionStatus | None = None
+    regular_market_open: bool = False
     market_quote: MarketQuote | None = None
     balance_summary: BalanceSummary | None = None
     real_time_quote: RealTimeQuote | None = None
@@ -365,6 +366,18 @@ class AutoTradingService:
         except API_ERRORS as exc:
             self.last_api_message = str(exc)
             return None
+
+    def is_regular_market_open(self) -> bool:
+        api = self._active_api()
+        checker = getattr(api, "is_regular_market_open", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except API_ERRORS as exc:
+                self.last_api_message = str(exc)
+                return False
+        status = self.latest_market_session_status()
+        return bool(status and status.is_open)
 
     def lookup_symbol_name(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)
@@ -931,6 +944,7 @@ class AutoTradingService:
             started_at=self.started_at,
             dmi=self.latest_dmi,
             market_session_status=self.latest_market_session_status(),
+            regular_market_open=self.is_regular_market_open(),
             market_quote=self.market_quote,
             balance_summary=self.balance_summary,
             real_time_quote=self.refresh_real_time_quote(),

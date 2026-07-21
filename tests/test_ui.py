@@ -25,6 +25,7 @@ from kiwoom_auto_trader.ui import (
     _parse_money_input,
     _parse_order_quantity,
     _percentage_input_allowed,
+    _market_session_text,
     _regular_market_is_open,
 )
 
@@ -302,6 +303,22 @@ class UiHelperTests(unittest.TestCase):
         self.assertFalse(_regular_market_is_open(waiting))
         self.assertFalse(_regular_market_is_open(None))
 
+    def test_market_status_identifies_0b_trade_confirmation_and_stale_wait(self):
+        status = MarketSessionStatus(
+            "3",
+            event_time="132014",
+            source="키움 REST 주식체결(0B) 장구분 2",
+        )
+
+        self.assertEqual(
+            _market_session_text(status, True),
+            "정규장 장중(실시간 체결 확인)",
+        )
+        self.assertEqual(
+            _market_session_text(status, False),
+            "장중 실시간 체결 갱신 대기",
+        )
+
     def test_live_rest_price_setting_arms_session_without_mock_connection(self):
         class Variable:
             def __init__(self, value=""):
@@ -383,6 +400,71 @@ class UiHelperTests(unittest.TestCase):
 
         self.assertFalse(processed)
         self.assertIsNotNone(triggers.get("BUY"))
+
+    def test_open_market_crossed_targets_send_automatic_buy_and_sell(self):
+        class Variable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        for side, current_price in (("BUY", 4_165), ("SELL", 4_125)):
+            with self.subTest(side=side):
+                triggers = OneShotPriceTriggerBook()
+                triggers.arm(
+                    side,
+                    "012200",
+                    4_130,
+                    0.02 if side == "BUY" else 0.1,
+                    2,
+                    allow_real_order=True,
+                    account="12345678",
+                )
+                service = SimpleNamespace(
+                    account_info=SimpleNamespace(
+                        connection_method="REST API",
+                        server_type="실거래",
+                    ),
+                    storage=SimpleNamespace(log=MagicMock()),
+                    configure=MagicMock(),
+                    current_price=0,
+                    send_kiwoom_order=MagicMock(return_value="주문 접수 완료"),
+                )
+                app = SimpleNamespace(
+                    service=service,
+                    _processing_price_triggers=False,
+                    _real_trading_account=lambda: True,
+                    _regular_market_open=lambda: True,
+                    _selected_current_price=lambda: current_price,
+                    price_triggers=triggers,
+                    symbol_var=Variable("012200"),
+                    buy_percent_var=Variable("0.02"),
+                    sell_percent_var=Variable("0.1"),
+                    _update_price_trigger_status=MagicMock(),
+                    _account_connection_confirmed=lambda _info: True,
+                    _account_for_api=lambda: "12345678",
+                    _real_order_session_ready=lambda: True,
+                    _operating_capital=lambda: 70_000,
+                    _settings=lambda: None,
+                    _account_password_for_order=lambda: "",
+                    _handle_order_account_verification=MagicMock(),
+                )
+
+                processed = TraderApp._process_one_shot_price_triggers(app)
+
+                self.assertTrue(processed)
+                self.assertIsNone(triggers.get(side))
+                service.send_kiwoom_order.assert_called_once_with(
+                    account="12345678",
+                    side=side,
+                    quantity=2,
+                    allow_real_order=True,
+                    account_password="",
+                )
 
     def test_main_status_hides_internal_mock_state_and_account_details(self):
         snapshot = ServiceSnapshot(
