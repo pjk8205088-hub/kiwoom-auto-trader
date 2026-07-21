@@ -129,8 +129,11 @@ def _regular_market_is_open(status: MarketSessionStatus | None) -> bool:
 def _market_session_text(
     status: MarketSessionStatus | None,
     regular_market_open: bool | None = None,
+    real_time_registered: bool = False,
 ) -> str:
     if status is None:
+        if real_time_registered:
+            return "실시간 등록 완료·다음 체결 대기"
         return "키움 장 시작 신호 대기"
     if status.is_open:
         if regular_market_open is False:
@@ -2550,7 +2553,8 @@ class TraderApp(tk.Tk):
             self._clear_real_order_authorization()
         self.allow_real_order_checkbutton.configure(state=real_order_state)
         self.market_session_var.set(
-            f"장 상태: {_market_session_text(snapshot.market_session_status, snapshot.regular_market_open)}"
+            "장 상태: "
+            f"{_market_session_text(snapshot.market_session_status, snapshot.regular_market_open, snapshot.real_time_registered)}"
         )
         if snapshot.started_at is not None:
             started_label = snapshot.started_at.strftime("%Y-%m-%d %H:%M:%S")
@@ -2670,7 +2674,8 @@ class TraderApp(tk.Tk):
             )
         if account.server_type == "실거래":
             parts.append(
-                f"장 상태 {_market_session_text(snapshot.market_session_status, snapshot.regular_market_open)}"
+                "장 상태 "
+                f"{_market_session_text(snapshot.market_session_status, snapshot.regular_market_open, snapshot.real_time_registered)}"
             )
         return " | ".join(parts)
 
@@ -2700,7 +2705,8 @@ class TraderApp(tk.Tk):
                                 self.service.storage.log(
                                     "INFO",
                                     "자동주문",
-                                    f"{_market_session_text(market_status, market_open)} 상태이므로 "
+                                    f"{_market_session_text(market_status, market_open, self.service.is_real_time_registered())} "
+                                    "상태이므로 "
                                     "주문 없이 대기합니다.",
                                 )
                         if not market_open:
@@ -3101,7 +3107,10 @@ class TraderApp(tk.Tk):
         else:
             order_mode = "실주문 대기·비밀번호 확인"
         if self._real_trading_account() and not self._regular_market_open():
-            order_mode += "·장 시작 대기"
+            if self.service.is_real_time_registered():
+                order_mode += "·다음 체결 대기"
+            else:
+                order_mode += "·실시간 등록 대기"
         status_var.set(
             f"{order_mode} | {direction} {direction_sign}{trigger.percent:g}% → "
             f"{trigger.target_price:,.0f}원 | {trigger.quantity}주"

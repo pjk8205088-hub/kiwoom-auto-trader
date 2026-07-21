@@ -216,6 +216,9 @@ class FakeRestTickApi:
     def pump_messages(self):
         return
 
+    def is_real_time_registered(self):
+        return True
+
     def drain_real_time_quotes(self, symbol):
         quotes = [quote for quote in self.live_quotes if quote.symbol == symbol]
         self.live_quotes = []
@@ -313,6 +316,7 @@ class AutoTradingServiceTests(unittest.TestCase):
         service.real_time_symbol = "005930"
         service.refresh_real_time_quote()
         combined = service.select_realtime_chart(1)
+        log_messages = [row[3] for row in service.storage.recent_logs(20)]
 
         self.assertEqual(api.tick_requests, [("005930", 3000)])
         self.assertEqual(len(one_second), 2)
@@ -325,6 +329,12 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(len(combined), 3)
         self.assertEqual(combined[-1].close, 106)
         self.assertEqual(combined[-1].volume, 5)
+        self.assertTrue(
+            any("REST WebSocket 등록 완료" in message for message in log_messages)
+        )
+        self.assertTrue(
+            any("첫 실시간 체결 확인" in message for message in log_messages)
+        )
         self.assertEqual(service.chart_source, "키움 ka10079 1틱 + 0B 실시간")
 
     def test_hour_chart_uses_sixty_minute_api_without_changing_strategy_candles(self):

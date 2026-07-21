@@ -318,6 +318,10 @@ class UiHelperTests(unittest.TestCase):
             _market_session_text(status, False),
             "장중 실시간 체결 갱신 대기",
         )
+        self.assertEqual(
+            _market_session_text(None, False, True),
+            "실시간 등록 완료·다음 체결 대기",
+        )
 
     def test_live_rest_price_setting_arms_session_without_mock_connection(self):
         class Variable:

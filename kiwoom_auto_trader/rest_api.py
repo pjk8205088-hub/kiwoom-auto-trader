@@ -509,6 +509,13 @@ class KiwoomRestApiClient:
         with self._websocket_lock:
             return self._market_session_status
 
+    def is_real_time_registered(self) -> bool:
+        return bool(
+            self._real_time_symbol
+            and self._websocket_ready.is_set()
+            and not self._websocket_error
+        )
+
     def is_regular_market_open(self) -> bool:
         with self._websocket_lock:
             status = self._market_session_status
@@ -517,8 +524,7 @@ class KiwoomRestApiClient:
         if not (
             status
             and status.is_open
-            and self._websocket_ready.is_set()
-            and not self._websocket_error
+            and self.is_real_time_registered()
         ):
             return False
         if from_trade:

@@ -57,6 +57,7 @@ class ServiceSnapshot:
     started_at: datetime | None = None
     dmi: DmiPoint | None = None
     market_session_status: MarketSessionStatus | None = None
+    real_time_registered: bool = False
     regular_market_open: bool = False
     market_quote: MarketQuote | None = None
     balance_summary: BalanceSummary | None = None
@@ -105,6 +106,8 @@ class AutoTradingService:
         self.balance_summary: BalanceSummary | None = None
         self.real_time_symbol = ""
         self.real_time_quote: RealTimeQuote | None = None
+        self._real_time_registration_logged = False
+        self._first_real_time_quote_logged_symbol = ""
         self.watchlist_quotes: dict[str, WatchlistQuote] = {}
         self.last_api_message = ""
         self.last_order_account_access_verified: bool | None = None
@@ -129,6 +132,8 @@ class AutoTradingService:
             self._tick_history_symbol = ""
             self.market_quote = None
             self.real_time_quote = None
+            self._real_time_registration_logged = False
+            self._first_real_time_quote_logged_symbol = ""
         self.symbol = next_symbol
         fallback_name = known_symbol_name(self.symbol)
         if fallback_name:
@@ -334,6 +339,8 @@ class AutoTradingService:
         self.balance_summary = None
         self.real_time_symbol = ""
         self.real_time_quote = None
+        self._real_time_registration_logged = False
+        self._first_real_time_quote_logged_symbol = ""
         self.watchlist_quotes = {}
         self.candles = []
         self.chart_candles = []
@@ -378,6 +385,17 @@ class AutoTradingService:
                 return False
         status = self.latest_market_session_status()
         return bool(status and status.is_open)
+
+    def is_real_time_registered(self) -> bool:
+        api = self._active_api()
+        checker = getattr(api, "is_real_time_registered", None)
+        if callable(checker):
+            try:
+                return bool(checker())
+            except API_ERRORS as exc:
+                self.last_api_message = str(exc)
+                return False
+        return bool(self.real_time_symbol and self.account_info.connected)
 
     def lookup_symbol_name(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)
@@ -665,6 +683,8 @@ class AutoTradingService:
                 self.real_time_candles.reset(target)
                 self._last_aggregated_quote_key = None
                 self._tick_history_symbol = ""
+            self._real_time_registration_logged = False
+            self._first_real_time_quote_logged_symbol = ""
             self.last_api_message = api.register_real_time_price(target)
             self.symbol = target
             self.real_time_symbol = target
@@ -680,6 +700,18 @@ class AutoTradingService:
         api = self._active_api()
         try:
             api.pump_messages()
+            registered = self.is_real_time_registered()
+            if (
+                self.connection_mode == "REST"
+                and registered
+                and not self._real_time_registration_logged
+            ):
+                self.storage.log(
+                    "INFO",
+                    "실시간",
+                    f"{self.real_time_symbol} REST WebSocket 등록 완료 · 다음 체결 대기",
+                )
+                self._real_time_registration_logged = True
             drain = getattr(api, "drain_real_time_quotes", None)
             quotes = list(drain(self.real_time_symbol)) if callable(drain) else []
             self.real_time_quote = api.latest_real_time_quote(self.real_time_symbol)
@@ -698,6 +730,15 @@ class AutoTradingService:
             self._last_aggregated_quote_key = self._real_time_quote_key(quote)
         if self.real_time_quote and self.real_time_quote.current_price > 0:
             self.current_price = self.real_time_quote.current_price
+            if self._first_real_time_quote_logged_symbol != self.real_time_quote.symbol:
+                session_code = self.real_time_quote.market_session_code or "미수신"
+                self.storage.log(
+                    "INFO",
+                    "실시간",
+                    f"{self.real_time_quote.symbol} 첫 실시간 체결 확인: "
+                    f"{self.real_time_quote.current_price:,.0f}원 / 장구분 {session_code}",
+                )
+                self._first_real_time_quote_logged_symbol = self.real_time_quote.symbol
             existing_watch = self.watchlist_quotes.get(self.real_time_quote.symbol)
             if existing_watch is not None:
                 self.watchlist_quotes[self.real_time_quote.symbol] = replace(
@@ -715,6 +756,8 @@ class AutoTradingService:
             self.last_api_message = api.unregister_real_time()
             self.real_time_symbol = ""
             self.real_time_quote = None
+            self._real_time_registration_logged = False
+            self._first_real_time_quote_logged_symbol = ""
             self.storage.log("INFO", "실시간", self.last_api_message)
         except API_ERRORS as exc:
             self.last_api_message = str(exc)
@@ -944,6 +987,7 @@ class AutoTradingService:
             started_at=self.started_at,
             dmi=self.latest_dmi,
             market_session_status=self.latest_market_session_status(),
+            real_time_registered=self.is_real_time_registered(),
             regular_market_open=self.is_regular_market_open(),
             market_quote=self.market_quote,
             balance_summary=self.balance_summary,

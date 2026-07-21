@@ -382,6 +382,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
 
     def test_parses_official_market_open_message(self):
         client = KiwoomRestApiClient(mock=False, rate_limiter=NoopLimiter())
+        client._real_time_symbol = "005930"
 
         client._handle_websocket_message({"trnm": "REG", "return_code": 0})
         client._handle_websocket_message(
@@ -402,6 +403,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertIsNotNone(status)
         self.assertTrue(status.is_open)
         self.assertEqual(status.event_time, "090000")
+        self.assertTrue(client.is_real_time_registered())
         self.assertTrue(client.is_regular_market_open())
 
     def test_uses_fresh_official_0b_market_division_as_regular_session_evidence(self):
@@ -552,6 +554,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         with self.assertRaisesRegex(KiwoomRestApiError, "장중 신호"):
             client.send_order(approved_request)
 
+        client._real_time_symbol = "005930"
         client._handle_websocket_message({"trnm": "REG", "return_code": 0})
         client._handle_websocket_message(
             {
