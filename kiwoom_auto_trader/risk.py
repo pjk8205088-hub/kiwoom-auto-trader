@@ -24,9 +24,12 @@ class RiskManager:
         market_price: float,
         current_quantity: int,
     ) -> RiskCheck:
-        if current_quantity > 0:
-            return RiskCheck(False, 0, "이미 보유 포지션이 있어 추가 매수를 막았습니다.")
-        quantity = self.calculate_quantity(max_capital, market_price)
-        if quantity <= 0:
-            return RiskCheck(False, 0, "운용 한도가 현재가보다 낮아 주문할 수 없습니다.")
-        return RiskCheck(True, quantity, "주문 가능")
+        maximum_quantity = self.calculate_quantity(max_capital, market_price)
+        remaining_quantity = maximum_quantity - max(0, int(current_quantity))
+        if remaining_quantity <= 0:
+            return RiskCheck(
+                False,
+                0,
+                "기존 보유 수량을 포함하면 종목별 운용 한도를 초과해 추가 매수를 막았습니다.",
+            )
+        return RiskCheck(True, remaining_quantity, "잔여 운용 한도 내 추가 매수 가능")

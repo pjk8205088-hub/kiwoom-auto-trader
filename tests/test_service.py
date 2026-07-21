@@ -617,6 +617,53 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(fake_rest.order_calls, 0)
         self.assertIn("최대 5주", message)
 
+    def test_allows_additional_buy_within_remaining_capital_limit(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_add_buy_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+        service.symbol = "005930"
+        service.current_price = 100_000
+        service.max_capital = 500_000
+        fake_rest.balance_summary = BalanceSummary(
+            account="1234567890",
+            deposit=2_000_000,
+            orderable_amount=2_000_000,
+            holdings=(Holding("005930", "삼성전자", 1, 90_000, 100_000, 10_000, 11.1),),
+        )
+
+        message = service.send_kiwoom_order("1234567890", "BUY", 2)
+
+        self.assertEqual(fake_rest.order_calls, 1)
+        self.assertEqual(fake_rest.order_requests[0].quantity, 2)
+        self.assertIn("접수 완료", message)
+
+    def test_blocks_additional_buy_over_remaining_capital_limit(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_add_buy_cap_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        fake_rest = FakeRestApi()
+        service.rest_api = fake_rest
+        service.start_rest_connection("app-key", "secret-key")
+        service.symbol = "005930"
+        service.current_price = 100_000
+        service.max_capital = 500_000
+        fake_rest.balance_summary = BalanceSummary(
+            account="1234567890",
+            deposit=2_000_000,
+            orderable_amount=2_000_000,
+            holdings=(Holding("005930", "삼성전자", 1, 90_000, 100_000, 10_000, 11.1),),
+        )
+
+        message = service.send_kiwoom_order("1234567890", "BUY", 5)
+
+        self.assertEqual(fake_rest.order_calls, 0)
+        self.assertIn("최대 4주", message)
+
     def test_blocks_manual_buy_over_account_orderable_amount(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_funds_test.sqlite3"
         if db.exists():
