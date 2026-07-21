@@ -44,6 +44,7 @@ SIDE_LABELS = {"BUY": "매수", "SELL": "매도"}
 LEVEL_LABELS = {"INFO": "정보", "WARN": "주의", "ERROR": "오류"}
 REST_LIVE_LABEL = "실전투자"
 REST_MOCK_LABEL = "모의투자"
+REALTIME_PRICE_REFRESH_MS = 100
 
 
 def _account_access_confirmed(
@@ -432,6 +433,7 @@ class TraderApp(tk.Tk):
             storage=Storage(db_path, trade_history_path=trade_history_path)
         )
         self._refresh_after_id: str | None = None
+        self._price_refresh_after_id: str | None = None
         self._chart_refresh_after_id: str | None = None
         self._account_after_id: str | None = None
         self._account_poll_count = 0
@@ -457,6 +459,7 @@ class TraderApp(tk.Tk):
         self._trading_baseline: TradingBaseline | None = None
         self._real_order_session_armed = False
         self._last_auto_market_state: tuple[str, str, bool] | None = None
+        self._last_realtime_display_key: tuple | None = None
         self._build_ui()
         self._buy_percent_trace_id = self.buy_percent_var.trace_add(
             "write",
@@ -2593,6 +2596,7 @@ class TraderApp(tk.Tk):
             self._render_watchlist_rows()
         self.after_idle(self._draw_main_dmi_chart)
         self._schedule_auto_tick()
+        self._schedule_realtime_price_refresh()
         self._schedule_chart_refresh()
 
     def _update_dmi_display(self, dmi: DmiPoint | None) -> None:
@@ -2730,6 +2734,32 @@ class TraderApp(tk.Tk):
         if self._refresh_after_id is None:
             self._refresh_after_id = self.after(3000, self._auto_tick)
 
+    def _schedule_realtime_price_refresh(self) -> None:
+        if self._price_refresh_after_id is None:
+            self._price_refresh_after_id = self.after(
+                REALTIME_PRICE_REFRESH_MS,
+                self._realtime_price_tick,
+            )
+
+    def _realtime_price_tick(self) -> None:
+        self._price_refresh_after_id = None
+        if self.service.real_time_symbol:
+            quote = self.service.refresh_real_time_quote()
+            if quote is not None:
+                display_key = (
+                    quote.symbol,
+                    quote.timestamp,
+                    quote.current_price,
+                    quote.volume,
+                )
+                if display_key != self._last_realtime_display_key:
+                    self._last_realtime_display_key = display_key
+                    self._update_current_price_display()
+                    if self._process_one_shot_price_triggers():
+                        self._refresh()
+                    self._update_watchlist_live_row()
+        self._schedule_realtime_price_refresh()
+
     def _schedule_chart_refresh(self) -> None:
         if self._chart_refresh_after_id is None:
             delay = 250 if self.service.chart_timeframe.endswith("s") else 1000
@@ -2738,11 +2768,6 @@ class TraderApp(tk.Tk):
     def _chart_refresh_tick(self) -> None:
         self._chart_refresh_after_id = None
         if self.service.real_time_symbol:
-            self.service.refresh_real_time_quote()
-            self._update_current_price_display()
-            if self._process_one_shot_price_triggers():
-                self._refresh()
-            self._update_watchlist_live_row()
             if self.service.chart_timeframe.endswith("s"):
                 candles = self.service.chart_candles_for_display()
                 label = timeframe_label(self.service.chart_timeframe)

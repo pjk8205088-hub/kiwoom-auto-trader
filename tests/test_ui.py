@@ -9,6 +9,7 @@ from kiwoom_auto_trader.models import (
     BalanceSummary,
     Candle,
     MarketSessionStatus,
+    RealTimeQuote,
     TradingBaseline,
     WatchlistQuote,
 )
@@ -31,6 +32,36 @@ from kiwoom_auto_trader.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_realtime_price_tick_updates_only_for_a_new_trade(self):
+        quote = RealTimeQuote(
+            symbol="012200",
+            current_price=4_080,
+            volume=3,
+            timestamp="20260721143001",
+        )
+        service = SimpleNamespace(
+            real_time_symbol="012200",
+            refresh_real_time_quote=MagicMock(return_value=quote),
+        )
+        app = SimpleNamespace(
+            service=service,
+            _price_refresh_after_id="pending",
+            _last_realtime_display_key=None,
+            _update_current_price_display=MagicMock(),
+            _process_one_shot_price_triggers=MagicMock(return_value=False),
+            _update_watchlist_live_row=MagicMock(),
+            _schedule_realtime_price_refresh=MagicMock(),
+        )
+
+        TraderApp._realtime_price_tick(app)
+        TraderApp._realtime_price_tick(app)
+
+        self.assertEqual(service.refresh_real_time_quote.call_count, 2)
+        app._update_current_price_display.assert_called_once_with()
+        app._process_one_shot_price_triggers.assert_called_once_with()
+        app._update_watchlist_live_row.assert_called_once_with()
+        self.assertEqual(app._schedule_realtime_price_refresh.call_count, 2)
+
     def test_automatic_trade_readiness_is_independent_of_market_hours(self):
         ready, missing = _automatic_trade_readiness(
             account_ready=True,
