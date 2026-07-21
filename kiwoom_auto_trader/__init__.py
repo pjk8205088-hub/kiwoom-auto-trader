@@ -1,4 +1,4 @@
 """Kiwoom Auto Trader application metadata."""
 
-__version__ = "0.37.0"
-RELEASE_LABEL = "v37"
+__version__ = "0.38.0"
+RELEASE_LABEL = "v38"
