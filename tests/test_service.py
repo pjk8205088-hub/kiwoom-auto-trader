@@ -161,6 +161,7 @@ class FakeOpenApiOrderApi:
 class FakeChartApi:
     def __init__(self) -> None:
         self.intervals = []
+        self.daily_requests = []
 
     def request_minute_candles(self, symbol, interval=3, count=120):
         self.intervals.append((symbol, interval, count))
@@ -174,6 +175,10 @@ class FakeChartApi:
                 timestamp="20260711100000",
             )
         ]
+
+    def request_daily_candles(self, symbol, count=200):
+        self.daily_requests.append((symbol, count))
+        return list(reversed(dmi_buy_transition_candles()))
 
 
 class FakeRealtimeApi:
@@ -354,6 +359,23 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(chart_candles[0].close, 102)
         self.assertEqual(service.candles, strategy_candles)
 
+    def test_daily_dmi_uses_official_daily_chart_and_selected_period(self):
+        db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_daily_dmi_test.sqlite3"
+        if db.exists():
+            db.unlink()
+        service = AutoTradingService(storage=Storage(db))
+        chart_api = FakeChartApi()
+        service.kiwoom_api = chart_api
+        service.configure("005930", 1_000_000, StrategySettings(dmi_period=3))
+
+        candles = service.request_daily_dmi_candles("005930")
+
+        self.assertEqual(chart_api.daily_requests, [("005930", 200)])
+        self.assertEqual(len(candles), 6)
+        self.assertIsNotNone(service.latest_dmi)
+        self.assertEqual(service.pattern_state, "BULLISH")
+        self.assertIn("DMI(3일)", service.last_api_message)
+
     def test_configure_preserves_strategy_state_when_settings_do_not_change(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_test.sqlite3"
         if db.exists():
@@ -482,10 +504,10 @@ class AutoTradingServiceTests(unittest.TestCase):
         sell_candles = buy_candles + [
             Candle(high=8, low=6, close=7, timestamp="20260711091800")
         ]
-        service.request_three_minute_candles = lambda _symbol=None: list(reversed(buy_candles))
+        service.request_daily_dmi_candles = lambda _symbol=None: list(reversed(buy_candles))
 
         buy = service.evaluate_strategy_with_market_data("005930")
-        service.request_three_minute_candles = lambda _symbol=None: list(reversed(sell_candles))
+        service.request_daily_dmi_candles = lambda _symbol=None: list(reversed(sell_candles))
         sell = service.evaluate_strategy_with_market_data("005930")
 
         self.assertEqual(buy.action, "BUY")
@@ -503,7 +525,7 @@ class AutoTradingServiceTests(unittest.TestCase):
         service.configure("005930", 1_000_000, StrategySettings(dmi_period=3))
         service.current_price = 100_000
         candles = dmi_buy_transition_candles()
-        service.request_three_minute_candles = lambda _symbol=None: list(reversed(candles))
+        service.request_daily_dmi_candles = lambda _symbol=None: list(reversed(candles))
 
         first = service.evaluate_and_send_order_with_market_data("1234567890", quantity=3)
         duplicate = service.evaluate_and_send_order_with_market_data("1234567890", quantity=3)

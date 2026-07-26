@@ -353,6 +353,37 @@ class KiwoomRestApiClient:
         ]
         return candles[:count]
 
+    def request_daily_candles(self, symbol: str, count: int = 200) -> list[Candle]:
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KiwoomRestApiError("종목코드를 입력해 주세요.")
+        count = max(1, int(count))
+        body = self._post(
+            "ka10081",
+            "/api/dostk/chart",
+            {
+                "stk_cd": symbol,
+                "base_dt": datetime.now().strftime("%Y%m%d"),
+                "upd_stkpc_tp": "1",
+            },
+        )
+        rows = body.get("stk_dt_pole_chart_qry") or []
+        if not isinstance(rows, list):
+            raise KiwoomRestApiError("REST API 일봉 응답 형식이 올바르지 않습니다.")
+        candles = [
+            Candle(
+                high=_price(row.get("high_pric")),
+                low=_price(row.get("low_pric")),
+                close=_price(row.get("cur_prc")),
+                open=_price(row.get("open_pric")),
+                volume=_integer(row.get("trde_qty")),
+                timestamp=str(row.get("dt") or "").strip(),
+            )
+            for row in rows
+            if isinstance(row, dict) and _price(row.get("cur_prc")) > 0
+        ]
+        return candles[:count]
+
     def request_tick_candles(self, symbol: str, count: int = 3000) -> list[Candle]:
         symbol = normalize_symbol(symbol)
         if not symbol:

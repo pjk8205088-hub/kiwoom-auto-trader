@@ -8,6 +8,9 @@ Action = Literal["BUY", "SELL", "HOLD"]
 PatternState = Literal["NONE", "BULLISH", "BEARISH"]
 OrderSide = Literal["BUY", "SELL"]
 
+MIN_DMI_PERIOD = 1
+MAX_DMI_PERIOD = 99
+
 
 @dataclass(frozen=True)
 class Candle:
@@ -22,6 +25,12 @@ class Candle:
 @dataclass(frozen=True)
 class StrategySettings:
     dmi_period: int = 14
+
+    def __post_init__(self) -> None:
+        if not MIN_DMI_PERIOD <= self.dmi_period <= MAX_DMI_PERIOD:
+            raise ValueError(
+                f"DMI 계산 기간은 {MIN_DMI_PERIOD}일부터 {MAX_DMI_PERIOD}일까지 선택해 주세요."
+            )
 
 
 @dataclass(frozen=True)

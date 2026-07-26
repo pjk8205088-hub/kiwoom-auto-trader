@@ -214,6 +214,43 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertEqual(requester.calls[-1][2]["api-id"], "ka10080")
         self.assertEqual(requester.calls[-1][3]["tic_scope"], "60")
 
+    def test_requests_and_parses_official_daily_chart_for_dmi(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "stk_dt_pole_chart_qry": [
+                            {
+                                "cur_prc": "-72000",
+                                "trde_qty": "1000",
+                                "dt": "20260725",
+                                "open_pric": "-71000",
+                                "high_pric": "-72500",
+                                "low_pric": "-70500",
+                            }
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=True,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        candles = client.request_daily_candles("005930", count=99)
+
+        self.assertEqual(candles[0].timestamp, "20260725")
+        self.assertEqual(candles[0].close, 72_000)
+        self.assertEqual(requester.calls[-1][2]["api-id"], "ka10081")
+        self.assertEqual(requester.calls[-1][3]["stk_cd"], "005930")
+        self.assertEqual(len(requester.calls[-1][3]["base_dt"]), 8)
+        self.assertEqual(requester.calls[-1][3]["upd_stkpc_tp"], "1")
+
     def test_requests_and_parses_official_one_tick_chart(self):
         requester = FakeRequester(
             [

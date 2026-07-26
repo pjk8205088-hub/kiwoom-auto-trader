@@ -94,6 +94,7 @@ class AutoTradingService:
         self.current_price = 0.0
         self.pattern_state: PatternState = "NONE"
         self.candles: list[Candle] = []
+        self.dmi_candles: list[Candle] = []
         self.chart_candles: list[Candle] = []
         self.chart_timeframe = "3m"
         self.chart_source = "키움 분봉 API"
@@ -123,6 +124,7 @@ class AutoTradingService:
         next_symbol = normalize_symbol(symbol) or "000000"
         if next_symbol != previous_symbol or self.strategy.settings != settings:
             self.strategy = StrategyEngine(settings)
+            self.dmi_candles = []
             self.latest_dmi = None
             self.pattern_state = "NONE"
         if next_symbol != previous_symbol:
@@ -528,14 +530,8 @@ class AutoTradingService:
         try:
             self.candles = api.request_minute_candles(target, interval=3, count=120)
             self.symbol = target
-            self.latest_dmi = None
-            self.pattern_state = "NONE"
             if self.candles:
                 self.current_price = self.candles[0].close
-                ordered_candles = list(reversed(self.candles))
-                self.latest_dmi = self.strategy.latest_dmi(ordered_candles)
-                if self.latest_dmi is not None:
-                    self.pattern_state = self.latest_dmi.pattern_state
             if self.chart_timeframe == "3m":
                 self.chart_candles = list(self.candles)
                 self.chart_source = "키움 ka10080/opt10080"
@@ -543,10 +539,46 @@ class AutoTradingService:
             self.storage.log("INFO", "시세", self.last_api_message)
             return self.candles
         except API_ERRORS as exc:
+            self.last_api_message = str(exc)
+            self.storage.log("ERROR", "시세", self.last_api_message)
+            return []
+
+    def request_daily_dmi_candles(
+        self,
+        symbol: str | None = None,
+        *,
+        log_result: bool = True,
+    ) -> list[Candle]:
+        target = normalize_symbol(symbol or self.symbol)
+        api = self._active_api()
+        period = self.strategy.settings.dmi_period
+        try:
+            self.dmi_candles = api.request_daily_candles(
+                target,
+                count=max(200, (period * 2) + 1),
+            )
+            self.symbol = target
+            self.latest_dmi = None
+            self.pattern_state = "NONE"
+            if self.dmi_candles:
+                ordered_candles = list(reversed(self.dmi_candles))
+                self.latest_dmi = self.strategy.latest_dmi(ordered_candles)
+                if self.latest_dmi is not None:
+                    self.pattern_state = self.latest_dmi.pattern_state
+            self.last_api_message = (
+                f"{target} 일봉 {len(self.dmi_candles)}개로 "
+                f"DMI({period}일) 계산 완료"
+            )
+            if log_result:
+                self.storage.log("INFO", "DMI", self.last_api_message)
+            return self.dmi_candles
+        except API_ERRORS as exc:
+            self.dmi_candles = []
             self.latest_dmi = None
             self.pattern_state = "NONE"
             self.last_api_message = str(exc)
-            self.storage.log("ERROR", "시세", self.last_api_message)
+            if log_result:
+                self.storage.log("ERROR", "DMI", self.last_api_message)
             return []
 
     def request_chart_candles(
@@ -636,10 +668,12 @@ class AutoTradingService:
         self,
         symbol: str | None = None,
     ) -> TradeDecision | None:
-        candles = self.request_three_minute_candles(symbol)
+        candles = self.request_daily_dmi_candles(symbol)
         required = self.strategy.settings.dmi_period + 1
         if len(candles) < required:
-            self.last_api_message = f"DMI 전략 판단에 필요한 3분봉이 부족합니다({len(candles)}/{required})."
+            self.last_api_message = (
+                f"DMI 전략 판단에 필요한 일봉이 부족합니다({len(candles)}/{required})."
+            )
             self.storage.log("WARN", "전략", self.last_api_message)
             return None
         ordered_candles = list(reversed(candles))
@@ -649,7 +683,7 @@ class AutoTradingService:
         self.last_decision = decision
         adx_text = "계산 중" if decision.adx is None else f"{decision.adx:.2f}"
         self.last_api_message = (
-            f"3분봉 DMI({self.strategy.settings.dmi_period}) 전략 판단: {decision.action} / "
+            f"일봉 DMI({self.strategy.settings.dmi_period}일) 전략 판단: {decision.action} / "
             f"+DI {decision.dmi_plus or 0.0:.2f}, -DI {decision.dmi_minus or 0.0:.2f}, "
             f"ADX {adx_text} / {decision.reason}"
         )

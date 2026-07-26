@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from .models import OrderSide
+from .models import OrderSide, PatternState
 from .symbols import clean_account_number, normalize_symbol
 
 
@@ -18,6 +18,7 @@ class OneShotPriceTrigger:
     percent: float
     target_price: float
     quantity: int
+    required_pattern: PatternState
     allow_real_order: bool = False
     account: str = ""
 
@@ -46,6 +47,7 @@ class OneShotPriceTrigger:
 
         direction = 1.0 if side == "BUY" else -1.0
         target_price = base_price * (1.0 + direction * percent / 100.0)
+        required_pattern: PatternState = "BULLISH" if side == "BUY" else "BEARISH"
         return cls(
             side=side,
             symbol=normalized,
@@ -53,12 +55,15 @@ class OneShotPriceTrigger:
             percent=float(percent),
             target_price=target_price,
             quantity=int(quantity),
+            required_pattern=required_pattern,
             allow_real_order=bool(allow_real_order),
             account=clean_account_number(account),
         )
 
-    def reached(self, current_price: float) -> bool:
+    def reached(self, current_price: float, pattern_state: PatternState) -> bool:
         if not math.isfinite(current_price) or current_price <= 0:
+            return False
+        if pattern_state != self.required_pattern:
             return False
         if self.side == "BUY":
             return current_price >= self.target_price
@@ -100,12 +105,21 @@ class OneShotPriceTriggerBook:
             return
         self._triggers.pop(side, None)
 
-    def pop_triggered(self, symbol: str, current_price: float) -> tuple[OneShotPriceTrigger, ...]:
+    def pop_triggered(
+        self,
+        symbol: str,
+        current_price: float,
+        pattern_state: PatternState,
+    ) -> tuple[OneShotPriceTrigger, ...]:
         normalized = normalize_symbol(symbol)
         triggered: list[OneShotPriceTrigger] = []
         for side in ("BUY", "SELL"):
             trigger = self._triggers.get(side)
-            if trigger is None or trigger.symbol != normalized or not trigger.reached(current_price):
+            if (
+                trigger is None
+                or trigger.symbol != normalized
+                or not trigger.reached(current_price, pattern_state)
+            ):
                 continue
             triggered.append(self._triggers.pop(side))
         return tuple(triggered)

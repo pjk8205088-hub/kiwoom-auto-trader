@@ -424,6 +424,23 @@ class KiwoomOpenApiClient:
         )
         return candles[:count]
 
+    def request_daily_candles(self, symbol: str, count: int = 200) -> list[Candle]:
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KiwoomOpenApiError("종목코드를 입력해 주세요.")
+        count = max(1, int(count))
+        candles = self._request_tr(
+            "일봉조회",
+            "opt10081",
+            {
+                "종목코드": symbol,
+                "기준일자": datetime.now().strftime("%Y%m%d"),
+                "수정주가구분": "1",
+            },
+            self._parse_daily_candles,
+        )
+        return candles[:count]
+
     def request_balance(
         self,
         account: str,
@@ -785,6 +802,22 @@ class KiwoomOpenApiClient:
                     open=_to_price(self._get_comm_data(trcode, record_name, index, "시가")),
                     volume=_to_int(self._get_comm_data(trcode, record_name, index, "거래량")),
                     timestamp=str(self._get_comm_data(trcode, record_name, index, "체결시간")).strip(),
+                )
+            )
+        return candles
+
+    def _parse_daily_candles(self, trcode: str, rqname: str, record_name: str) -> list[Candle]:
+        repeat_count = self._get_repeat_count(trcode, rqname)
+        candles: list[Candle] = []
+        for index in range(repeat_count):
+            candles.append(
+                Candle(
+                    high=_to_price(self._get_comm_data(trcode, record_name, index, "고가")),
+                    low=_to_price(self._get_comm_data(trcode, record_name, index, "저가")),
+                    close=_to_price(self._get_comm_data(trcode, record_name, index, "현재가")),
+                    open=_to_price(self._get_comm_data(trcode, record_name, index, "시가")),
+                    volume=_to_int(self._get_comm_data(trcode, record_name, index, "거래량")),
+                    timestamp=str(self._get_comm_data(trcode, record_name, index, "일자")).strip(),
                 )
             )
         return candles

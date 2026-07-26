@@ -72,6 +72,7 @@ class FakeKiwoomApi:
             "저가": "71000",
             "시가": "71500",
             "체결시간": "20260709103000",
+            "일자": "20260725",
             "종목번호": "A005930",
             "보유수량": "10",
             "매입가": "70000",
@@ -215,6 +216,16 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(quote.symbol, "005930")
         self.assertEqual(quote.name, "삼성전자")
         self.assertEqual(quote.current_price, 72000)
+
+    def test_parses_daily_candles_for_dmi(self):
+        fake = FakeKiwoomApi()
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        candles = client._parse_daily_candles("opt10081", "일봉조회", "")
+
+        self.assertEqual(candles[0].timestamp, "20260725")
+        self.assertEqual(candles[0].close, 72000)
+        self.assertEqual(candles[0].high, 73000)
 
     def test_parses_balance_tr(self):
         fake = FakeKiwoomApi()

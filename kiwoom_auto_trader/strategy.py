@@ -21,7 +21,7 @@ class StrategyEngine:
             self.last_dmi = None
             return TradeDecision(
                 action="HOLD",
-                reason=f"DMI({self.settings.dmi_period}) 계산에 필요한 3분봉이 부족합니다.",
+                reason=f"DMI({self.settings.dmi_period}일) 계산에 필요한 일봉이 부족합니다.",
                 pattern_state="NONE",
             )
 
@@ -35,7 +35,7 @@ class StrategyEngine:
         if candle_key == self._last_signal_candle_key:
             return self._decision(
                 "HOLD",
-                "이미 판단한 3분봉이라 중복 주문을 방지했습니다.",
+                "이미 판단한 일봉이라 중복 주문을 방지했습니다.",
                 current,
             )
         if previous is not None:

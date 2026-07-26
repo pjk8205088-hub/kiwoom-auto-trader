@@ -10,27 +10,39 @@ class OneShotPriceTriggerTests(unittest.TestCase):
 
         self.assertEqual(buy.target_price, 10_300)
         self.assertEqual(sell.target_price, 9_700)
-        self.assertTrue(buy.reached(10_300))
-        self.assertFalse(buy.reached(10_299))
-        self.assertTrue(sell.reached(9_700))
-        self.assertFalse(sell.reached(9_701))
+        self.assertEqual(buy.required_pattern, "BULLISH")
+        self.assertEqual(sell.required_pattern, "BEARISH")
+        self.assertTrue(buy.reached(10_300, "BULLISH"))
+        self.assertFalse(buy.reached(10_300, "BEARISH"))
+        self.assertFalse(buy.reached(10_299, "BULLISH"))
+        self.assertTrue(sell.reached(9_700, "BEARISH"))
+        self.assertFalse(sell.reached(9_700, "BULLISH"))
+        self.assertFalse(sell.reached(9_701, "BEARISH"))
 
     def test_keeps_buy_and_sell_settings_independent_and_consumes_once(self):
         book = OneShotPriceTriggerBook()
         buy = book.arm("BUY", "005930", 10_000, 3, 2)
         sell = book.arm("SELL", "005930", 10_000, 3, 4)
 
-        self.assertEqual(book.pop_triggered("005930", 10_300), (buy,))
+        self.assertEqual(book.pop_triggered("005930", 10_300, "BULLISH"), (buy,))
         self.assertIsNone(book.get("BUY"))
         self.assertEqual(book.get("SELL"), sell)
-        self.assertEqual(book.pop_triggered("005930", 9_700), (sell,))
-        self.assertEqual(book.pop_triggered("005930", 9_700), ())
+        self.assertEqual(book.pop_triggered("005930", 9_700, "BEARISH"), (sell,))
+        self.assertEqual(book.pop_triggered("005930", 9_700, "BEARISH"), ())
+
+    def test_keeps_price_setting_until_the_required_dmi_state_matches(self):
+        book = OneShotPriceTriggerBook()
+        buy = book.arm("BUY", "005930", 10_000, 3, 2)
+
+        self.assertEqual(book.pop_triggered("005930", 10_500, "BEARISH"), ())
+        self.assertEqual(book.get("BUY"), buy)
+        self.assertEqual(book.pop_triggered("005930", 10_500, "BULLISH"), (buy,))
 
     def test_does_not_consume_a_setting_for_another_symbol(self):
         book = OneShotPriceTriggerBook()
         book.arm("SELL", "005930", 10_000, 3, 1)
 
-        self.assertEqual(book.pop_triggered("000660", 20_000), ())
+        self.assertEqual(book.pop_triggered("000660", 20_000, "BEARISH"), ())
         self.assertIsNotNone(book.get("SELL"))
 
     def test_keeps_the_account_selected_when_the_order_is_armed(self):

@@ -22,6 +22,7 @@ from kiwoom_auto_trader.ui import (
     _account_password_session_ready,
     _automatic_trade_readiness,
     _baseline_validation_message,
+    _clamp_dmi_period,
     _parse_money_input,
     _parse_order_quantity,
     _percentage_input_allowed,
@@ -31,6 +32,14 @@ from kiwoom_auto_trader.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_clamps_dmi_period_to_button_range(self):
+        self.assertEqual(_clamp_dmi_period(-5), 1)
+        self.assertEqual(_clamp_dmi_period(1), 1)
+        self.assertEqual(_clamp_dmi_period(14), 14)
+        self.assertEqual(_clamp_dmi_period(99), 99)
+        self.assertEqual(_clamp_dmi_period(120), 99)
+        self.assertEqual(_clamp_dmi_period("5D"), 14)
+
     def test_automatic_trade_readiness_is_independent_of_market_hours(self):
         ready, missing = _automatic_trade_readiness(
             account_ready=True,
@@ -339,6 +348,11 @@ class UiHelperTests(unittest.TestCase):
             account_info=account_info,
             real_time_symbol="005930",
             storage=SimpleNamespace(log=MagicMock()),
+            configure=MagicMock(),
+            request_daily_dmi_candles=MagicMock(),
+            latest_dmi=SimpleNamespace(pattern_state="BEARISH"),
+            pattern_state="BEARISH",
+            strategy=SimpleNamespace(settings=SimpleNamespace(dmi_period=14)),
         )
         app = SimpleNamespace(
             service=service,
@@ -360,6 +374,8 @@ class UiHelperTests(unittest.TestCase):
             ),
             _order_quantity=lambda: 2,
             _account_for_api=lambda: "12345678",
+            _operating_capital=lambda: 1_000_000,
+            _settings=lambda: None,
             _real_order_session_ready=lambda: False,
             _update_price_trigger_status=MagicMock(),
             _refresh=MagicMock(),
@@ -434,6 +450,7 @@ class UiHelperTests(unittest.TestCase):
                         server_type="실거래",
                     ),
                     storage=SimpleNamespace(log=MagicMock()),
+                    pattern_state="BULLISH" if side == "BUY" else "BEARISH",
                     configure=MagicMock(),
                     current_price=0,
                     send_kiwoom_order=MagicMock(return_value="주문 접수 완료"),
@@ -469,6 +486,49 @@ class UiHelperTests(unittest.TestCase):
                     allow_real_order=True,
                     account_password="",
                 )
+
+    def test_crossed_price_waits_until_dmi_direction_matches(self):
+        class Variable:
+            def __init__(self, value=""):
+                self.value = value
+
+            def get(self):
+                return self.value
+
+            def set(self, value):
+                self.value = value
+
+        triggers = OneShotPriceTriggerBook()
+        triggers.arm(
+            "BUY",
+            "012200",
+            4_130,
+            0.02,
+            2,
+            allow_real_order=True,
+            account="12345678",
+        )
+        service = SimpleNamespace(
+            account_info=SimpleNamespace(connection_method="REST API", server_type="실거래"),
+            pattern_state="BEARISH",
+            storage=SimpleNamespace(log=MagicMock()),
+            send_kiwoom_order=MagicMock(),
+        )
+        app = SimpleNamespace(
+            service=service,
+            _processing_price_triggers=False,
+            _real_trading_account=lambda: True,
+            _regular_market_open=lambda: True,
+            _selected_current_price=lambda: 4_165,
+            price_triggers=triggers,
+            symbol_var=Variable("012200"),
+        )
+
+        processed = TraderApp._process_one_shot_price_triggers(app)
+
+        self.assertFalse(processed)
+        self.assertIsNotNone(triggers.get("BUY"))
+        service.send_kiwoom_order.assert_not_called()
 
     def test_main_status_hides_internal_mock_state_and_account_details(self):
         snapshot = ServiceSnapshot(

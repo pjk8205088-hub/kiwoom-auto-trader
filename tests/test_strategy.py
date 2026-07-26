@@ -16,6 +16,14 @@ def dmi_buy_transition_candles() -> list[Candle]:
 
 
 class StrategyEngineTests(unittest.TestCase):
+    def test_accepts_only_one_to_ninety_nine_day_dmi_periods(self):
+        self.assertEqual(StrategySettings(dmi_period=1).dmi_period, 1)
+        self.assertEqual(StrategySettings(dmi_period=99).dmi_period, 99)
+        with self.assertRaisesRegex(ValueError, "1일부터 99일까지"):
+            StrategySettings(dmi_period=0)
+        with self.assertRaisesRegex(ValueError, "1일부터 99일까지"):
+            StrategySettings(dmi_period=100)
+
     def test_calculates_wilder_dmi_and_adx(self):
         engine = StrategyEngine(StrategySettings(dmi_period=3))
 
