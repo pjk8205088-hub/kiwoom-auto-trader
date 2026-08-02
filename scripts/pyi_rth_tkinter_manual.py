@@ -1,0 +1,13 @@
+import os
+import sys
+from pathlib import Path
+
+
+bundle_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+tcl_library = bundle_root / "_tcl_data"
+tk_library = bundle_root / "_tk_data"
+
+if tcl_library.is_dir():
+    os.environ["TCL_LIBRARY"] = str(tcl_library)
+if tk_library.is_dir():
+    os.environ["TK_LIBRARY"] = str(tk_library)

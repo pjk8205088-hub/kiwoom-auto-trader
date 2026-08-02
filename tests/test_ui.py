@@ -8,8 +8,13 @@ from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
 from kiwoom_auto_trader.models import (
     BalanceSummary,
     Candle,
+    Holding,
+    MarketQuote,
     MarketSessionStatus,
+    RealTimeQuote,
+    TradeExecution,
     TradingBaseline,
+    VolumeRankQuote,
     WatchlistQuote,
 )
 from kiwoom_auto_trader.price_triggers import OneShotPriceTriggerBook
@@ -23,15 +28,105 @@ from kiwoom_auto_trader.ui import (
     _automatic_trade_readiness,
     _baseline_validation_message,
     _clamp_dmi_period,
+    _clamp_window_opacity_percent,
+    _compact_monitor_display,
+    _format_hundred_eok_won,
+    _holding_monitor_display,
     _parse_money_input,
     _parse_order_quantity,
     _percentage_input_allowed,
     _market_session_text,
+    normalize_account_history,
+    normalize_watchlist_layout,
     _regular_market_is_open,
 )
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_normalizes_recent_account_history_without_duplicates(self):
+        self.assertEqual(
+            normalize_account_history(
+                ["6698-6208", "66986208", "1234-5678", "", "0000-1111"],
+                limit=2,
+            ),
+            ["66986208", "12345678"],
+        )
+
+    def test_parses_chart_timestamps_for_actual_buy_sell_markers(self):
+        parsed = TraderApp._chart_datetime("2026-07-21T14:35:53")
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.strftime("%Y%m%d%H%M%S"), "20260721143553")
+        self.assertIsNone(TraderApp._chart_datetime("invalid"))
+
+    def test_combines_actual_fills_with_local_requests_without_duplicates(self):
+        app = SimpleNamespace()
+        app._format_trade_history = lambda rows: TraderApp._format_trade_history(app, rows)
+        app._format_combined_trade_history = (
+            lambda executions, local_rows: TraderApp._format_combined_trade_history(
+                app,
+                executions,
+                local_rows,
+            )
+        )
+        executions = [
+            TradeExecution(
+                timestamp="2026-07-27T10:15:03",
+                side="BUY",
+                symbol="012200",
+                symbol_name="계양전기",
+                quantity=2,
+                price=4_080,
+                order_no="0000101",
+                order_mode="키움 실거래",
+            )
+        ]
+        local_rows = [
+            (
+                "2026-07-27T10:15:00",
+                "BUY",
+                "012200",
+                "계양전기",
+                2,
+                4_080,
+                8_160,
+                1,
+                "0000101",
+                "REST API 실거래",
+                "주문 접수",
+            ),
+            (
+                "2026-07-27T10:16:00",
+                "SELL",
+                "012200",
+                "계양전기",
+                1,
+                4_100,
+                4_100,
+                0,
+                "",
+                "REST API 실거래",
+                "주문 실패",
+            ),
+        ]
+
+        rows = TraderApp._format_combined_trade_history(app, executions, local_rows)
+
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][7], "실패")
+        self.assertEqual(rows[1][7], "체결")
+        self.assertEqual(rows[1][8], "0000101")
+
+        recent_rows = TraderApp._format_recent_order_activity(
+            app,
+            executions,
+            local_rows,
+        )
+        self.assertEqual(recent_rows[0][0], "07-27 10:16:00")
+        self.assertEqual(recent_rows[0][5], "실패")
+        self.assertEqual(recent_rows[1][0], "07-27 10:15:03")
+        self.assertEqual(recent_rows[1][5], "체결")
+
     def test_clamps_dmi_period_to_button_range(self):
         self.assertEqual(_clamp_dmi_period(-5), 1)
         self.assertEqual(_clamp_dmi_period(1), 1)
@@ -39,6 +134,94 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(_clamp_dmi_period(99), 99)
         self.assertEqual(_clamp_dmi_period(120), 99)
         self.assertEqual(_clamp_dmi_period("5D"), 14)
+
+    def test_clamps_window_opacity_to_visible_range(self):
+        self.assertEqual(_clamp_window_opacity_percent(0), 0)
+        self.assertEqual(_clamp_window_opacity_percent(35), 35)
+        self.assertEqual(_clamp_window_opacity_percent(72.6), 73)
+        self.assertEqual(_clamp_window_opacity_percent(100), 100)
+        self.assertEqual(_clamp_window_opacity_percent(150), 100)
+        self.assertEqual(_clamp_window_opacity_percent("invalid"), 100)
+
+    def test_account_privacy_setting_masks_every_digit_except_last_two(self):
+        masked_app = SimpleNamespace(account_mask_enabled=True)
+        visible_app = SimpleNamespace(account_mask_enabled=False)
+
+        self.assertEqual(
+            TraderApp._privacy_account_label(masked_app, "6698-6208"),
+            "****-**08",
+        )
+        self.assertEqual(
+            TraderApp._privacy_account_label(visible_app, "6698-6208"),
+            "6698-6208",
+        )
+
+    def test_formats_money_in_hundred_eok_won_units(self):
+        self.assertEqual(_format_hundred_eok_won(10_000_000_000), "1.00")
+        self.assertEqual(_format_hundred_eok_won(123_456_000_000), "12.35")
+        self.assertEqual(_format_hundred_eok_won(0), "-")
+
+    def test_applies_selected_opacity_only_to_the_main_window(self):
+        display = MagicMock()
+        app = SimpleNamespace(
+            window_opacity_display_var=display,
+            wm_attributes=MagicMock(),
+        )
+
+        TraderApp._apply_window_opacity(app, 72.6)
+
+        display.set.assert_called_once_with("73%")
+        app.wm_attributes.assert_called_once_with("-alpha", 0.73)
+
+    def test_compact_monitor_prefers_matching_realtime_price_and_rise(self):
+        snapshot = SimpleNamespace(
+            symbol="012200",
+            symbol_name="계양전기",
+            running=True,
+            price=4_080,
+            market_quote=MarketQuote(
+                symbol="012200",
+                name="계양전기",
+                current_price=4_090,
+                change_rate=0.25,
+            ),
+            real_time_quote=RealTimeQuote(
+                symbol="012200",
+                current_price=4_100,
+                change=20,
+                change_rate=0.49,
+            ),
+        )
+
+        stock, price, trend, direction = _compact_monitor_display(snapshot)
+
+        self.assertEqual(stock, "감시중 · 계양전기 · 012200")
+        self.assertEqual(price, "4,100원")
+        self.assertEqual(trend, "▲ 상승 +0.49%")
+        self.assertEqual(direction, "up")
+
+    def test_compact_monitor_uses_market_quote_for_falling_stock(self):
+        snapshot = SimpleNamespace(
+            symbol="005930",
+            symbol_name="삼성전자",
+            running=False,
+            price=72_000,
+            market_quote=MarketQuote(
+                symbol="005930",
+                name="삼성전자",
+                current_price=71_500,
+                change=-500,
+                change_rate=-0.69,
+            ),
+            real_time_quote=None,
+        )
+
+        stock, price, trend, direction = _compact_monitor_display(snapshot)
+
+        self.assertEqual(stock, "삼성전자 · 005930")
+        self.assertEqual(price, "71,500원")
+        self.assertEqual(trend, "▼ 하락 -0.69%")
+        self.assertEqual(direction, "down")
 
     def test_automatic_trade_readiness_is_independent_of_market_hours(self):
         ready, missing = _automatic_trade_readiness(
@@ -64,6 +247,71 @@ class UiHelperTests(unittest.TestCase):
 
         self.assertFalse(ready)
         self.assertEqual(missing, ("종목 세팅", "주문 수량"))
+
+    def test_holding_monitor_turns_blue_only_for_running_owned_symbol(self):
+        balance = BalanceSummary(
+            account="12345678",
+            holdings=(Holding("012200", "계양전기", 3, 4_000, 4_100, 300, 2.5),),
+        )
+
+        active, detail = _holding_monitor_display(
+            running=True,
+            symbol="012200",
+            symbol_name="계양전기",
+            balance_summary=balance,
+        )
+
+        self.assertTrue(active)
+        self.assertEqual(detail, "계양전기 주식 · 소프트웨어에서 3주 감시중")
+
+        stopped, stopped_detail = _holding_monitor_display(
+            running=False,
+            symbol="012200",
+            symbol_name="계양전기",
+            balance_summary=balance,
+        )
+        self.assertFalse(stopped)
+        self.assertIn("자동운용 중지", stopped_detail)
+
+    def test_holding_monitor_stays_off_when_selected_stock_is_not_owned(self):
+        balance = BalanceSummary(
+            account="12345678",
+            holdings=(Holding("005930", "삼성전자", 2, 70_000, 72_000, 4_000, 2.8),),
+        )
+
+        active, detail = _holding_monitor_display(
+            running=True,
+            symbol="012200",
+            symbol_name="계양전기",
+            balance_summary=balance,
+        )
+
+        self.assertFalse(active)
+        self.assertEqual(detail, "계양전기 주식 · 보유수량 0주로 감시 대상 없음")
+
+    def test_running_monitor_refreshes_rest_balance_without_log_spam(self):
+        request_balance = MagicMock(return_value=BalanceSummary(account="12345678"))
+        app = SimpleNamespace(
+            service=SimpleNamespace(
+                running=True,
+                account_info=SimpleNamespace(connection_method="REST API"),
+                request_balance=request_balance,
+            ),
+            _next_holding_balance_refresh_at=0.0,
+            _account_connection_confirmed=lambda _info: True,
+            _password_session_ready=lambda: True,
+            _account_for_api=lambda: "12345678",
+            _account_password_for_order=lambda: "",
+        )
+
+        refreshed = TraderApp._refresh_holding_balance_if_due(app, force=True)
+
+        self.assertTrue(refreshed)
+        request_balance.assert_called_once_with(
+            "12345678",
+            password="",
+            log_result=False,
+        )
 
     def test_marks_openapi_account_connected_only_after_password_verification(self):
         self.assertFalse(_account_access_confirmed(True, "OpenAPI+", "12345678", False))
@@ -118,11 +366,13 @@ class UiHelperTests(unittest.TestCase):
 
         balance = BalanceSummary(account="12345678", deposit=1_000_000)
         request_balance = MagicMock(return_value=balance)
+        request_trade_history = MagicMock(return_value=[])
         app = SimpleNamespace(
             _require_live_connection=lambda: True,
             service=SimpleNamespace(
                 account_info=SimpleNamespace(connection_method="OpenAPI+"),
                 request_balance=request_balance,
+                request_recent_trade_history=request_trade_history,
             ),
             account_password_var=Variable("1234"),
             account_password_status_var=Variable("미확인"),
@@ -135,6 +385,7 @@ class UiHelperTests(unittest.TestCase):
             status_text=Variable(),
             update_idletasks=MagicMock(),
             _account_for_api=lambda: "12345678",
+            _account_password_for_order=lambda: app.account_password_var.get(),
             _refresh=MagicMock(),
             _show_account_info_window=MagicMock(),
         )
@@ -151,6 +402,11 @@ class UiHelperTests(unittest.TestCase):
         TraderApp._set_account_password(app)
 
         request_balance.assert_called_once_with("12345678", "1234")
+        request_trade_history.assert_called_once_with(
+            "12345678",
+            password="1234",
+            days=10,
+        )
         self.assertEqual(app.account_password_var.get(), "1234")
         self.assertEqual(app._session_password_account, "12345678")
         self.assertEqual(app.account_password_status_var.get(), "확인됨")
@@ -473,6 +729,8 @@ class UiHelperTests(unittest.TestCase):
                     _settings=lambda: None,
                     _account_password_for_order=lambda: "",
                     _handle_order_account_verification=MagicMock(),
+                    _mark_holding_balance_refresh_due=MagicMock(),
+                    _schedule_recent_trade_history_refresh=MagicMock(),
                 )
 
                 processed = TraderApp._process_one_shot_price_triggers(app)
@@ -485,6 +743,8 @@ class UiHelperTests(unittest.TestCase):
                     quantity=2,
                     allow_real_order=True,
                     account_password="",
+                    order_style="MIDPOINT",
+                    use_margin=False,
                 )
 
     def test_crossed_price_waits_until_dmi_direction_matches(self):
@@ -587,6 +847,124 @@ class UiHelperTests(unittest.TestCase):
 
         self.assertEqual(values[3:], ("72,000", "+500", "+0.70%", "123,456"))
         self.assertEqual(TraderApp._watchlist_tag(quote), "up")
+
+    def test_formats_custom_watchlist_fields_in_hundred_eok_units(self):
+        quote = WatchlistQuote(
+            symbol="005930",
+            name="삼성전자",
+            current_price=72_000,
+            change=500,
+            change_rate=0.7,
+            volume=123_456,
+            trade_value=250_000_000_000,
+            previous_trade_value=200_000_000_000,
+            market_cap=5_000_000_000_000,
+            program_trading_trend=-30_000_000_000,
+        )
+
+        values = TraderApp._watchlist_row_values(quote)
+
+        self.assertEqual(values[4], "25.00")
+        self.assertEqual(values[5], "20.00")
+        self.assertEqual(values[9], "500.00")
+        self.assertEqual(values[10], "5.00%")
+        self.assertEqual(values[11], "-3.00")
+
+    def test_normalizes_visible_watchlist_fields_and_column_order(self):
+        visible, order = normalize_watchlist_layout(
+            ["trade_value", "symbol", "unknown"],
+            ["trade_value", "symbol", "name"],
+        )
+
+        self.assertEqual(visible, ["trade_value", "symbol", "name"])
+        self.assertEqual(order[:3], ["trade_value", "symbol", "name"])
+
+    def test_announces_only_new_actual_trade_executions(self):
+        app = SimpleNamespace(
+            _known_execution_keys=None,
+            voice_notifier=MagicMock(),
+            service=SimpleNamespace(storage=MagicMock()),
+        )
+        app.voice_notifier.announce_execution.return_value = True
+        app._execution_voice_key = TraderApp._execution_voice_key
+        existing = TradeExecution(
+            timestamp="2026-08-01T09:10:00",
+            side="BUY",
+            symbol="005930",
+            symbol_name="삼성전자",
+            quantity=1,
+            price=72_000,
+            order_no="1001",
+        )
+        newest = TradeExecution(
+            timestamp="2026-08-01T09:11:00",
+            side="SELL",
+            symbol="005930",
+            symbol_name="삼성전자",
+            quantity=1,
+            price=72_500,
+            order_no="1002",
+        )
+
+        TraderApp._announce_new_trade_executions(app, [existing])
+        TraderApp._announce_new_trade_executions(app, [newest, existing])
+        TraderApp._announce_new_trade_executions(app, [newest, existing])
+
+        app.voice_notifier.announce_execution.assert_called_once_with("SELL")
+
+    def test_formats_volume_ranking_rows_and_direction(self):
+        quote = VolumeRankQuote(
+            rank=1,
+            symbol="005930",
+            name="삼성전자",
+            current_price=72000,
+            change_rate=-1.25,
+            change=-900,
+            change_sign="5",
+            volume=12_345_678,
+            trade_value=123_456_000_000,
+            market_cap=789_010_000_000,
+        )
+
+        values = TraderApp._volume_rank_values(quote)
+
+        self.assertEqual(
+            values,
+            (
+                1,
+                "005930",
+                "삼성전자",
+                "72,000",
+                "▼ 1.25%",
+                "12,345,678",
+            ),
+        )
+        self.assertEqual(TraderApp._volume_rank_tag(quote), "down")
+        self.assertEqual(
+            TraderApp._trade_value_rank_values(quote),
+            (
+                1,
+                "005930",
+                "삼성전자",
+                "72,000",
+                "▼ 1.25%",
+                "12.35",
+                "-900",
+            ),
+        )
+
+    def test_uses_official_price_change_markers_for_rankings(self):
+        upper = VolumeRankQuote(rank=1, symbol="005930", change_sign="1")
+        rising = VolumeRankQuote(rank=2, symbol="005930", change_sign="2")
+        lower = VolumeRankQuote(rank=3, symbol="005930", change_sign="4")
+        falling = VolumeRankQuote(rank=4, symbol="005930", change_sign="5")
+
+        self.assertEqual(TraderApp._rank_change_marker(upper), "↑")
+        self.assertEqual(TraderApp._rank_change_marker(rising), "▲")
+        self.assertEqual(TraderApp._rank_change_marker(lower), "↓")
+        self.assertEqual(TraderApp._rank_change_marker(falling), "▼")
+        self.assertEqual(TraderApp._volume_rank_tag(upper), "up")
+        self.assertEqual(TraderApp._volume_rank_tag(lower), "down")
 
 
 if __name__ == "__main__":

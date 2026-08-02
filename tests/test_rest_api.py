@@ -2,6 +2,8 @@ import unittest
 
 from kiwoom_auto_trader.models import KiwoomOrderRequest
 from kiwoom_auto_trader.rest_api import (
+    KIWOOM_REST_GUIDE,
+    KIWOOM_REST_PORTAL,
     KiwoomRestApiClient,
     KiwoomRestApiError,
     KiwoomRestRateLimiter,
@@ -40,13 +42,23 @@ class FakeClock:
         self.now += seconds
 
 
-def response(body):
+def response(body, headers=None):
     payload = {"return_code": 0, "return_msg": "정상"}
     payload.update(body)
-    return RestResponse(200, {}, payload)
+    return RestResponse(200, headers or {}, payload)
 
 
 class KiwoomRestApiClientTests(unittest.TestCase):
+    def test_uses_official_registration_and_guide_pages(self):
+        self.assertEqual(
+            KIWOOM_REST_PORTAL,
+            "https://openapi.kiwoom.com/mgmt/VOpenApiRegView?dummyVal=0",
+        )
+        self.assertEqual(
+            KIWOOM_REST_GUIDE,
+            "https://openapi.kiwoom.com/guide/index?dummyVal=0",
+        )
+
     def test_connects_with_token_and_account_without_storing_secret(self):
         requester = FakeRequester(
             [
@@ -71,6 +83,28 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertTrue(info.connected)
         self.assertEqual(info.accounts, ["1234567890"])
         self.assertEqual(info.connection_method, "REST API")
+
+    def test_explains_missing_registered_account_after_token_issue(self):
+        requester = FakeRequester(
+            [
+                response(
+                    {
+                        "token": "test-token",
+                        "token_type": "bearer",
+                        "expires_dt": "20991231235959",
+                    }
+                ),
+                response({"acctNo": ""}),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+
+        with self.assertRaisesRegex(KiwoomRestApiError, "계좌·IP 등록 페이지"):
+            client.connect("app-key", "secret-key")
         self.assertFalse(hasattr(client, "secret_key"))
         self.assertEqual(requester.calls[0][2]["api-id"], "au10001")
         self.assertNotIn("authorization", requester.calls[0][2])
@@ -194,6 +228,88 @@ class KiwoomRestApiClientTests(unittest.TestCase):
                 )
             )
 
+    def test_parses_ten_level_book_unfilled_and_order_actions(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "bid_req_base_tm": "101501",
+                        "sel_fpr_bid": "+4090",
+                        "sel_fpr_req": "120",
+                        "buy_fpr_bid": "+4080",
+                        "buy_fpr_req": "150",
+                        "sel_2th_pre_bid": "+4095",
+                        "sel_2th_pre_req": "80",
+                        "buy_2th_pre_bid": "+4075",
+                        "buy_2th_pre_req": "90",
+                    }
+                ),
+                response(
+                    {
+                        "oso": [
+                            {
+                                "ord_no": "0000999",
+                                "stk_cd": "A005930",
+                                "stk_nm": "삼성전자",
+                                "io_tp_nm": "+매수",
+                                "ord_qty": "2",
+                                "oso_qty": "1",
+                                "ord_pric": "+4085",
+                                "cur_prc": "+4080",
+                                "tm": "101502",
+                                "ord_stt": "접수",
+                            }
+                        ]
+                    }
+                ),
+                response({"ord_no": "0001000"}),
+                response({"ord_no": "0001001"}),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=True,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        book = client.request_order_book("005930")
+        unfilled = client.request_unfilled_orders("1234567890", "005930")
+        client.send_order(
+            KiwoomOrderRequest(
+                account="1234567890",
+                symbol="005930",
+                side="BUY",
+                quantity=1,
+                price=4085,
+                hoga="00",
+                action="MODIFY",
+                original_order_no="0000999",
+            )
+        )
+        client.send_order(
+            KiwoomOrderRequest(
+                account="1234567890",
+                symbol="005930",
+                side="BUY",
+                quantity=1,
+                action="CANCEL",
+                original_order_no="0000999",
+            )
+        )
+
+        self.assertEqual((book.best_ask, book.best_bid), (4090, 4080))
+        self.assertEqual(book.levels[1].bid_price, 4075)
+        self.assertEqual(unfilled[0].unfilled_quantity, 1)
+        self.assertEqual(unfilled[0].side, "BUY")
+        modify_call, cancel_call = requester.calls[-2:]
+        self.assertEqual(modify_call[2]["api-id"], "kt10002")
+        self.assertEqual(modify_call[3]["mdfy_uv"], "4085")
+        self.assertEqual(cancel_call[2]["api-id"], "kt10003")
+        self.assertEqual(cancel_call[3]["orig_ord_no"], "0000999")
+
     def test_requests_official_sixty_minute_chart_scope(self):
         requester = FakeRequester(
             [
@@ -303,6 +419,7 @@ class KiwoomRestApiClientTests(unittest.TestCase):
                                 "flu_rt": "+0.70",
                                 "trde_qty": "123456",
                                 "trde_prica": "8880000",
+                                "mac": "9348679",
                                 "open_pric": "+71500",
                                 "high_pric": "+72500",
                                 "low_pric": "+71000",
@@ -331,7 +448,355 @@ class KiwoomRestApiClientTests(unittest.TestCase):
         self.assertEqual(quotes[0].change, 500)
         self.assertEqual(quotes[0].change_rate, 0.7)
         self.assertEqual(quotes[0].volume, 123456)
+        self.assertEqual(quotes[0].trade_value, 8_880_000_000_000)
+        self.assertEqual(quotes[0].market_cap, 934_867_900_000_000)
         self.assertEqual(quotes[0].ask_price, 72100)
+
+    def test_requests_watchlist_previous_value_and_program_trend(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response({"pred_trde_prica": "11963"}),
+                response(
+                    {
+                        "stk_tm_prm_trde_trnsn": [
+                            {"tm": "101500", "prm_netprps_amt": "+245"}
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        previous = client.request_watchlist_previous_trade_value("005930")
+        program = client.request_watchlist_program_trading_trend("005930")
+
+        self.assertEqual(previous, 11_963_000_000)
+        self.assertEqual(program, 245_000_000)
+        self.assertEqual(requester.calls[-2][2]["api-id"], "ka10007")
+        self.assertEqual(requester.calls[-1][2]["api-id"], "ka90008")
+
+    def test_loads_every_stock_detail_when_five_symbols_are_listed(self):
+        symbols = ["005930", "000660", "035420", "051910", "005380"]
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "atn_stk_infr": [
+                            {"stk_cd": "035420", "stk_nm": "NAVER", "mac": "3"},
+                            {"stk_cd": "005930", "stk_nm": "삼성전자", "mac": "1"},
+                            {"stk_cd": "000660", "stk_nm": "SK하이닉스", "mac": "2"},
+                        ]
+                    }
+                ),
+                response(
+                    {
+                        "atn_stk_infr": [
+                            {"stk_cd": "005380", "stk_nm": "현대차", "mac": "5"},
+                            {"stk_cd": "051910", "stk_nm": "LG화학", "mac": "4"},
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=True,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        quotes = client.request_watchlist_quotes(symbols)
+
+        detail_calls = [
+            call for call in requester.calls if call[2]["api-id"] == "ka10095"
+        ]
+        self.assertEqual(len(detail_calls), 2)
+        self.assertEqual(detail_calls[0][3]["stk_cd"], "005930|000660|035420")
+        self.assertEqual(detail_calls[1][3]["stk_cd"], "051910|005380")
+        self.assertTrue(
+            all(len(call[3]["stk_cd"]) <= 20 for call in detail_calls)
+        )
+        self.assertEqual([quote.symbol for quote in quotes], symbols)
+        self.assertEqual(
+            [quote.market_cap for quote in quotes],
+            [100_000_000, 200_000_000, 300_000_000, 400_000_000, 500_000_000],
+        )
+
+    def test_requests_and_parses_official_today_volume_top(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "tdy_trde_qty_upper": [
+                            {
+                                "stk_cd": "005930",
+                                "stk_nm": "삼성전자",
+                                "cur_prc": "+72000",
+                                "pred_pre": "+500",
+                                "pred_pre_sig": "2",
+                                "flu_rt": "+0.70",
+                                "pred_rt": "+110.25",
+                                "trde_qty": "12345678",
+                                "trde_tern_rt": "1.25",
+                                "trde_amt": "888",
+                            },
+                            {
+                                "stk_cd": "000660",
+                                "stk_nm": "SK하이닉스",
+                                "cur_prc": "-180000",
+                                "pred_pre": "-2500",
+                                "pred_pre_sig": "5",
+                                "flu_rt": "-1.37",
+                                "trde_qty": "9876543",
+                                "trde_tern_rt": "0.85",
+                                "trde_amt": "777",
+                            },
+                        ]
+                    }
+                ),
+                response(
+                    {
+                        "list": [
+                            {
+                                "code": "005930",
+                                "name": "삼성전자",
+                                "nxtEnable": "Y",
+                            }
+                        ]
+                    }
+                ),
+                response(
+                    {
+                        "list": [
+                            {
+                                "code": "000660",
+                                "name": "SK하이닉스",
+                                "nxtEnable": "N",
+                            }
+                        ]
+                    }
+                ),
+                response(
+                    {
+                        "atn_stk_infr": [
+                            {
+                                "stk_cd": "005930",
+                                "stk_nm": "삼성전자",
+                                "mac": "9348679",
+                            },
+                            {
+                                "stk_cd": "000660",
+                                "stk_nm": "SK하이닉스",
+                                "mac": "1234567",
+                            },
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        quotes = client.request_volume_ranking(market="000", limit=15)
+
+        ranking_call = next(
+            call for call in requester.calls if call[2]["api-id"] == "ka10030"
+        )
+        self.assertTrue(ranking_call[1].endswith("/api/dostk/rkinfo"))
+        self.assertEqual(
+            ranking_call[3],
+            {
+                "mrkt_tp": "000",
+                "sort_tp": "1",
+                "mang_stk_incls": "0",
+                "crd_tp": "0",
+                "trde_qty_tp": "0",
+                "pric_tp": "0",
+                "trde_prica_tp": "0",
+                "mrkt_open_tp": "0",
+                "stex_tp": "3",
+            },
+        )
+        self.assertEqual([quote.rank for quote in quotes], [1, 2])
+        self.assertEqual(quotes[0].name, "삼성전자")
+        self.assertEqual(quotes[0].current_price, 72_000)
+        self.assertEqual(quotes[0].volume, 12_345_678)
+        self.assertEqual(quotes[0].trade_value, 888_000_000)
+        self.assertEqual(quotes[0].market_cap, 934_867_900_000_000)
+        self.assertEqual(quotes[0].change_sign, "2")
+        self.assertEqual(quotes[0].previous_ratio, 110.25)
+        self.assertTrue(quotes[0].nxt_available)
+        self.assertFalse(quotes[1].nxt_available)
+        self.assertEqual(quotes[1].change_rate, -1.37)
+        self.assertEqual(requester.calls[-1][2]["api-id"], "ka10095")
+        self.assertEqual(requester.calls[-1][3]["stk_cd"], "005930|000660")
+
+    def test_requests_and_parses_official_trade_value_top(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "trde_prica_upper": [
+                            {
+                                "stk_cd": "005930",
+                                "now_rank": "1",
+                                "stk_nm": "삼성전자",
+                                "cur_prc": "+72000",
+                                "pred_pre_sig": "1",
+                                "pred_pre": "+500",
+                                "flu_rt": "+0.70",
+                                "now_trde_qty": "12345678",
+                                "trde_prica": "12345",
+                            },
+                            {
+                                "stk_cd": "000660",
+                                "now_rank": "2",
+                                "stk_nm": "SK하이닉스",
+                                "cur_prc": "-180000",
+                                "pred_pre_sig": "5",
+                                "pred_pre": "-2500",
+                                "flu_rt": "-1.37",
+                                "now_trde_qty": "9876543",
+                                "trde_prica": "9876",
+                            },
+                        ]
+                    }
+                ),
+                response(
+                    {
+                        "list": [
+                            {
+                                "code": "005930",
+                                "name": "삼성전자",
+                                "nxtEnable": "Y",
+                            }
+                        ]
+                    }
+                ),
+                response(
+                    {
+                        "list": [
+                            {
+                                "code": "000660",
+                                "name": "SK하이닉스",
+                                "nxtEnable": "N",
+                            }
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        quotes = client.request_trade_value_ranking(market="001", limit=15)
+
+        ranking_call = next(
+            call for call in requester.calls if call[2]["api-id"] == "ka10032"
+        )
+        self.assertTrue(ranking_call[1].endswith("/api/dostk/rkinfo"))
+        self.assertEqual(
+            ranking_call[3],
+            {"mrkt_tp": "001", "mang_stk_incls": "1", "stex_tp": "3"},
+        )
+        self.assertEqual([quote.rank for quote in quotes], [1, 2])
+        self.assertEqual(quotes[0].trade_value, 12_345_000_000)
+        self.assertEqual(quotes[0].change, 500)
+        self.assertEqual(quotes[0].change_sign, "1")
+        self.assertTrue(quotes[0].nxt_available)
+        self.assertEqual(quotes[1].change_rate, -1.37)
+
+    def test_requests_all_pages_of_today_filled_orders(self):
+        requester = FakeRequester(
+            [
+                response({"token": "test-token", "expires_dt": "20991231235959"}),
+                response({"acctNo": "1234567890"}),
+                response(
+                    {
+                        "acnt_ord_cntr_prps_dtl": [
+                            {
+                                "ord_no": "0000101",
+                                "stk_cd": "A012200",
+                                "stk_nm": "계양전기",
+                                "io_tp_nm": "+매수",
+                                "cntr_qty": "2",
+                                "cntr_uv": "+4080",
+                                "ord_tm": "101501",
+                            }
+                        ]
+                    },
+                    {"cont-yn": "Y", "next-key": "next-page"},
+                ),
+                response(
+                    {
+                        "acnt_ord_cntr_prps_dtl": [
+                            {
+                                "ord_no": "0000102",
+                                "stk_cd": "012200",
+                                "stk_nm": "계양전기",
+                                "io_tp_nm": "-매도",
+                                "cntr_qty": "1",
+                                "cntr_uv": "4100",
+                                "cnfm_tm": "102030",
+                            }
+                        ]
+                    }
+                ),
+            ]
+        )
+        client = KiwoomRestApiClient(
+            mock=False,
+            requester=requester,
+            rate_limiter=NoopLimiter(),
+        )
+        client.connect("app-key", "secret-key")
+
+        history = client.request_today_trade_history(
+            "1234567890",
+            order_date="20260727",
+        )
+
+        self.assertEqual([entry.side for entry in history], ["SELL", "BUY"])
+        self.assertEqual(history[0].timestamp, "2026-07-27T10:20:30")
+        self.assertEqual(history[0].total_amount, 4100)
+        self.assertEqual(history[1].quantity, 2)
+        history_calls = [call for call in requester.calls if call[2]["api-id"] == "kt00007"]
+        self.assertEqual(len(history_calls), 2)
+        self.assertEqual(
+            history_calls[0][3],
+            {
+                "qry_tp": "4",
+                "stk_bond_tp": "1",
+                "sell_tp": "0",
+                "dmst_stex_tp": "%",
+                "ord_dt": "20260727",
+                "stk_cd": "",
+                "fr_ord_no": "",
+            },
+        )
+        self.assertEqual(history_calls[1][2]["cont-yn"], "Y")
+        self.assertEqual(history_calls[1][2]["next-key"], "next-page")
 
     def test_mock_limiter_waits_for_same_api_id(self):
         clock = FakeClock()

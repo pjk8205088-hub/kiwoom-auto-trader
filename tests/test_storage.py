@@ -1,4 +1,5 @@
 import csv
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -106,6 +107,39 @@ class StorageTests(unittest.TestCase):
             reloaded.remove_watchlist_symbol("005930")
             self.assertEqual(reloaded.watchlist_symbols(), [("000660", "SK하이닉스")])
 
+    def test_persists_watchlist_memo_and_migrates_existing_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "watchlist-memo.sqlite3"
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    """
+                    create table watchlist (
+                        id integer primary key autoincrement,
+                        symbol text not null unique,
+                        name text not null default '',
+                        created_at text not null
+                    )
+                    """
+                )
+                connection.execute(
+                    "insert into watchlist (symbol, name, created_at) values (?, ?, ?)",
+                    ("005930", "삼성전자", "2026-08-01T10:00:00"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            storage = Storage(path)
+            storage.set_watchlist_memo("005930", "장기 관찰 종목")
+
+            reloaded = Storage(path)
+            self.assertEqual(reloaded.watchlist_memo("005930"), "장기 관찰 종목")
+            self.assertEqual(
+                reloaded.watchlist_entries(),
+                [("005930", "삼성전자", "장기 관찰 종목")],
+            )
+
     def test_persists_updates_and_resets_trading_baseline(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "baseline.sqlite3"
@@ -127,6 +161,37 @@ class StorageTests(unittest.TestCase):
 
             reloaded.remove_trading_baseline("005930")
             self.assertIsNone(reloaded.trading_baseline("005930"))
+
+    def test_persists_updates_and_deletes_application_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.sqlite3"
+            storage = Storage(path)
+            storage.set_app_setting("profile.nickname", "이진솔")
+            storage.set_app_setting("window.always_on_top", True)
+
+            reloaded = Storage(path)
+            self.assertEqual(reloaded.get_app_setting("profile.nickname"), "이진솔")
+            self.assertEqual(reloaded.get_app_setting("window.always_on_top"), "True")
+            self.assertEqual(reloaded.get_app_setting("missing", "fallback"), "fallback")
+
+            reloaded.delete_app_setting("profile.nickname")
+            self.assertEqual(reloaded.get_app_setting("profile.nickname"), "")
+
+    def test_creates_consistent_exit_backup_with_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            storage = Storage(root / "data.sqlite3", trade_history_path=root / "orders.csv")
+            storage.set_app_setting("profile.nickname", "테스트")
+            storage.add_watchlist_symbol("005930", "삼성전자")
+            storage.set_watchlist_memo("005930", "관심 메모")
+
+            backup_dir = storage.create_backup(root / "backups")
+
+            self.assertTrue((backup_dir / "data.sqlite3").is_file())
+            self.assertTrue((backup_dir / "orders.csv").is_file())
+            manifest = json.loads((backup_dir / "backup_manifest.json").read_text("utf-8"))
+            self.assertEqual(manifest["settings"]["profile.nickname"], "테스트")
+            self.assertEqual(manifest["watchlist"][0]["memo"], "관심 메모")
 
 
 if __name__ == "__main__":

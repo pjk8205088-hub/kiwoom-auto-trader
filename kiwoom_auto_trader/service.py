@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from random import uniform
 
 from .broker import BrokerClient, MockBroker
@@ -9,6 +9,7 @@ from .charting import (
     SUPPORTED_MINUTE_INTERVALS,
     SUPPORTED_SECOND_INTERVALS,
     RealTimeCandleAggregator,
+    aggregate_minute_candles,
     timeframe_label,
 )
 from .kiwoom_api import (
@@ -21,25 +22,33 @@ from .models import (
     BalanceSummary,
     Candle,
     DmiPoint,
+    Holding,
     KiwoomOrderRequest,
     MarketQuote,
     MarketSessionStatus,
+    OrderBookSnapshot,
     OrderResult,
     PatternState,
+    PerformanceSummary,
     RealTimeQuote,
     StrategySettings,
+    TradeExecution,
     TradeDecision,
+    UnfilledOrder,
+    VolumeRankQuote,
     WatchlistQuote,
 )
 from .order_manager import OrderManager
+from .order_pricing import midpoint_limit_price, performance_from_executions
 from .rest_api import KiwoomRestApiClient, KiwoomRestApiError
-from .risk import RiskManager
+from .risk import DailyLossCircuitBreaker, DailyRiskStatus, RiskManager
 from .storage import Storage
 from .strategy import StrategyEngine
 from .symbols import clean_account_number, known_symbol_name, mask_account_number, normalize_symbol
 
 
 API_ERRORS = (KiwoomOpenApiError, KiwoomRestApiError)
+ACCOUNT_TRADE_HISTORY_DAYS = 10
 
 
 @dataclass
@@ -68,6 +77,14 @@ class ServiceSnapshot:
     last_api_message: str = ""
     orders: list[tuple] = field(default_factory=list)
     trade_history: list[tuple] = field(default_factory=list)
+    account_trade_history: list[TradeExecution] = field(default_factory=list)
+    account_trade_history_message: str = ""
+    account_trade_history_updated_at: datetime | None = None
+    order_book: OrderBookSnapshot | None = None
+    unfilled_orders: list[UnfilledOrder] = field(default_factory=list)
+    daily_performance: PerformanceSummary | None = None
+    monthly_performance: PerformanceSummary | None = None
+    daily_risk_status: DailyRiskStatus | None = None
     logs: list[tuple] = field(default_factory=list)
 
 
@@ -80,6 +97,12 @@ class AutoTradingService:
         self.broker = broker or MockBroker()
         self.storage = storage or Storage()
         self.risk = RiskManager()
+        self.daily_loss_breaker = DailyLossCircuitBreaker(
+            float(self.storage.get_app_setting("risk.daily_loss_limit_percent", "5") or 5)
+        )
+        self.daily_loss_breaker.restore_lock(
+            self.storage.get_app_setting("risk.locked_date", "")
+        )
         self.strategy = StrategyEngine()
         self.order_manager = OrderManager(self.broker, self.storage)
         self.kiwoom_api = KiwoomOpenApiClient()
@@ -105,11 +128,25 @@ class AutoTradingService:
         self.last_decision: TradeDecision | None = None
         self.market_quote: MarketQuote | None = None
         self.balance_summary: BalanceSummary | None = None
+        self.account_trade_history: list[TradeExecution] = []
+        self.account_trade_history_message = (
+            f"키움 계좌 연결 후 최근 {ACCOUNT_TRADE_HISTORY_DAYS}일 전체 체결내역을 조회합니다."
+        )
+        self.account_trade_history_updated_at: datetime | None = None
+        self.order_book: OrderBookSnapshot | None = None
+        self.unfilled_orders: list[UnfilledOrder] = []
+        self.daily_risk_status: DailyRiskStatus | None = None
         self.real_time_symbol = ""
         self.real_time_quote: RealTimeQuote | None = None
         self._real_time_registration_logged = False
         self._first_real_time_quote_logged_symbol = ""
         self.watchlist_quotes: dict[str, WatchlistQuote] = {}
+        self.volume_ranking: list[VolumeRankQuote] = []
+        self.volume_ranking_message = "REST API 연결 후 실시간 거래량 순위를 불러옵니다."
+        self.trade_value_ranking: list[VolumeRankQuote] = []
+        self.trade_value_ranking_message = (
+            "REST API 연결 후 거래대금 상위 순위를 불러옵니다."
+        )
         self.last_api_message = ""
         self.last_order_account_access_verified: bool | None = None
         self.started_at: datetime | None = None
@@ -339,11 +376,22 @@ class AutoTradingService:
         self.order_manager.request_stop()
         self.market_quote = None
         self.balance_summary = None
+        self.account_trade_history = []
+        self.account_trade_history_message = (
+            f"키움 계좌 연결 후 최근 {ACCOUNT_TRADE_HISTORY_DAYS}일 전체 체결내역을 조회합니다."
+        )
+        self.account_trade_history_updated_at = None
         self.real_time_symbol = ""
         self.real_time_quote = None
         self._real_time_registration_logged = False
         self._first_real_time_quote_logged_symbol = ""
         self.watchlist_quotes = {}
+        self.volume_ranking = []
+        self.volume_ranking_message = "REST API 연결 후 실시간 거래량 순위를 불러옵니다."
+        self.trade_value_ranking = []
+        self.trade_value_ranking_message = (
+            "REST API 연결 후 거래대금 상위 순위를 불러옵니다."
+        )
         self.candles = []
         self.chart_candles = []
         self.chart_timeframe = "3m"
@@ -430,6 +478,34 @@ class AutoTradingService:
             self.storage.log("INFO", "종목", self.last_api_message)
         return self.symbol_name
 
+    def search_symbols(self, query: str, limit: int = 20) -> list[tuple[str, str]]:
+        needle = str(query or "").strip()
+        if not needle:
+            return []
+        api = self._active_api()
+        search = getattr(api, "search_symbols", None)
+        if callable(search):
+            try:
+                return list(search(needle, limit=limit))
+            except API_ERRORS as exc:
+                self.last_api_message = str(exc)
+                self.storage.log("ERROR", "종목검색", self.last_api_message)
+        local: dict[str, str] = {
+            symbol: name for symbol, name in self.storage.watchlist_symbols()
+        }
+        local.update({quote.symbol: quote.name for quote in self.volume_ranking})
+        local.update({quote.symbol: quote.name for quote in self.trade_value_ranking})
+        if self.balance_summary is not None:
+            local.update(
+                {holding.symbol: holding.name for holding in self.balance_summary.holdings}
+            )
+        folded = needle.casefold()
+        return [
+            item
+            for item in local.items()
+            if folded in item[0].casefold() or folded in item[1].casefold()
+        ][: max(1, int(limit))]
+
     def request_current_price(self, symbol: str | None = None) -> MarketQuote | None:
         target = normalize_symbol(symbol or self.symbol)
         api = self._active_api()
@@ -457,6 +533,56 @@ class AutoTradingService:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "시세", self.last_api_message)
             return None
+
+    def request_order_book(self, symbol: str | None = None) -> OrderBookSnapshot | None:
+        target = normalize_symbol(symbol or self.symbol)
+        if not target:
+            self.last_api_message = "호가를 조회할 종목코드를 입력해 주세요."
+            return None
+        try:
+            self.order_book = self._active_api().request_order_book(target)
+            self.last_api_message = (
+                f"{target} 10호가 조회 완료 · 매도1 {self.order_book.best_ask:,.0f}원 / "
+                f"매수1 {self.order_book.best_bid:,.0f}원"
+            )
+            self.storage.log("INFO", "호가", self.last_api_message)
+            return self.order_book
+        except API_ERRORS as exc:
+            self.last_api_message = str(exc)
+            self.storage.log("ERROR", "호가", self.last_api_message)
+            return None
+
+    def midpoint_price(self, side: str, symbol: str | None = None) -> int:
+        normalized_side = "BUY" if side == "BUY" else "SELL"
+        book = self.request_order_book(symbol)
+        if book is None:
+            raise KiwoomOpenApiError(self.last_api_message or "호가 조회에 실패했습니다.")
+        try:
+            return midpoint_limit_price(book.best_ask, book.best_bid, normalized_side)
+        except ValueError as exc:
+            raise KiwoomOpenApiError(str(exc)) from exc
+
+    def request_unfilled_orders(
+        self,
+        account: str,
+        symbol: str = "",
+    ) -> list[UnfilledOrder]:
+        account = clean_account_number(account)
+        if not account and self.account_info.accounts:
+            account = clean_account_number(self.account_info.accounts[0])
+        try:
+            self.unfilled_orders = self._active_api().request_unfilled_orders(
+                account,
+                symbol=symbol,
+            )
+            self.last_api_message = f"미체결 {len(self.unfilled_orders)}건 조회 완료"
+            if self.unfilled_orders:
+                self.storage.log("WARN", "미체결", self.last_api_message)
+            return list(self.unfilled_orders)
+        except API_ERRORS as exc:
+            self.last_api_message = str(exc)
+            self.storage.log("ERROR", "미체결", self.last_api_message)
+            return list(self.unfilled_orders)
 
     def add_watchlist_symbol(self, symbol: str) -> str:
         normalized = normalize_symbol(symbol)
@@ -497,7 +623,10 @@ class AutoTradingService:
             for symbol, name in self.watchlist_items()
         ]
 
-    def refresh_watchlist_quotes(self) -> list[WatchlistQuote]:
+    def refresh_watchlist_quotes(
+        self,
+        supplemental_fields: set[str] | None = None,
+    ) -> list[WatchlistQuote]:
         items = self.watchlist_items()
         symbols = [symbol for symbol, _name in items]
         if not symbols:
@@ -507,6 +636,46 @@ class AutoTradingService:
         api = self._active_api()
         try:
             quotes = api.request_watchlist_quotes(symbols)
+            supplements = set(supplemental_fields or ())
+            enriched_quotes: list[WatchlistQuote] = []
+            for quote in quotes:
+                updates: dict[str, float] = {}
+                if "previous_trade_value" in supplements:
+                    request_previous = getattr(
+                        api,
+                        "request_watchlist_previous_trade_value",
+                        None,
+                    )
+                    if callable(request_previous):
+                        try:
+                            updates["previous_trade_value"] = float(
+                                request_previous(quote.symbol)
+                            )
+                        except API_ERRORS as exc:
+                            self.storage.log(
+                                "WARN",
+                                "관심종목",
+                                f"{quote.symbol} 전일 거래대금 조회 실패: {exc}",
+                            )
+                if "program_trading_trend" in supplements:
+                    request_program = getattr(
+                        api,
+                        "request_watchlist_program_trading_trend",
+                        None,
+                    )
+                    if callable(request_program):
+                        try:
+                            updates["program_trading_trend"] = float(
+                                request_program(quote.symbol)
+                            )
+                        except API_ERRORS as exc:
+                            self.storage.log(
+                                "WARN",
+                                "관심종목",
+                                f"{quote.symbol} 프로그램 매매 추이 조회 실패: {exc}",
+                            )
+                enriched_quotes.append(replace(quote, **updates) if updates else quote)
+            quotes = enriched_quotes
             self.watchlist_quotes = {quote.symbol: quote for quote in quotes if quote.symbol}
             for quote in quotes:
                 if quote.symbol and quote.name:
@@ -523,6 +692,55 @@ class AutoTradingService:
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "관심종목", self.last_api_message)
             return self.watchlist_rows()
+
+    def refresh_volume_ranking(
+        self,
+        market: str = "000",
+        limit: int = 15,
+    ) -> list[VolumeRankQuote]:
+        if self.connection_mode != "REST" or not self.account_info.connected:
+            self.volume_ranking = []
+            self.volume_ranking_message = "키움 REST API 연결 후 거래량 순위를 불러올 수 있습니다."
+            return []
+        try:
+            rows = self.rest_api.request_volume_ranking(market=market, limit=limit)
+            self.volume_ranking = list(rows[: max(1, int(limit))])
+            now = datetime.now().strftime("%H:%M:%S")
+            self.volume_ranking_message = (
+                f"키움 ka10030 · {len(self.volume_ranking)}개 · {now} 갱신"
+            )
+            return list(self.volume_ranking)
+        except (KiwoomRestApiError, AttributeError) as exc:
+            self.volume_ranking_message = str(exc)
+            self.last_api_message = str(exc)
+            return list(self.volume_ranking)
+
+    def refresh_trade_value_ranking(
+        self,
+        market: str = "000",
+        limit: int = 15,
+    ) -> list[VolumeRankQuote]:
+        if self.connection_mode != "REST" or not self.account_info.connected:
+            self.trade_value_ranking = []
+            self.trade_value_ranking_message = (
+                "키움 REST API 연결 후 거래대금 상위 순위를 불러올 수 있습니다."
+            )
+            return []
+        try:
+            rows = self.rest_api.request_trade_value_ranking(
+                market=market,
+                limit=limit,
+            )
+            self.trade_value_ranking = list(rows[: max(1, int(limit))])
+            now = datetime.now().strftime("%H:%M:%S")
+            self.trade_value_ranking_message = (
+                f"키움 ka10032 · {len(self.trade_value_ranking)}개 · {now} 갱신"
+            )
+            return list(self.trade_value_ranking)
+        except (KiwoomRestApiError, AttributeError) as exc:
+            self.trade_value_ranking_message = str(exc)
+            self.last_api_message = str(exc)
+            return list(self.trade_value_ranking)
 
     def request_three_minute_candles(self, symbol: str | None = None) -> list[Candle]:
         target = normalize_symbol(symbol or self.symbol)
@@ -600,13 +818,24 @@ class AutoTradingService:
         target = normalize_symbol(symbol or self.symbol)
         api = self._active_api()
         try:
-            self.chart_candles = api.request_minute_candles(
+            native_interval = 60 if interval_minutes in {120, 240} else interval_minutes
+            native_count = 200 * max(1, interval_minutes // native_interval)
+            native_candles = api.request_minute_candles(
                 target,
-                interval=interval_minutes,
-                count=200,
+                interval=native_interval,
+                count=native_count,
+            )
+            self.chart_candles = (
+                aggregate_minute_candles(native_candles, native_interval, interval_minutes)
+                if interval_minutes != native_interval
+                else native_candles
             )
             self.symbol = target
-            self.chart_source = "키움 ka10080/opt10080"
+            self.chart_source = (
+                f"키움 60분봉 기반 {interval_minutes}분 집계"
+                if interval_minutes in {120, 240}
+                else "키움 ka10080/opt10080"
+            )
             if self.chart_candles:
                 self.current_price = self.chart_candles[0].close
             label = timeframe_label(self.chart_timeframe)
@@ -690,7 +919,12 @@ class AutoTradingService:
         self.storage.log("INFO", "전략", self.last_api_message)
         return decision
 
-    def request_balance(self, account: str, password: str = "") -> BalanceSummary | None:
+    def request_balance(
+        self,
+        account: str,
+        password: str = "",
+        log_result: bool = True,
+    ) -> BalanceSummary | None:
         account = clean_account_number(account)
         if not account and self.account_info.accounts:
             account = clean_account_number(self.account_info.accounts[0])
@@ -698,16 +932,149 @@ class AutoTradingService:
         try:
             self.balance_summary = api.request_balance(account, password=password)
             self.last_api_message = self.balance_summary.message
-            self.storage.log(
-                "INFO",
-                "잔고",
-                f"{mask_account_number(account)} 보유종목 {len(self.balance_summary.holdings)}개 조회 완료",
-            )
+            self.refresh_daily_risk()
+            if log_result:
+                self.storage.log(
+                    "INFO",
+                    "잔고",
+                    f"{mask_account_number(account)} 보유종목 {len(self.balance_summary.holdings)}개 조회 완료",
+                )
             return self.balance_summary
         except API_ERRORS as exc:
             self.last_api_message = str(exc)
-            self.storage.log("ERROR", "잔고", self.last_api_message)
+            if log_result:
+                self.storage.log("ERROR", "잔고", self.last_api_message)
             return None
+
+    def request_today_trade_history(
+        self,
+        account: str,
+        password: str = "",
+        log_result: bool = True,
+    ) -> list[TradeExecution] | None:
+        return self.request_recent_trade_history(
+            account,
+            password=password,
+            days=1,
+            log_result=log_result,
+        )
+
+    def request_recent_trade_history(
+        self,
+        account: str,
+        password: str = "",
+        days: int = ACCOUNT_TRADE_HISTORY_DAYS,
+        end_date: str | None = None,
+        log_result: bool = True,
+    ) -> list[TradeExecution] | None:
+        account = clean_account_number(account)
+        if not account and self.account_info.accounts:
+            account = clean_account_number(self.account_info.accounts[0])
+        api = self._active_api()
+        try:
+            history_days = int(days)
+            if not 1 <= history_days <= 31:
+                raise ValueError("체결내역 조회 기간은 1~31일로 지정해 주세요.")
+            if end_date:
+                end = datetime.strptime(str(end_date).strip(), "%Y%m%d")
+            else:
+                end = datetime.now()
+            query_dates = [
+                (end - timedelta(days=offset)).strftime("%Y%m%d")
+                for offset in range(history_days)
+            ]
+            history: list[TradeExecution] = []
+            for query_date in query_dates:
+                history.extend(
+                    api.request_today_trade_history(
+                        account,
+                        password=password,
+                        order_date=query_date,
+                    )
+                )
+            self.account_trade_history = sorted(
+                list(history),
+                key=lambda item: item.timestamp,
+                reverse=True,
+            )
+            self.account_trade_history_updated_at = datetime.now()
+            self.refresh_daily_risk()
+            start_label = datetime.strptime(query_dates[-1], "%Y%m%d").strftime("%Y-%m-%d")
+            end_label = datetime.strptime(query_dates[0], "%Y%m%d").strftime("%Y-%m-%d")
+            self.account_trade_history_message = (
+                f"키움 최근 {history_days}일 계좌 전체 체결 "
+                f"{len(self.account_trade_history)}건 조회 완료 "
+                f"({start_label}~{end_label}, 초 단위)"
+            )
+            self.last_api_message = self.account_trade_history_message
+            if log_result:
+                self.storage.log(
+                    "INFO",
+                    "체결내역",
+                    f"{mask_account_number(account)} {self.account_trade_history_message}",
+                )
+            return list(self.account_trade_history)
+        except (KiwoomOpenApiError, KiwoomRestApiError, ValueError) as exc:
+            self.account_trade_history_message = f"키움 최근 체결내역 조회 실패: {exc}"
+            self.last_api_message = self.account_trade_history_message
+            if log_result:
+                self.storage.log("ERROR", "체결내역", self.account_trade_history_message)
+            return None
+
+    def performance_summary(self, period: str = "daily") -> PerformanceSummary:
+        now = datetime.now()
+        normalized = period.strip().lower()
+        if normalized == "monthly":
+            prefix = now.strftime("%Y-%m")
+            label = now.strftime("%Y년 %m월")
+        else:
+            prefix = now.strftime("%Y-%m-%d")
+            label = now.strftime("%Y-%m-%d")
+        executions = [
+            execution
+            for execution in self.account_trade_history
+            if str(execution.timestamp).startswith(prefix)
+        ]
+        return performance_from_executions(executions, label)
+
+    def configure_daily_loss_limit(self, limit_percent: float) -> None:
+        self.daily_loss_breaker.configure(limit_percent)
+        self.storage.set_app_setting(
+            "risk.daily_loss_limit_percent",
+            self.daily_loss_breaker.limit_percent,
+        )
+        self.refresh_daily_risk()
+
+    def refresh_daily_risk(self) -> DailyRiskStatus | None:
+        balance = self.balance_summary
+        if balance is None:
+            self.daily_risk_status = None
+            return None
+        daily = self.performance_summary("daily")
+        starting_assets = (
+            balance.estimated_assets
+            - balance.total_profit_loss
+            - daily.realized_profit
+        )
+        if starting_assets <= 0:
+            starting_assets = balance.estimated_assets or balance.deposit
+        self.daily_risk_status = self.daily_loss_breaker.evaluate(
+            starting_assets=starting_assets,
+            realized_profit=daily.realized_profit,
+            unrealized_profit=balance.total_profit_loss,
+        )
+        self.storage.set_app_setting(
+            "risk.locked_date",
+            self.daily_loss_breaker.locked_date,
+        )
+        if self.daily_risk_status.locked:
+            self.running = False
+            self.order_manager.request_stop()
+            self.storage.log("ERROR", "위험관리", self.daily_risk_status.reason)
+        return self.daily_risk_status
+
+    def daily_trade_locked(self, trade_date: date | None = None) -> bool:
+        return not self.daily_loss_breaker.can_trade(trade_date)
 
     def register_real_time_price(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)
@@ -805,12 +1172,21 @@ class AutoTradingService:
         quantity: int,
         allow_real_order: bool = False,
         account_password: str = "",
+        order_style: str = "MARKET",
+        action: str = "NEW",
+        original_order_no: str = "",
+        use_margin: bool = False,
     ) -> str:
         account = clean_account_number(account)
         self.symbol = normalize_symbol(self.symbol) or self.symbol
         result_side = "BUY" if side == "BUY" else "SELL"
+        normalized_action = action.strip().upper()
+        if normalized_action not in {"NEW", "MODIFY", "CANCEL"}:
+            normalized_action = "NEW"
+        normalized_style = order_style.strip().upper()
         api = self._active_api()
         order_price = float(self.current_price)
+        hoga = "03"
         order_total = max(0, int(quantity)) * max(0.0, order_price)
         order_symbol_name = self.symbol_name or known_symbol_name(self.symbol)
         order_mode = self.account_info.server_type or ("실거래" if allow_real_order else "모의투자")
@@ -821,10 +1197,26 @@ class AutoTradingService:
                 raise KiwoomOpenApiError("주문할 계좌번호를 입력해 주세요.")
             if not self.symbol:
                 raise KiwoomOpenApiError("주문할 종목번호를 입력해 주세요.")
-            if quantity <= 0:
+            if normalized_action != "CANCEL" and quantity <= 0:
                 raise KiwoomOpenApiError("주문 수량은 1주 이상 선택해 주세요.")
             if self.symbol == "000000":
                 raise KiwoomOpenApiError("종목 세팅을 먼저 완료해 주세요.")
+            if normalized_action in {"MODIFY", "CANCEL"} and not original_order_no.strip():
+                raise KiwoomOpenApiError("정정 또는 취소할 원주문번호를 선택해 주세요.")
+            if normalized_action in {"NEW", "MODIFY"} and normalized_style == "MIDPOINT":
+                order_price = float(self.midpoint_price(result_side, self.symbol))
+                hoga = "00"
+                order_total = max(0, int(quantity)) * order_price
+            elif normalized_action == "MODIFY":
+                raise KiwoomOpenApiError("정정 주문은 최신 중간가를 다시 조회해 전송합니다.")
+            elif normalized_action == "CANCEL":
+                order_price = 0.0
+                order_total = 0.0
+
+            if normalized_action == "NEW" and result_side == "BUY" and self.daily_trade_locked():
+                raise KiwoomOpenApiError(
+                    "일일 최대 손실 한도에 도달해 오늘 신규 매수 주문이 잠겨 있습니다."
+                )
 
             if self.account_info.connection_method != "REST API":
                 if not is_valid_account_password(account_password):
@@ -856,10 +1248,10 @@ class AutoTradingService:
                 )
 
             holding_quantity = self._holding_quantity(self.symbol)
-            if result_side == "BUY":
+            if normalized_action == "NEW" and result_side == "BUY":
                 risk_check = self.risk.approve_buy(
                     self.max_capital,
-                    self.current_price,
+                    order_price,
                     holding_quantity,
                 )
                 if not risk_check.approved:
@@ -875,13 +1267,19 @@ class AutoTradingService:
                         if self.balance_summary.orderable_amount > 0
                         else self.balance_summary.deposit
                     )
-                    estimated_cost = quantity * self.current_price
+                    estimated_cost = quantity * order_price
+                    if use_margin:
+                        available_funds *= 2.0
                     if estimated_cost > available_funds:
                         raise KiwoomOpenApiError(
                             f"예상 매수금액 {estimated_cost:,.0f}원이 계좌 주문가능금액 "
                             f"{available_funds:,.0f}원을 초과합니다."
                         )
-            elif self.balance_summary is not None and quantity > holding_quantity:
+            elif (
+                normalized_action == "NEW"
+                and self.balance_summary is not None
+                and quantity > holding_quantity
+            ):
                 raise KiwoomOpenApiError(
                     f"매도 수량 {quantity}주가 조회된 보유 수량 {holding_quantity}주를 초과합니다."
                 )
@@ -890,14 +1288,17 @@ class AutoTradingService:
                 symbol=self.symbol,
                 side=result_side,
                 quantity=quantity,
-                price=0,
-                hoga="03",
+                price=int(order_price),
+                hoga=hoga,
+                original_order_no=original_order_no.strip(),
+                action=normalized_action,
                 allow_real_order=allow_real_order,
                 require_mock_server=not allow_real_order,
             )
             max_attempts = (
                 3
-                if result_side == "SELL"
+                if normalized_action == "NEW"
+                and result_side == "SELL"
                 and self.account_info.server_type == "모의투자"
                 and not allow_real_order
                 else 1
@@ -920,7 +1321,7 @@ class AutoTradingService:
                     self.symbol,
                     result_side,
                     quantity,
-                    self.current_price,
+                    order_price,
                     True,
                     self.last_api_message,
                     datetime.now(),
@@ -938,7 +1339,7 @@ class AutoTradingService:
                     self.symbol,
                     result_side,
                     quantity,
-                    self.current_price,
+                    order_price,
                     False,
                     self.last_api_message,
                     datetime.now(),
@@ -957,6 +1358,7 @@ class AutoTradingService:
         quantity: int,
         allow_real_order: bool = False,
         account_password: str = "",
+        order_style: str = "MIDPOINT",
     ) -> TradeDecision | None:
         if quantity <= 0:
             self.last_api_message = "주문 수량은 1주 이상 선택해 주세요."
@@ -987,8 +1389,77 @@ class AutoTradingService:
             quantity=order_quantity,
             allow_real_order=allow_real_order,
             account_password=account_password,
+            order_style=order_style,
         )
         return decision
+
+    def cancel_all_unfilled_orders(
+        self,
+        account: str,
+        allow_real_order: bool,
+        account_password: str = "",
+    ) -> list[str]:
+        messages: list[str] = []
+        orders = self.request_unfilled_orders(account)
+        original_symbol = self.symbol
+        try:
+            for order in orders:
+                if order.unfilled_quantity <= 0:
+                    continue
+                self.symbol = order.symbol
+                messages.append(
+                    self.send_kiwoom_order(
+                        account=account,
+                        side=order.side,
+                        quantity=order.unfilled_quantity,
+                        allow_real_order=allow_real_order,
+                        account_password=account_password,
+                        action="CANCEL",
+                        original_order_no=order.order_no,
+                    )
+                )
+        finally:
+            self.symbol = original_symbol
+        return messages
+
+    def emergency_liquidate(
+        self,
+        account: str,
+        allow_real_order: bool,
+        account_password: str = "",
+    ) -> list[str]:
+        self.emergency_stop()
+        balance = self.request_balance(account, password=account_password)
+        if balance is None:
+            return [self.last_api_message]
+        messages: list[str] = []
+        original_symbol = self.symbol
+        try:
+            for holding in balance.holdings:
+                quantity = holding.sellable_quantity or holding.quantity
+                if quantity <= 0:
+                    continue
+                self.symbol = holding.symbol
+                self.symbol_name = holding.name
+                self.current_price = holding.current_price
+                messages.append(
+                    self.send_kiwoom_order(
+                        account=account,
+                        side="SELL",
+                        quantity=quantity,
+                        allow_real_order=allow_real_order,
+                        account_password=account_password,
+                        order_style="MARKET",
+                    )
+                )
+        finally:
+            self.symbol = original_symbol
+        self.storage.log(
+            "ERROR",
+            "긴급청산",
+            f"보유 종목 {len(messages)}개 전량 시장가 매도 요청을 전송했습니다.",
+        )
+        return messages
 
     def step(self, price: float | None = None) -> TradeDecision:
         if price is not None and price > 0:
@@ -1007,6 +1478,13 @@ class AutoTradingService:
 
     def snapshot(self) -> ServiceSnapshot:
         position = self.broker.get_position(self.symbol)
+        account_holding = self._account_holding(self.symbol)
+        if self.balance_summary is not None:
+            position_quantity = account_holding.quantity if account_holding is not None else 0
+            average_price = account_holding.average_price if account_holding is not None else 0.0
+        else:
+            position_quantity = position.quantity
+            average_price = position.average_price
         return ServiceSnapshot(
             connection=self.broker.connection_status(),
             running=self.running,
@@ -1014,8 +1492,8 @@ class AutoTradingService:
             symbol_name=self.symbol_name,
             pattern=self.pattern_state,
             price=self.current_price,
-            quantity=position.quantity,
-            average_price=position.average_price,
+            quantity=position_quantity,
+            average_price=average_price,
             decision=self.last_decision,
             account_info=self.account_info,
             started_at=self.started_at,
@@ -1032,6 +1510,14 @@ class AutoTradingService:
             last_api_message=self.last_api_message,
             orders=self.storage.recent_orders(10),
             trade_history=self.storage.recent_trade_history(200),
+            account_trade_history=list(self.account_trade_history),
+            account_trade_history_message=self.account_trade_history_message,
+            account_trade_history_updated_at=self.account_trade_history_updated_at,
+            order_book=self.order_book,
+            unfilled_orders=list(self.unfilled_orders),
+            daily_performance=self.performance_summary("daily"),
+            monthly_performance=self.performance_summary("monthly"),
+            daily_risk_status=self.daily_risk_status,
             logs=self.storage.recent_logs(10),
         )
 
@@ -1072,10 +1558,19 @@ class AutoTradingService:
         if len(self.candles) > 200:
             self.candles = self.candles[-200:]
 
-    def _holding_quantity(self, symbol: str) -> int:
+    def _account_holding(self, symbol: str) -> Holding | None:
         target = normalize_symbol(symbol)
-        if self.balance_summary:
+        if self.balance_summary is not None:
             for holding in self.balance_summary.holdings:
                 if normalize_symbol(holding.symbol) == target:
-                    return holding.quantity
+                    return holding
+        return None
+
+    def _holding_quantity(self, symbol: str) -> int:
+        holding = self._account_holding(symbol)
+        if holding is not None:
+            return holding.quantity
+        if self.balance_summary is not None:
+            return 0
+        target = normalize_symbol(symbol)
         return self.broker.get_position(target).quantity

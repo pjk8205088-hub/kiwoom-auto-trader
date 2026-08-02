@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Callable
 
-from .charting import SUPPORTED_MINUTE_INTERVALS
+from .charting import NATIVE_MINUTE_INTERVALS
 from .models import (
     AccountCash,
     BalanceSummary,
@@ -18,7 +18,11 @@ from .models import (
     KiwoomOrderRequest,
     MarketQuote,
     MarketSessionStatus,
+    OrderBookLevel,
+    OrderBookSnapshot,
     RealTimeQuote,
+    TradeExecution,
+    UnfilledOrder,
     WatchlistQuote,
 )
 from .symbols import normalize_symbol
@@ -42,6 +46,7 @@ KIWOOM_SETUP_GUIDE = (
     "4) 32비트 실행 파일로 다시 실행"
 )
 DEFAULT_TR_TIMEOUT_SECONDS = 10.0
+MAX_TRADE_HISTORY_PAGES_PER_DAY = 100
 DEFAULT_COM_RETRY_SECONDS = 8.0
 COM_CALL_REJECTED = -2147418113
 KIWOOM_LOGIN_ERRORS = {
@@ -192,8 +197,10 @@ class KiwoomOpenApiClient:
         self._dispatch_factory = dispatch_factory
         self._api: Any | None = None
         self._screen_no = 1000
+        self._tr_request_sequence = 0
         self._tr_results: dict[str, Any] = {}
         self._tr_parsers: dict[str, Callable[[str, str, str], Any]] = {}
+        self._tr_continuations: dict[str, str] = {}
         self._real_quotes: dict[str, RealTimeQuote] = {}
         self._real_quote_events: deque[RealTimeQuote] = deque(maxlen=5000)
         self._market_session_status: MarketSessionStatus | None = None
@@ -379,6 +386,19 @@ class KiwoomOpenApiClient:
             self._parse_current_price,
         )
 
+    def request_order_book(self, symbol: str) -> OrderBookSnapshot:
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KiwoomOpenApiError("호가를 조회할 종목코드를 입력해 주세요.")
+        return self._request_tr(
+            "호가조회",
+            "opt10004",
+            {"종목코드": symbol},
+            lambda trcode, rqname, record_name: self._parse_order_book(
+                trcode, rqname, record_name, symbol
+            ),
+        )
+
     def request_watchlist_quotes(self, symbols: list[str]) -> list[WatchlistQuote]:
         normalized = list(
             dict.fromkeys(
@@ -408,8 +428,8 @@ class KiwoomOpenApiClient:
         if not symbol:
             raise KiwoomOpenApiError("종목코드를 입력해 주세요.")
         interval = max(1, int(interval))
-        if interval not in SUPPORTED_MINUTE_INTERVALS:
-            supported = ", ".join(str(value) for value in SUPPORTED_MINUTE_INTERVALS)
+        if interval not in NATIVE_MINUTE_INTERVALS:
+            supported = ", ".join(str(value) for value in NATIVE_MINUTE_INTERVALS)
             raise KiwoomOpenApiError(f"분봉 간격은 {supported}분만 지원합니다.")
         count = max(1, int(count))
         candles = self._request_tr(
@@ -485,6 +505,67 @@ class KiwoomOpenApiClient:
             message="계좌 예수금 및 잔고 조회 완료",
         )
 
+    def request_unfilled_orders(
+        self,
+        account: str,
+        symbol: str = "",
+    ) -> list[UnfilledOrder]:
+        account = account.strip()
+        if not account:
+            raise KiwoomOpenApiError("미체결을 조회할 계좌번호를 입력해 주세요.")
+        normalized = normalize_symbol(symbol)
+        return self._request_tr(
+            "미체결조회",
+            "opt10075",
+            {
+                "계좌번호": account,
+                "전체종목구분": "1" if normalized else "0",
+                "매매구분": "0",
+                "종목코드": normalized,
+                "체결구분": "1",
+            },
+            self._parse_unfilled_orders,
+        )
+
+    def request_today_trade_history(
+        self,
+        account: str,
+        password: str = "",
+        order_date: str | None = None,
+    ) -> list[TradeExecution]:
+        account = account.strip()
+        if not account:
+            raise KiwoomOpenApiError("체결내역 조회 계좌번호를 입력해 주세요.")
+        password = password.strip()
+        if not is_valid_account_password(password):
+            raise KiwoomOpenApiError("계좌 비밀번호는 숫자 4~8자리로 입력해 주세요.")
+        query_date = str(order_date or datetime.now().strftime("%Y%m%d")).strip()
+        if len(query_date) != 8 or not query_date.isdigit():
+            raise KiwoomOpenApiError("주문 조회일자는 YYYYMMDD 8자리로 입력해 주세요.")
+
+        return self._request_tr_pages(
+            "주문체결내역조회",
+            "opw00007",
+            {
+                "주문일자": query_date,
+                "계좌번호": account,
+                "비밀번호": password,
+                "비밀번호입력매체구분": "00",
+                "조회구분": "1",
+                "주식채권구분": "0",
+                "매도수구분": "0",
+                "종목코드": "",
+                "시작주문번호": "",
+            },
+            lambda trcode, rqname, record_name: self._parse_today_trade_history(
+                trcode,
+                rqname,
+                record_name,
+                query_date,
+            ),
+            max_pages=MAX_TRADE_HISTORY_PAGES_PER_DAY,
+        )
+
     def register_real_time_price(self, symbol: str, screen_no: str = "9001") -> str:
         api = self._ensure_api()
         symbol = normalize_symbol(symbol)
@@ -533,6 +614,33 @@ class KiwoomOpenApiClient:
         except Exception as exc:  # pragma: no cover - depends on COM runtime.
             raise KiwoomOpenApiError(f"종목명 조회 실패: {exc}") from exc
 
+    def search_symbols(self, query: str, limit: int = 20) -> list[tuple[str, str]]:
+        api = self._ensure_api()
+        needle = str(query or "").strip().casefold()
+        if not needle:
+            return []
+        matches: list[tuple[str, str]] = []
+        try:
+            for market in ("0", "10"):
+                raw_codes = str(api.GetCodeListByMarket(market) or "")
+                for code in raw_codes.split(";"):
+                    normalized = normalize_symbol(code)
+                    if not normalized:
+                        continue
+                    name = str(api.GetMasterCodeName(normalized) or "").strip()
+                    if needle in normalized.casefold() or needle in name.casefold():
+                        matches.append((normalized, name))
+        except Exception as exc:  # pragma: no cover - depends on COM runtime.
+            raise KiwoomOpenApiError(f"종목명 검색 실패: {exc}") from exc
+        matches.sort(
+            key=lambda item: (
+                not item[1].casefold().startswith(needle),
+                not item[0].startswith(needle),
+                item[1],
+            )
+        )
+        return matches[: max(1, int(limit))]
+
     def send_order(self, request: KiwoomOrderRequest) -> str:
         api = self._ensure_api()
         if not self.is_connected():
@@ -550,14 +658,25 @@ class KiwoomOpenApiClient:
                     "키움 장시작시간에서 정규장 장중 신호를 확인하지 못해 실거래 주문을 차단했습니다."
                 )
             order_mode = "실전"
-        if request.quantity <= 0:
+        if request.action != "CANCEL" and request.quantity <= 0:
             raise KiwoomOpenApiError("주문 수량은 1주 이상이어야 합니다.")
         if request.side not in {"BUY", "SELL"}:
             raise KiwoomOpenApiError("주문 구분은 매수 또는 매도여야 합니다.")
 
-        order_type = 1 if request.side == "BUY" else 2
+        order_types = {
+            ("NEW", "BUY"): 1,
+            ("NEW", "SELL"): 2,
+            ("CANCEL", "BUY"): 3,
+            ("CANCEL", "SELL"): 4,
+            ("MODIFY", "BUY"): 5,
+            ("MODIFY", "SELL"): 6,
+        }
+        order_type = order_types[(request.action, request.side)]
+        if request.action in {"MODIFY", "CANCEL"} and not request.original_order_no.strip():
+            raise KiwoomOpenApiError("정정 또는 취소할 원주문번호를 입력해 주세요.")
         side_name = "매수" if request.side == "BUY" else "매도"
-        rqname = f"{order_mode}{side_name}주문"
+        action_name = {"NEW": "", "MODIFY": "정정", "CANCEL": "취소"}[request.action]
+        rqname = f"{order_mode}{side_name}{action_name}주문"
         symbol = normalize_symbol(request.symbol)
         self._request_limiter.acquire()
         result = api.SendOrder(
@@ -704,20 +823,71 @@ class KiwoomOpenApiClient:
         parser: Callable[[str, str, str], Any],
         timeout_seconds: float = DEFAULT_TR_TIMEOUT_SECONDS,
     ) -> Any:
+        data, _has_more = self._request_tr_page(
+            rqname,
+            trcode,
+            inputs,
+            parser,
+            prev_next=0,
+            timeout_seconds=timeout_seconds,
+        )
+        return data
+
+    def _request_tr_pages(
+        self,
+        rqname: str,
+        trcode: str,
+        inputs: dict[str, str],
+        parser: Callable[[str, str, str], list[Any]],
+        max_pages: int,
+        timeout_seconds: float = DEFAULT_TR_TIMEOUT_SECONDS,
+    ) -> list[Any]:
+        rows: list[Any] = []
+        for page in range(max_pages):
+            page_rows, has_more = self._request_tr_page(
+                rqname,
+                trcode,
+                inputs,
+                parser,
+                prev_next=0 if page == 0 else 2,
+                timeout_seconds=timeout_seconds,
+            )
+            if isinstance(page_rows, list):
+                rows.extend(page_rows)
+            if not has_more:
+                return rows
+        raise KiwoomOpenApiError(
+            f"{rqname} 내역이 {max_pages}페이지를 초과했습니다."
+        )
+
+    def _request_tr_page(
+        self,
+        rqname: str,
+        trcode: str,
+        inputs: dict[str, str],
+        parser: Callable[[str, str, str], Any],
+        prev_next: int,
+        timeout_seconds: float,
+    ) -> tuple[Any, bool]:
         api = self._ensure_api()
         if not self.is_connected():
             raise KiwoomOpenApiError("키움 OpenAPI 로그인 후 조회할 수 있습니다.")
 
         self._request_limiter.acquire()
-        request_id = f"{rqname}-{int(time.time() * 1000)}"
+        self._tr_request_sequence += 1
+        request_id = (
+            f"{rqname}-{int(time.time() * 1000)}-{self._tr_request_sequence}"
+        )
         self._tr_results[request_id] = None
         self._tr_parsers[request_id] = parser
+        self._tr_continuations[request_id] = ""
         for key, value in inputs.items():
             api.SetInputValue(key, value)
-        result = api.CommRqData(request_id, trcode, 0, self._next_screen_no())
+        result = api.CommRqData(request_id, trcode, prev_next, self._next_screen_no())
         if result != 0:
             self._tr_results.pop(request_id, None)
             self._tr_parsers.pop(request_id, None)
+            self._tr_continuations.pop(request_id, None)
             raise KiwoomOpenApiError(f"{rqname} 요청 실패: {result}")
 
         deadline = time.time() + timeout_seconds
@@ -727,13 +897,15 @@ class KiwoomOpenApiClient:
             if data is not None:
                 self._tr_results.pop(request_id, None)
                 self._tr_parsers.pop(request_id, None)
+                continuation = self._tr_continuations.pop(request_id, "")
                 if isinstance(data, Exception):
                     raise KiwoomOpenApiError(str(data))
-                return data
+                return data, continuation == "2"
             time.sleep(0.05)
 
         self._tr_results.pop(request_id, None)
         self._tr_parsers.pop(request_id, None)
+        self._tr_continuations.pop(request_id, None)
         raise KiwoomOpenApiError(f"{rqname} 응답 대기 시간이 초과되었습니다.")
 
     def _handle_tr_data(
@@ -747,6 +919,7 @@ class KiwoomOpenApiClient:
         parser = self._tr_parsers.get(rqname)
         if parser is None:
             return
+        self._tr_continuations[rqname] = str(prev_next or "").strip()
         try:
             self._tr_results[rqname] = parser(trcode, rqname, record_name)
         except Exception as exc:
@@ -790,6 +963,93 @@ class KiwoomOpenApiClient:
             message="현재가 조회 완료",
         )
 
+    def _parse_order_book(
+        self,
+        trcode: str,
+        rqname: str,
+        record_name: str,
+        symbol: str,
+    ) -> OrderBookSnapshot:
+        del rqname
+        levels: list[OrderBookLevel] = []
+        for level in range(1, 11):
+            ask_label = "매도최우선호가" if level == 1 else f"매도{level}차선호가"
+            ask_quantity_label = "매도최우선잔량" if level == 1 else f"매도{level}차선잔량"
+            bid_label = "매수최우선호가" if level == 1 else f"매수{level}차선호가"
+            bid_quantity_label = "매수최우선잔량" if level == 1 else f"매수{level}차선잔량"
+            levels.append(
+                OrderBookLevel(
+                    level=level,
+                    ask_price=_to_price(self._get_comm_data(trcode, record_name, 0, ask_label)),
+                    ask_quantity=_to_int(
+                        self._get_comm_data(trcode, record_name, 0, ask_quantity_label)
+                    ),
+                    bid_price=_to_price(self._get_comm_data(trcode, record_name, 0, bid_label)),
+                    bid_quantity=_to_int(
+                        self._get_comm_data(trcode, record_name, 0, bid_quantity_label)
+                    ),
+                )
+            )
+        return OrderBookSnapshot(
+            symbol=symbol,
+            levels=tuple(levels),
+            timestamp=str(
+                self._get_comm_data(trcode, record_name, 0, "호가잔량기준시간")
+            ).strip(),
+            source="키움 OpenAPI+ opt10004",
+        )
+
+    def _parse_unfilled_orders(
+        self,
+        trcode: str,
+        rqname: str,
+        record_name: str,
+    ) -> list[UnfilledOrder]:
+        repeat_count = self._get_repeat_count(trcode, rqname)
+        orders: list[UnfilledOrder] = []
+        for index in range(repeat_count):
+            side = self._trade_side(
+                self._get_comm_data(trcode, record_name, index, "주문구분")
+            )
+            if side is None:
+                continue
+            raw_symbol = str(
+                self._get_comm_data(trcode, record_name, index, "종목코드")
+                or self._get_comm_data(trcode, record_name, index, "종목번호")
+            ).strip()
+            orders.append(
+                UnfilledOrder(
+                    order_no=str(
+                        self._get_comm_data(trcode, record_name, index, "주문번호")
+                    ).strip(),
+                    symbol=normalize_symbol(raw_symbol.lstrip("A")),
+                    symbol_name=str(
+                        self._get_comm_data(trcode, record_name, index, "종목명")
+                    ).strip(),
+                    side=side,
+                    order_quantity=_to_int(
+                        self._get_comm_data(trcode, record_name, index, "주문수량")
+                    ),
+                    unfilled_quantity=_to_int(
+                        self._get_comm_data(trcode, record_name, index, "미체결수량")
+                    ),
+                    order_price=_to_price(
+                        self._get_comm_data(trcode, record_name, index, "주문가격")
+                    ),
+                    current_price=_to_price(
+                        self._get_comm_data(trcode, record_name, index, "현재가")
+                    ),
+                    timestamp=str(
+                        self._get_comm_data(trcode, record_name, index, "시간")
+                    ).strip(),
+                    status=str(
+                        self._get_comm_data(trcode, record_name, index, "주문상태")
+                        or "미체결"
+                    ).strip(),
+                )
+            )
+        return orders
+
     def _parse_minute_candles(self, trcode: str, rqname: str, record_name: str) -> list[Candle]:
         repeat_count = self._get_repeat_count(trcode, rqname)
         candles: list[Candle] = []
@@ -821,6 +1081,83 @@ class KiwoomOpenApiClient:
                 )
             )
         return candles
+
+    def _parse_today_trade_history(
+        self,
+        trcode: str,
+        rqname: str,
+        record_name: str,
+        order_date: str,
+    ) -> list[TradeExecution]:
+        repeat_count = self._get_repeat_count(trcode, rqname)
+        executions: list[TradeExecution] = []
+        for index in range(repeat_count):
+            label = (
+                self._get_comm_data(trcode, record_name, index, "주문구분")
+                or self._get_comm_data(trcode, record_name, index, "매매구분")
+            )
+            side = self._trade_side(label)
+            quantity = _to_int(
+                self._get_comm_data(trcode, record_name, index, "체결수량")
+            )
+            if side is None or quantity <= 0:
+                continue
+            price = _to_price(
+                self._get_comm_data(trcode, record_name, index, "체결단가")
+                or self._get_comm_data(trcode, record_name, index, "주문단가")
+            )
+            raw_symbol = str(
+                self._get_comm_data(trcode, record_name, index, "종목번호")
+                or self._get_comm_data(trcode, record_name, index, "종목코드")
+            ).strip()
+            raw_time = (
+                self._get_comm_data(trcode, record_name, index, "확인시간")
+                or self._get_comm_data(trcode, record_name, index, "주문시간")
+            )
+            executions.append(
+                TradeExecution(
+                    timestamp=self._trade_timestamp(order_date, raw_time),
+                    side=side,
+                    symbol=normalize_symbol(raw_symbol.lstrip("A")),
+                    symbol_name=str(
+                        self._get_comm_data(trcode, record_name, index, "종목명")
+                    ).strip(),
+                    quantity=quantity,
+                    price=price,
+                    order_no=str(
+                        self._get_comm_data(trcode, record_name, index, "주문번호")
+                    ).strip(),
+                    order_mode=f"키움 {self.get_server_name()}",
+                    message=(
+                        "키움 opw00007 계좌 실제 체결 · "
+                        f"{order_date[0:4]}-{order_date[4:6]}-{order_date[6:8]}"
+                    ),
+                )
+            )
+        return sorted(executions, key=lambda item: item.timestamp, reverse=True)
+
+    @staticmethod
+    def _trade_side(label: Any) -> str | None:
+        text = str(label or "").strip()
+        if "매수" in text or text == "2":
+            return "BUY"
+        if "매도" in text or text == "1":
+            return "SELL"
+        return None
+
+    @staticmethod
+    def _trade_timestamp(order_date: str, raw_time: Any) -> str:
+        digits = "".join(character for character in str(raw_time or "") if character.isdigit())
+        if len(digits) >= 14:
+            value = digits[:14]
+        elif len(digits) >= 6:
+            value = f"{order_date}{digits[-6:]}"
+        else:
+            value = f"{order_date}000000"
+        return (
+            f"{value[0:4]}-{value[4:6]}-{value[6:8]}T"
+            f"{value[8:10]}:{value[10:12]}:{value[12:14]}"
+        )
 
     def _parse_balance(
         self,

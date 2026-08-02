@@ -1,6 +1,7 @@
 import unittest
+from datetime import date
 
-from kiwoom_auto_trader.risk import RiskManager
+from kiwoom_auto_trader.risk import DailyLossCircuitBreaker, RiskManager
 
 
 class RiskManagerTests(unittest.TestCase):
@@ -25,6 +26,15 @@ class RiskManagerTests(unittest.TestCase):
         self.assertFalse(check.approved)
         self.assertEqual(check.quantity, 0)
         self.assertIn("운용 한도", check.reason)
+
+    def test_daily_loss_breaker_locks_only_current_date(self):
+        breaker = DailyLossCircuitBreaker(5)
+
+        status = breaker.evaluate(1_000_000, -30_000, -25_000, date(2026, 8, 1))
+
+        self.assertTrue(status.locked)
+        self.assertFalse(breaker.can_trade(date(2026, 8, 1)))
+        self.assertTrue(breaker.can_trade(date(2026, 8, 2)))
 
 
 if __name__ == "__main__":

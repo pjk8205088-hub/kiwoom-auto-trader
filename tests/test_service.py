@@ -7,9 +7,14 @@ from kiwoom_auto_trader.models import (
     BalanceSummary,
     Candle,
     Holding,
+    OrderBookLevel,
+    OrderBookSnapshot,
     RealTimeQuote,
     StrategySettings,
+    TradeExecution,
     TradeDecision,
+    UnfilledOrder,
+    VolumeRankQuote,
     WatchlistQuote,
 )
 from kiwoom_auto_trader.rest_api import KiwoomRestApiError
@@ -76,6 +81,9 @@ class FakeRestApi:
         self.order_calls = 0
         self.order_requests = []
         self.balance_calls = []
+        self.trade_history_calls = []
+        self.volume_ranking_calls = []
+        self.trade_value_ranking_calls = []
         self.balance_summary = BalanceSummary(
             account="1234567890",
             deposit=2_000_000,
@@ -137,6 +145,78 @@ class FakeRestApi:
         self.balance_calls.append((account, password))
         return self.balance_summary
 
+    def request_order_book(self, symbol: str) -> OrderBookSnapshot:
+        return OrderBookSnapshot(
+            symbol=symbol,
+            levels=(OrderBookLevel(1, 4_090, 100, 4_080, 100),),
+            source="테스트",
+        )
+
+    def request_unfilled_orders(self, account: str, symbol: str = ""):
+        return [
+            UnfilledOrder(
+                order_no="0000999",
+                symbol=symbol or "005930",
+                symbol_name="삼성전자",
+                side="BUY",
+                order_quantity=2,
+                unfilled_quantity=1,
+                order_price=4_080,
+            )
+        ]
+
+    def request_today_trade_history(
+        self,
+        account: str,
+        password: str = "",
+        order_date: str | None = None,
+    ):
+        query_date = order_date or "20260727"
+        self.trade_history_calls.append((account, password, query_date))
+        return [
+            TradeExecution(
+                timestamp=(
+                    f"{query_date[0:4]}-{query_date[4:6]}-{query_date[6:8]}T10:15:03"
+                ),
+                side="BUY",
+                symbol="012200",
+                symbol_name="계양전기",
+                quantity=2,
+                price=4080,
+                order_no="0000101",
+                order_mode="키움 실거래",
+            )
+        ]
+
+    def request_volume_ranking(self, market="000", limit=15):
+        self.volume_ranking_calls.append((market, limit))
+        return [
+            VolumeRankQuote(
+                rank=1,
+                symbol="005930",
+                name="삼성전자",
+                current_price=72_000,
+                change_rate=0.7,
+                volume=12_345_678,
+            )
+        ]
+
+    def request_trade_value_ranking(self, market="000", limit=15):
+        self.trade_value_ranking_calls.append((market, limit))
+        return [
+            VolumeRankQuote(
+                rank=1,
+                symbol="005930",
+                name="삼성전자",
+                current_price=72_000,
+                change=500,
+                change_rate=0.7,
+                trade_value=888_000_000,
+                change_sign="2",
+                nxt_available=True,
+            )
+        ]
+
 
 class FakeOpenApiOrderApi:
     def __init__(self) -> None:
@@ -156,6 +236,13 @@ class FakeOpenApiOrderApi:
     def send_order(self, request) -> str:
         self.order_requests.append(request)
         return "OpenAPI+ 모의 주문 접수 완료"
+
+    def request_order_book(self, symbol: str) -> OrderBookSnapshot:
+        return OrderBookSnapshot(
+            symbol=symbol,
+            levels=(OrderBookLevel(1, 4_090, 100, 4_080, 100),),
+            source="테스트",
+        )
 
 
 class FakeChartApi:
@@ -249,6 +336,163 @@ class FakeWatchlistApi:
 
 
 class AutoTradingServiceTests(unittest.TestCase):
+    def test_midpoint_new_modify_and_cancel_orders_use_official_actions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "midpoint-orders.sqlite3")
+            )
+            fake_rest = FakeRestApi()
+            service.rest_api = fake_rest
+            service.connection_mode = "REST"
+            service.account_info = fake_rest.connect("app-key", "secret-key")
+            service.symbol = "005930"
+            service.symbol_name = "삼성전자"
+            service.current_price = 4_080
+            service.max_capital = 100_000
+
+            service.send_kiwoom_order(
+                "1234567890",
+                "BUY",
+                2,
+                order_style="MIDPOINT",
+            )
+            service.send_kiwoom_order(
+                "1234567890",
+                "BUY",
+                1,
+                order_style="MIDPOINT",
+                action="MODIFY",
+                original_order_no="0000999",
+            )
+            service.send_kiwoom_order(
+                "1234567890",
+                "BUY",
+                1,
+                action="CANCEL",
+                original_order_no="0000999",
+            )
+
+            self.assertEqual(len(fake_rest.order_requests), 3)
+            new_order, modify_order, cancel_order = fake_rest.order_requests
+            self.assertEqual((new_order.price, new_order.hoga), (4_085, "00"))
+            self.assertEqual(modify_order.action, "MODIFY")
+            self.assertEqual(modify_order.price, 4_085)
+            self.assertEqual(modify_order.original_order_no, "0000999")
+            self.assertEqual(cancel_order.action, "CANCEL")
+            self.assertEqual(cancel_order.original_order_no, "0000999")
+
+    def test_loads_order_book_and_unfilled_orders_into_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "market-control.sqlite3")
+            )
+            fake_rest = FakeRestApi()
+            service.rest_api = fake_rest
+            service.connection_mode = "REST"
+            service.account_info = fake_rest.connect("app-key", "secret-key")
+            service.symbol = "005930"
+
+            book = service.request_order_book()
+            orders = service.request_unfilled_orders("1234567890", "005930")
+            snapshot = service.snapshot()
+
+            self.assertEqual(book.best_ask, 4_090)
+            self.assertEqual(book.best_bid, 4_080)
+            self.assertEqual(orders[0].order_no, "0000999")
+            self.assertEqual(snapshot.order_book.symbol, "005930")
+            self.assertEqual(snapshot.unfilled_orders[0].unfilled_quantity, 1)
+
+    def test_refreshes_top_fifteen_volume_ranking_from_rest_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "volume-ranking.sqlite3")
+            )
+            fake_rest = FakeRestApi()
+            service.rest_api = fake_rest
+            service.connection_mode = "REST"
+            service.account_info = fake_rest.connect("app-key", "secret-key")
+
+            rows = service.refresh_volume_ranking(market="101", limit=15)
+
+            self.assertEqual(fake_rest.volume_ranking_calls, [("101", 15)])
+            self.assertEqual(rows[0].symbol, "005930")
+            self.assertEqual(service.volume_ranking[0].volume, 12_345_678)
+            self.assertIn("ka10030", service.volume_ranking_message)
+
+    def test_refreshes_top_fifteen_trade_value_ranking_from_rest_api(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "trade-value-ranking.sqlite3")
+            )
+            fake_rest = FakeRestApi()
+            service.rest_api = fake_rest
+            service.connection_mode = "REST"
+            service.account_info = fake_rest.connect("app-key", "secret-key")
+
+            rows = service.refresh_trade_value_ranking(market="001", limit=15)
+
+            self.assertEqual(fake_rest.trade_value_ranking_calls, [("001", 15)])
+            self.assertEqual(rows[0].symbol, "005930")
+            self.assertEqual(service.trade_value_ranking[0].trade_value, 888_000_000)
+            self.assertTrue(service.trade_value_ranking[0].nxt_available)
+            self.assertIn("ka10032", service.trade_value_ranking_message)
+
+    def test_loads_ten_calendar_days_of_actual_trade_history_into_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "today-trade-history.sqlite3")
+            )
+            fake_rest = FakeRestApi()
+            service.rest_api = fake_rest
+            service.connection_mode = "REST"
+            service.account_info = fake_rest.connect("app-key", "secret-key")
+
+            history = service.request_recent_trade_history(
+                "1234567890",
+                days=10,
+                end_date="20260727",
+            )
+            snapshot = service.snapshot()
+
+            self.assertIsNotNone(history)
+            self.assertEqual(len(fake_rest.trade_history_calls), 10)
+            self.assertEqual(
+                fake_rest.trade_history_calls[0],
+                ("1234567890", "", "20260727"),
+            )
+            self.assertEqual(
+                fake_rest.trade_history_calls[-1],
+                ("1234567890", "", "20260718"),
+            )
+            self.assertEqual(len(snapshot.account_trade_history), 10)
+            self.assertEqual(snapshot.account_trade_history[0].order_no, "0000101")
+            self.assertEqual(
+                snapshot.account_trade_history[0].timestamp,
+                "2026-07-27T10:15:03",
+            )
+            self.assertIn("10건", snapshot.account_trade_history_message)
+            self.assertIn("2026-07-18~2026-07-27", snapshot.account_trade_history_message)
+            self.assertIsNotNone(snapshot.account_trade_history_updated_at)
+
+    def test_snapshot_uses_selected_account_holding_for_monitor_quantity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "holding-monitor.sqlite3")
+            )
+            service.symbol = "012200"
+            service.symbol_name = "계양전기"
+            service.balance_summary = BalanceSummary(
+                account="12345678",
+                holdings=(
+                    Holding("012200", "계양전기", 3, 4_000, 4_100, 300, 2.5),
+                ),
+            )
+
+            snapshot = service.snapshot()
+
+            self.assertEqual(snapshot.quantity, 3)
+            self.assertEqual(snapshot.average_price, 4_000)
+
     def test_start_records_time_once_and_snapshot_keeps_it_after_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             service = AutoTradingService(

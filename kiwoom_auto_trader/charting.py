@@ -7,14 +7,70 @@ from .symbols import normalize_symbol
 
 
 SUPPORTED_SECOND_INTERVALS = (1, 5, 10)
-SUPPORTED_MINUTE_INTERVALS = (1, 3, 5, 10, 15, 30, 45, 60)
+NATIVE_MINUTE_INTERVALS = (1, 3, 5, 10, 15, 30, 45, 60)
+SUPPORTED_MINUTE_INTERVALS = (*NATIVE_MINUTE_INTERVALS, 120, 240)
 
 
 def timeframe_label(timeframe: str) -> str:
     if timeframe.endswith("s"):
         return f"{int(timeframe[:-1])}초"
     minutes = int(timeframe[:-1])
-    return "1시간" if minutes == 60 else f"{minutes}분"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}시간"
+    return f"{minutes}분"
+
+
+def aggregate_minute_candles(
+    candles: list[Candle],
+    source_minutes: int,
+    target_minutes: int,
+) -> list[Candle]:
+    source = int(source_minutes)
+    target = int(target_minutes)
+    if source <= 0 or target <= source or target % source:
+        raise ValueError("상위 분봉은 원본 분봉의 정수 배수여야 합니다.")
+
+    parsed: list[tuple[datetime, Candle]] = []
+    for candle in candles:
+        digits = "".join(character for character in candle.timestamp if character.isdigit())
+        if len(digits) < 12:
+            continue
+        try:
+            timestamp = datetime.strptime(digits[:14].ljust(14, "0"), "%Y%m%d%H%M%S")
+        except ValueError:
+            continue
+        parsed.append((timestamp, candle))
+    parsed.sort(key=lambda item: item[0])
+
+    buckets: dict[datetime, list[Candle]] = {}
+    for timestamp, candle in parsed:
+        minutes_since_midnight = timestamp.hour * 60 + timestamp.minute
+        market_open_minutes = 9 * 60
+        offset = minutes_since_midnight - market_open_minutes
+        bucket_minutes = market_open_minutes + (offset // target) * target
+        bucket = timestamp.replace(
+            hour=bucket_minutes // 60,
+            minute=bucket_minutes % 60,
+            second=0,
+            microsecond=0,
+        )
+        buckets.setdefault(bucket, []).append(candle)
+
+    aggregated: list[Candle] = []
+    for bucket, values in sorted(buckets.items()):
+        first = values[0]
+        last = values[-1]
+        aggregated.append(
+            Candle(
+                open=first.open or first.close,
+                high=max(value.high for value in values),
+                low=min(value.low for value in values),
+                close=last.close,
+                volume=sum(max(0, value.volume) for value in values),
+                timestamp=bucket.strftime("%Y%m%d%H%M%S"),
+            )
+        )
+    return list(reversed(aggregated))
 
 
 def moving_average(candles: list[Candle], period: int) -> list[float | None]:

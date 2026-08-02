@@ -1,7 +1,11 @@
 import unittest
 from datetime import datetime
 
-from kiwoom_auto_trader.charting import RealTimeCandleAggregator, moving_average
+from kiwoom_auto_trader.charting import (
+    RealTimeCandleAggregator,
+    aggregate_minute_candles,
+    moving_average,
+)
 from kiwoom_auto_trader.models import Candle, RealTimeQuote
 
 
@@ -58,6 +62,21 @@ class ChartingTests(unittest.TestCase):
 
         self.assertEqual(values[:2], [None, None])
         self.assertEqual(values[2:], [20, 30, 40])
+
+    def test_aggregates_60_minute_candles_into_120_minutes(self):
+        source = [
+            Candle(130, 105, 120, open=110, volume=20, timestamp="20260801100000"),
+            Candle(115, 95, 110, open=100, volume=10, timestamp="20260801090000"),
+        ]
+
+        result = aggregate_minute_candles(source, 60, 120)
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].open, 100)
+        self.assertEqual(result[0].close, 120)
+        self.assertEqual(result[0].high, 130)
+        self.assertEqual(result[0].low, 95)
+        self.assertEqual(result[0].volume, 30)
 
 
 if __name__ == "__main__":

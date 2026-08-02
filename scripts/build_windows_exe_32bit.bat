@@ -11,7 +11,7 @@ if exist "%LocalAppData%\Programs\Python\Python311-32\python.exe" (
 if "%PYTHON32%"=="" (
   py -3.11-32 --version >nul 2>nul
   if errorlevel 1 (
-    echo 32-bit Python 3.11 is required for Kiwoom OpenAPI+.
+    echo 32-bit Python 3.11 is required for Kawaii Securities and Kiwoom OpenAPI+.
     echo Install 32-bit Python, then rerun this script.
     exit /b 1
   )
@@ -41,10 +41,19 @@ pyinstaller ^
   --clean ^
   --onefile ^
   --windowed ^
-  --name KiwoomAutoTrader-32bit ^
+  --runtime-tmpdir "C:\Users\Public\Documents\ESTsoft\CreatorTemp" ^
+  --additional-hooks-dir "scripts\pyinstaller_hooks" ^
+  --runtime-hook "scripts\pyi_rth_tkinter_manual.py" ^
+  --hidden-import _tkinter ^
+  --hidden-import tkinter ^
+  --hidden-import tkinter.ttk ^
+  --icon "assets\kiwoom_trade.ico" ^
+  --add-data "assets\kiwoom_trade.ico;assets" ^
+  --add-data "assets\kiwoom_trade.png;assets" ^
+  --name KawaiiSecurities-32bit-v41 ^
   kiwoom_auto_trader\main.py
 
 if errorlevel 1 exit /b 1
 
 echo.
-echo Build complete: dist\KiwoomAutoTrader-32bit.exe
+echo Build complete: dist\KawaiiSecurities-32bit-v41.exe

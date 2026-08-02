@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -160,6 +161,33 @@ class Storage:
                 )
             )
 
+    def watchlist_entries(self) -> list[tuple[str, str, str]]:
+        with self._connection() as conn:
+            return list(
+                conn.execute(
+                    "select symbol, name, memo from watchlist order by id",
+                )
+            )
+
+    def watchlist_memo(self, symbol: str) -> str:
+        with self._connection() as conn:
+            row = conn.execute(
+                "select memo from watchlist where symbol = ?",
+                (str(symbol or "").strip(),),
+            ).fetchone()
+        return str(row[0]) if row else ""
+
+    def set_watchlist_memo(self, symbol: str, memo: str) -> None:
+        normalized = str(symbol or "").strip()
+        if not normalized:
+            raise ValueError("종목코드를 입력해 주세요.")
+        cleaned = str(memo or "").strip()[:2000]
+        with self._connection() as conn:
+            conn.execute(
+                "update watchlist set memo = ? where symbol = ?",
+                (cleaned, normalized),
+            )
+
     def save_trading_baseline(self, baseline: TradingBaseline) -> None:
         with self._connection() as conn:
             conn.execute(
@@ -195,6 +223,93 @@ class Storage:
     def remove_trading_baseline(self, symbol: str) -> None:
         with self._connection() as conn:
             conn.execute("delete from trading_baselines where symbol = ?", (symbol,))
+
+    def set_app_setting(self, key: str, value: object) -> None:
+        setting_key = str(key or "").strip()
+        if not setting_key:
+            raise ValueError("설정 키는 비워 둘 수 없습니다.")
+        with self._connection() as conn:
+            conn.execute(
+                """
+                insert into app_settings (key, value, updated_at)
+                values (?, ?, ?)
+                on conflict(key) do update set
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    setting_key,
+                    str(value),
+                    datetime.now().isoformat(timespec="seconds"),
+                ),
+            )
+
+    def get_app_setting(self, key: str, default: str = "") -> str:
+        with self._connection() as conn:
+            row = conn.execute(
+                "select value from app_settings where key = ?",
+                (str(key or "").strip(),),
+            ).fetchone()
+        return str(row[0]) if row else default
+
+    def delete_app_setting(self, key: str) -> None:
+        with self._connection() as conn:
+            conn.execute(
+                "delete from app_settings where key = ?",
+                (str(key or "").strip(),),
+            )
+
+    def all_app_settings(self) -> dict[str, str]:
+        with self._connection() as conn:
+            rows = conn.execute(
+                "select key, value from app_settings order by key"
+            ).fetchall()
+        return {str(key): str(value) for key, value in rows}
+
+    def create_backup(self, destination_root: str | Path | None = None) -> Path:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        root = (
+            Path(destination_root)
+            if destination_root is not None
+            else self.db_path.parent / "Backups"
+        )
+        backup_dir = root / timestamp
+        backup_dir.mkdir(parents=True, exist_ok=False)
+
+        database_backup = backup_dir / self.db_path.name
+        source = self._connect()
+        target = sqlite3.connect(database_backup)
+        try:
+            source.backup(target)
+        finally:
+            target.close()
+            source.close()
+
+        if self.trade_history_path.exists():
+            trade_target = backup_dir / self.trade_history_path.name
+            trade_target.write_bytes(self.trade_history_path.read_bytes())
+
+        with self._connection() as conn:
+            watchlist = [
+                {"symbol": symbol, "name": name, "memo": memo, "created_at": created_at}
+                for symbol, name, memo, created_at in conn.execute(
+                    "select symbol, name, memo, created_at from watchlist order by id"
+                )
+            ]
+        manifest = {
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "database": database_backup.name,
+            "trade_history": (
+                self.trade_history_path.name if self.trade_history_path.exists() else ""
+            ),
+            "settings": self.all_app_settings(),
+            "watchlist": watchlist,
+        }
+        (backup_dir / "backup_manifest.json").write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        return backup_dir
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.db_path)
@@ -246,10 +361,12 @@ class Storage:
                     id integer primary key autoincrement,
                     symbol text not null unique,
                     name text not null default '',
+                    memo text not null default '',
                     created_at text not null
                 )
                 """
             )
+            self._ensure_watchlist_columns(conn)
             conn.execute(
                 """
                 create table if not exists trading_baselines (
@@ -257,6 +374,15 @@ class Storage:
                     capital_limit real not null,
                     reference_price real not null,
                     set_at text not null
+                )
+                """
+            )
+            conn.execute(
+                """
+                create table if not exists app_settings (
+                    key text primary key,
+                    value text not null,
+                    updated_at text not null
                 )
                 """
             )
@@ -276,6 +402,17 @@ class Storage:
         for name, definition in additions.items():
             if name not in existing:
                 conn.execute(f"alter table orders add column {name} {definition}")
+
+    @staticmethod
+    def _ensure_watchlist_columns(conn: sqlite3.Connection) -> None:
+        existing = {
+            str(row[1])
+            for row in conn.execute("pragma table_info(watchlist)")
+        }
+        if "memo" not in existing:
+            conn.execute(
+                "alter table watchlist add column memo text not null default ''"
+            )
 
     def _ensure_trade_history_file(self) -> None:
         try:

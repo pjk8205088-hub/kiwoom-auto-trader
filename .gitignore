@@ -10,6 +10,8 @@ dist/
 .pytest_cache/
 .mypy_cache/
 logs/
+output/
+tmp/
 *_appkey.txt
 *_secretkey.txt
 *_appsecret.txt

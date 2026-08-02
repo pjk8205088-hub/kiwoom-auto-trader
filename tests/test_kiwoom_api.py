@@ -1,6 +1,7 @@
 import unittest
+from unittest.mock import MagicMock
 
-from kiwoom_auto_trader.models import AccountCash, BalanceSummary, MarketQuote
+from kiwoom_auto_trader.models import AccountCash, BalanceSummary, MarketQuote, TradeExecution
 from kiwoom_auto_trader.kiwoom_api import (
     KiwoomOpenApiClient,
     KiwoomOpenApiError,
@@ -87,6 +88,12 @@ class FakeKiwoomApi:
             "주문가능금액": "250000",
             "출금가능금액": "200000",
             "d+2추정예수금": "280000",
+            "주문번호": "0000101",
+            "주문구분": "+매수",
+            "주문시간": "101501",
+            "확인시간": "101503",
+            "체결수량": "2",
+            "체결단가": "4080",
         }
         return values.get(item, "")
 
@@ -119,6 +126,30 @@ class FakeKiwoomApi:
 
 
 class KiwoomOpenApiClientTests(unittest.TestCase):
+    def test_collects_every_openapi_continuation_page(self):
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: FakeKiwoomApi())
+        first = TradeExecution("2026-07-27T10:15:03", "BUY", "005930", "삼성전자", 1, 70_000)
+        second = TradeExecution("2026-07-27T10:16:04", "SELL", "005930", "삼성전자", 1, 70_100)
+        page_loader = MagicMock(
+            side_effect=[
+                ([first], True),
+                ([second], False),
+            ]
+        )
+        client._request_tr_page = page_loader
+
+        rows = client._request_tr_pages(
+            "주문체결내역조회",
+            "opw00007",
+            {},
+            lambda _trcode, _rqname, _record_name: [],
+            max_pages=10,
+        )
+
+        self.assertEqual(rows, [first, second])
+        self.assertEqual(page_loader.call_args_list[0].kwargs["prev_next"], 0)
+        self.assertEqual(page_loader.call_args_list[1].kwargs["prev_next"], 2)
+
     def test_starts_login_with_comm_connect(self):
         fake = FakeKiwoomApi()
         nudged = []
@@ -226,6 +257,25 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(candles[0].timestamp, "20260725")
         self.assertEqual(candles[0].close, 72000)
         self.assertEqual(candles[0].high, 73000)
+
+    def test_parses_openapi_today_filled_orders(self):
+        fake = FakeKiwoomApi()
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        history = client._parse_today_trade_history(
+            "opw00007",
+            "금일주문체결내역조회",
+            "",
+            "20260727",
+        )
+
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].side, "BUY")
+        self.assertEqual(history[0].symbol, "005930")
+        self.assertEqual(history[0].quantity, 2)
+        self.assertEqual(history[0].price, 4080)
+        self.assertEqual(history[0].timestamp, "2026-07-27T10:15:03")
+        self.assertEqual(history[0].order_no, "0000101")
 
     def test_parses_balance_tr(self):
         fake = FakeKiwoomApi()
@@ -363,6 +413,42 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertIn("전송", message)
         self.assertEqual(fake.order_calls[0][2], 1)
         self.assertEqual(fake.order_calls[0][4], 1)
+
+    def test_maps_modify_and_cancel_to_openapi_order_types(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        from kiwoom_auto_trader.models import KiwoomOrderRequest
+
+        client.send_order(
+            KiwoomOrderRequest(
+                account="1234567890",
+                symbol="005930",
+                side="BUY",
+                quantity=2,
+                price=72_050,
+                hoga="00",
+                action="MODIFY",
+                original_order_no="0000999",
+            )
+        )
+        client.send_order(
+            KiwoomOrderRequest(
+                account="1234567890",
+                symbol="005930",
+                side="SELL",
+                quantity=2,
+                action="CANCEL",
+                original_order_no="0000998",
+            )
+        )
+
+        self.assertEqual(fake.order_calls[0][2], 5)
+        self.assertEqual(fake.order_calls[0][5], 72_050)
+        self.assertEqual(fake.order_calls[0][7], "0000999")
+        self.assertEqual(fake.order_calls[1][2], 4)
+        self.assertEqual(fake.order_calls[1][7], "0000998")
 
     def test_reports_login_error_from_event(self):
         fake = FakeKiwoomApi()

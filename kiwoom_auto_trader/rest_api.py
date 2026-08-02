@@ -4,13 +4,13 @@ import json
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .charting import SUPPORTED_MINUTE_INTERVALS
+from .charting import NATIVE_MINUTE_INTERVALS
 from .kiwoom_api import KiwoomAccountInfo
 from .models import (
     AccountCash,
@@ -20,19 +20,29 @@ from .models import (
     KiwoomOrderRequest,
     MarketQuote,
     MarketSessionStatus,
+    OrderBookLevel,
+    OrderBookSnapshot,
     RealTimeQuote,
+    TradeExecution,
+    UnfilledOrder,
+    VolumeRankQuote,
     WatchlistQuote,
 )
 from .symbols import clean_account_number, normalize_symbol
 
 
-KIWOOM_REST_PORTAL = "https://openapi.kiwoom.com/intro?dummyVal=0"
+KIWOOM_REST_PORTAL = "https://openapi.kiwoom.com/mgmt/VOpenApiRegView?dummyVal=0"
+KIWOOM_REST_GUIDE = "https://openapi.kiwoom.com/guide/index?dummyVal=0"
 KIWOOM_REST_LIVE_URL = "https://api.kiwoom.com"
 KIWOOM_REST_MOCK_URL = "https://mockapi.kiwoom.com"
 KIWOOM_REST_LIVE_SOCKET_URL = "wss://api.kiwoom.com:10000/api/dostk/websocket"
 KIWOOM_REST_MOCK_SOCKET_URL = "wss://mockapi.kiwoom.com:10000/api/dostk/websocket"
 DEFAULT_REST_TIMEOUT_SECONDS = 10.0
+MAX_TRADE_HISTORY_PAGES_PER_DAY = 100
 REALTIME_TRADE_SESSION_TTL_SECONDS = 30.0
+KIWOOM_TRADE_VALUE_UNIT_WON = 1_000_000.0
+KIWOOM_MARKET_CAP_UNIT_WON = 100_000_000.0
+KIWOOM_WATCHLIST_CODE_FIELD_MAX_LENGTH = 20
 
 
 class KiwoomRestApiError(RuntimeError):
@@ -106,6 +116,28 @@ def _integer(value: Any) -> int:
     return int(abs(_number(value)))
 
 
+def _pipe_separated_batches(
+    values: list[str],
+    max_length: int = KIWOOM_WATCHLIST_CODE_FIELD_MAX_LENGTH,
+) -> list[list[str]]:
+    batches: list[list[str]] = []
+    current: list[str] = []
+    current_length = 0
+    for value in values:
+        separator_length = 1 if current else 0
+        candidate_length = current_length + separator_length + len(value)
+        if current and candidate_length > max_length:
+            batches.append(current)
+            current = [value]
+            current_length = len(value)
+            continue
+        current.append(value)
+        current_length = candidate_length
+    if current:
+        batches.append(current)
+    return batches
+
+
 def _decode_websocket_message(raw_message: Any) -> Any:
     if isinstance(raw_message, bytes):
         raw_message = raw_message.decode("utf-8")
@@ -162,6 +194,9 @@ class KiwoomRestApiClient:
         self._websocket_lock = threading.Lock()
         self._websocket_error = ""
         self.last_order_no = ""
+        self._symbol_directory: list[tuple[str, str]] = []
+        self._symbol_directory_loaded = False
+        self._nxt_symbols: set[str] = set()
 
     def connect(self, app_key: str, secret_key: str) -> KiwoomAccountInfo:
         app_key = app_key.strip()
@@ -190,7 +225,10 @@ class KiwoomRestApiClient:
             account_response = self._post("ka00001", "/api/dostk/acnt", {})
             account = clean_account_number(account_response.get("acctNo") or account_response.get("acct_no"))
             if not account:
-                raise KiwoomRestApiError("REST API 토큰에서 계좌번호를 확인하지 못했습니다.")
+                raise KiwoomRestApiError(
+                    "REST API 토큰에서 계좌번호를 확인하지 못했습니다. "
+                    "키움 계좌·IP 등록 페이지에서 사용할 계좌가 등록되어 있는지 확인해 주세요."
+                )
             self._account = account
             self._account_info = KiwoomAccountInfo(
                 True,
@@ -253,6 +291,65 @@ class KiwoomRestApiClient:
     def lookup_symbol_name(self, symbol: str) -> str:
         return self.request_current_price(symbol).name
 
+    def search_symbols(self, query: str, limit: int = 20) -> list[tuple[str, str]]:
+        needle = str(query or "").strip().casefold()
+        if not needle:
+            return []
+        self._ensure_symbol_directory()
+        matches = [
+            item
+            for item in self._symbol_directory
+            if needle in item[0].casefold() or needle in item[1].casefold()
+        ]
+        matches.sort(
+            key=lambda item: (
+                not item[1].casefold().startswith(needle),
+                not item[0].startswith(needle),
+                item[1],
+            )
+        )
+        return matches[: max(1, int(limit))]
+
+    def _ensure_symbol_directory(self) -> None:
+        if self._symbol_directory_loaded:
+            return
+        directory: dict[str, str] = {}
+        nxt_symbols: set[str] = set()
+        for market in ("0", "10"):
+            continuation_headers: dict[str, str] | None = None
+            for _page in range(10):
+                response = self._post_response(
+                    "ka10099",
+                    "/api/dostk/stkinfo",
+                    {"mrkt_tp": market},
+                    extra_headers=continuation_headers,
+                )
+                rows = response.body.get("list") or []
+                if isinstance(rows, list):
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        code = normalize_symbol(row.get("code"))
+                        name = str(row.get("name") or "").strip()
+                        if code and name:
+                            directory[code] = name
+                        nxt_enabled = str(
+                            row.get("nxtEnable")
+                            or row.get("nxt_enable")
+                            or row.get("nxt_yn")
+                            or ""
+                        ).strip().upper()
+                        if code and nxt_enabled == "Y":
+                            nxt_symbols.add(code)
+                cont_yn = self._response_header(response.headers, "cont-yn").upper()
+                next_key = self._response_header(response.headers, "next-key")
+                if cont_yn != "Y" or not next_key:
+                    break
+                continuation_headers = {"cont-yn": "Y", "next-key": next_key}
+        self._symbol_directory = sorted(directory.items(), key=lambda item: item[1])
+        self._nxt_symbols = nxt_symbols
+        self._symbol_directory_loaded = True
+
     def request_current_price(self, symbol: str) -> MarketQuote:
         symbol = normalize_symbol(symbol)
         if not symbol:
@@ -269,6 +366,33 @@ class KiwoomRestApiClient:
             message="REST API 현재가 조회 완료",
         )
 
+    def request_order_book(self, symbol: str) -> OrderBookSnapshot:
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KiwoomRestApiError("호가를 조회할 종목코드를 입력해 주세요.")
+        body = self._post("ka10004", "/api/dostk/mrkcond", {"stk_cd": symbol})
+        levels: list[OrderBookLevel] = []
+        for level in range(1, 11):
+            ask_price_key = "sel_fpr_bid" if level == 1 else f"sel_{level}th_pre_bid"
+            ask_quantity_key = "sel_fpr_req" if level == 1 else f"sel_{level}th_pre_req"
+            bid_price_key = "buy_fpr_bid" if level == 1 else f"buy_{level}th_pre_bid"
+            bid_quantity_key = "buy_fpr_req" if level == 1 else f"buy_{level}th_pre_req"
+            levels.append(
+                OrderBookLevel(
+                    level=level,
+                    ask_price=_price(body.get(ask_price_key)),
+                    ask_quantity=_integer(body.get(ask_quantity_key)),
+                    bid_price=_price(body.get(bid_price_key)),
+                    bid_quantity=_integer(body.get(bid_quantity_key)),
+                )
+            )
+        return OrderBookSnapshot(
+            symbol=symbol,
+            levels=tuple(levels),
+            timestamp=str(body.get("bid_req_base_tm") or datetime.now().strftime("%H%M%S")),
+            source="키움 REST ka10004",
+        )
+
     def request_watchlist_quotes(self, symbols: list[str]) -> list[WatchlistQuote]:
         normalized = list(
             dict.fromkeys(
@@ -279,39 +403,244 @@ class KiwoomRestApiClient:
         )
         if not normalized:
             raise KiwoomRestApiError("관심종목 코드를 한 개 이상 등록해 주세요.")
-        body = self._post(
-            "ka10095",
-            "/api/dostk/stkinfo",
-            {"stk_cd": "|".join(normalized[:100])},
-        )
-        rows = body.get("atn_stk_infr") or []
-        if not isinstance(rows, list):
-            raise KiwoomRestApiError("REST API 관심종목 응답 형식이 올바르지 않습니다.")
+        quotes_by_symbol: dict[str, WatchlistQuote] = {}
+        for batch in _pipe_separated_batches(normalized[:100]):
+            body = self._post(
+                "ka10095",
+                "/api/dostk/stkinfo",
+                {"stk_cd": "|".join(batch)},
+            )
+            rows = body.get("atn_stk_infr") or []
+            if not isinstance(rows, list):
+                raise KiwoomRestApiError("REST API 관심종목 응답 형식이 올바르지 않습니다.")
 
-        quotes: list[WatchlistQuote] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            raw_symbol = str(row.get("stk_cd") or "").strip()
-            market = "NXT" if "_NX" in raw_symbol else "SOR" if "_AL" in raw_symbol else "KRX"
-            quotes.append(
-                WatchlistQuote(
-                    symbol=normalize_symbol(raw_symbol),
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                raw_symbol = str(row.get("stk_cd") or "").strip()
+                symbol = normalize_symbol(raw_symbol)
+                if not symbol:
+                    continue
+                market = (
+                    "NXT"
+                    if "_NX" in raw_symbol
+                    else "SOR"
+                    if "_AL" in raw_symbol
+                    else "KRX"
+                )
+                quotes_by_symbol[symbol] = WatchlistQuote(
+                    symbol=symbol,
                     name=str(row.get("stk_nm") or "").strip(),
                     market=market,
                     current_price=_price(row.get("cur_prc")),
                     change=_number(row.get("pred_pre")),
                     change_rate=_number(row.get("flu_rt")),
                     volume=_integer(row.get("trde_qty")),
-                    trade_value=_number(row.get("trde_prica")),
+                    trade_value=(
+                        _number(row.get("trde_prica")) * KIWOOM_TRADE_VALUE_UNIT_WON
+                    ),
+                    market_cap=(
+                        _number(row.get("mac")) * KIWOOM_MARKET_CAP_UNIT_WON
+                    ),
                     open_price=_price(row.get("open_pric")),
                     high_price=_price(row.get("high_pric")),
                     low_price=_price(row.get("low_pric")),
                     ask_price=_price(row.get("sel_bid")),
                     bid_price=_price(row.get("buy_bid")),
-                    timestamp=str(row.get("cntr_tm") or row.get("bid_tm") or "").strip(),
+                    timestamp=str(
+                        row.get("cntr_tm") or row.get("bid_tm") or ""
+                    ).strip(),
+                )
+        return [
+            quotes_by_symbol[symbol]
+            for symbol in normalized
+            if symbol in quotes_by_symbol
+        ]
+
+    def request_watchlist_previous_trade_value(self, symbol: str) -> float:
+        """Return yesterday's trading value in won using official ka10007."""
+        normalized = normalize_symbol(symbol)
+        if not normalized:
+            raise KiwoomRestApiError("종목코드를 입력해 주세요.")
+        body = self._post(
+            "ka10007",
+            "/api/dostk/mrkcond",
+            {"stk_cd": normalized},
+        )
+        return _number(body.get("pred_trde_prica")) * KIWOOM_TRADE_VALUE_UNIT_WON
+
+    def request_watchlist_program_trading_trend(self, symbol: str) -> float:
+        """Return the latest program net-buy amount in won using official ka90008."""
+        normalized = normalize_symbol(symbol)
+        if not normalized:
+            raise KiwoomRestApiError("종목코드를 입력해 주세요.")
+        body = self._post(
+            "ka90008",
+            "/api/dostk/mrkcond",
+            {
+                "amt_qty_tp": "1",
+                "stk_cd": normalized,
+                "date": datetime.now().strftime("%Y%m%d"),
+            },
+        )
+        rows = body.get("stk_tm_prm_trde_trnsn") or []
+        if not isinstance(rows, list):
+            raise KiwoomRestApiError("프로그램 매매 추이 응답 형식이 올바르지 않습니다.")
+        latest = next((row for row in rows if isinstance(row, dict)), None)
+        if latest is None:
+            return 0.0
+        return _number(latest.get("prm_netprps_amt")) * KIWOOM_TRADE_VALUE_UNIT_WON
+
+    def request_volume_ranking(
+        self,
+        market: str = "000",
+        limit: int = 15,
+    ) -> list[VolumeRankQuote]:
+        market = str(market or "000").strip()
+        if market not in {"000", "001", "101"}:
+            raise KiwoomRestApiError("거래량 순위 시장은 전체, 코스피, 코스닥만 선택할 수 있습니다.")
+        limit = max(1, min(100, int(limit)))
+        body = self._post(
+            "ka10030",
+            "/api/dostk/rkinfo",
+            {
+                "mrkt_tp": market,
+                "sort_tp": "1",
+                "mang_stk_incls": "0",
+                "crd_tp": "0",
+                "trde_qty_tp": "0",
+                "pric_tp": "0",
+                "trde_prica_tp": "0",
+                "mrkt_open_tp": "0",
+                "stex_tp": "1" if self.mock else "3",
+            },
+        )
+        rows = body.get("tdy_trde_qty_upper") or []
+        if not isinstance(rows, list):
+            raise KiwoomRestApiError("REST API 당일 거래량 순위 응답 형식이 올바르지 않습니다.")
+
+        try:
+            self._ensure_symbol_directory()
+        except KiwoomRestApiError:
+            pass
+
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        quotes: list[VolumeRankQuote] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = normalize_symbol(row.get("stk_cd"))
+            if not symbol:
+                continue
+            quotes.append(
+                VolumeRankQuote(
+                    rank=len(quotes) + 1,
+                    symbol=symbol,
+                    name=str(row.get("stk_nm") or "").strip(),
+                    current_price=_price(row.get("cur_prc")),
+                    change=_number(row.get("pred_pre")),
+                    change_rate=_number(row.get("flu_rt")),
+                    volume=_integer(row.get("trde_qty")),
+                    turnover_rate=_number(row.get("trde_tern_rt")),
+                    trade_value=(
+                        _number(row.get("trde_amt")) * KIWOOM_TRADE_VALUE_UNIT_WON
+                    ),
+                    change_sign=str(row.get("pred_pre_sig") or "").strip(),
+                    previous_ratio=_number(row.get("pred_rt")),
+                    nxt_available=(
+                        symbol in self._nxt_symbols
+                        or "_NX" in str(row.get("stk_cd") or "").upper()
+                    ),
+                    timestamp=timestamp,
                 )
             )
+            if len(quotes) >= limit:
+                break
+
+        if quotes:
+            try:
+                details = self.request_watchlist_quotes(
+                    [quote.symbol for quote in quotes]
+                )
+            except KiwoomRestApiError:
+                details = []
+            details_by_symbol = {quote.symbol: quote for quote in details}
+            quotes = [
+                replace(
+                    quote,
+                    market_cap=details_by_symbol.get(
+                        quote.symbol,
+                        WatchlistQuote(symbol=quote.symbol),
+                    ).market_cap,
+                )
+                for quote in quotes
+            ]
+        return quotes
+
+    def request_trade_value_ranking(
+        self,
+        market: str = "000",
+        limit: int = 15,
+    ) -> list[VolumeRankQuote]:
+        """Return the official ka10032 transaction-value ranking."""
+        market = str(market or "000").strip()
+        if market not in {"000", "001", "101"}:
+            raise KiwoomRestApiError(
+                "거래대금 순위 시장은 전체, 코스피, 코스닥만 선택할 수 있습니다."
+            )
+        limit = max(1, min(100, int(limit)))
+        body = self._post(
+            "ka10032",
+            "/api/dostk/rkinfo",
+            {
+                "mrkt_tp": market,
+                "mang_stk_incls": "1",
+                "stex_tp": "1" if self.mock else "3",
+            },
+        )
+        rows = body.get("trde_prica_upper") or []
+        if not isinstance(rows, list):
+            raise KiwoomRestApiError(
+                "REST API 거래대금 순위 응답 형식이 올바르지 않습니다."
+            )
+
+        try:
+            self._ensure_symbol_directory()
+        except KiwoomRestApiError:
+            pass
+
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        quotes: list[VolumeRankQuote] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_symbol = str(row.get("stk_cd") or "")
+            symbol = normalize_symbol(raw_symbol)
+            if not symbol:
+                continue
+            rank = _integer(row.get("now_rank")) or len(quotes) + 1
+            quotes.append(
+                VolumeRankQuote(
+                    rank=rank,
+                    symbol=symbol,
+                    name=str(row.get("stk_nm") or "").strip(),
+                    current_price=_price(row.get("cur_prc")),
+                    change=_number(row.get("pred_pre")),
+                    change_rate=_number(row.get("flu_rt")),
+                    volume=_integer(row.get("now_trde_qty")),
+                    trade_value=(
+                        _number(row.get("trde_prica"))
+                        * KIWOOM_TRADE_VALUE_UNIT_WON
+                    ),
+                    change_sign=str(row.get("pred_pre_sig") or "").strip(),
+                    nxt_available=(
+                        symbol in self._nxt_symbols or "_NX" in raw_symbol.upper()
+                    ),
+                    timestamp=timestamp,
+                )
+            )
+            if len(quotes) >= limit:
+                break
         return quotes
 
     def request_minute_candles(
@@ -324,8 +653,8 @@ class KiwoomRestApiClient:
         if not symbol:
             raise KiwoomRestApiError("종목코드를 입력해 주세요.")
         interval = int(interval)
-        if interval not in SUPPORTED_MINUTE_INTERVALS:
-            supported = ", ".join(str(value) for value in SUPPORTED_MINUTE_INTERVALS)
+        if interval not in NATIVE_MINUTE_INTERVALS:
+            supported = ", ".join(str(value) for value in NATIVE_MINUTE_INTERVALS)
             raise KiwoomRestApiError(f"분봉 간격은 {supported}분만 지원합니다.")
         body = self._post(
             "ka10080",
@@ -458,6 +787,95 @@ class KiwoomRestApiClient:
             message="REST API 예수금 및 계좌평가잔고 조회 완료",
         )
 
+    def request_today_trade_history(
+        self,
+        account: str,
+        password: str = "",
+        order_date: str | None = None,
+    ) -> list[TradeExecution]:
+        del password
+        account = clean_account_number(account) or self._account
+        if not account or account != self._account:
+            raise KiwoomRestApiError("REST API 토큰의 계좌번호와 선택 계좌가 일치하지 않습니다.")
+
+        query_date = str(order_date or datetime.now().strftime("%Y%m%d")).strip()
+        if len(query_date) != 8 or not query_date.isdigit():
+            raise KiwoomRestApiError("주문 조회일자는 YYYYMMDD 8자리로 입력해 주세요.")
+
+        request_body = {
+            "qry_tp": "4",
+            "stk_bond_tp": "1",
+            "sell_tp": "0",
+            "dmst_stex_tp": "%",
+            "ord_dt": query_date,
+            "stk_cd": "",
+            "fr_ord_no": "",
+        }
+        rows: list[dict[str, Any]] = []
+        continuation_headers: dict[str, str] | None = None
+        continuation_keys: set[str] = set()
+        for _page in range(MAX_TRADE_HISTORY_PAGES_PER_DAY):
+            response = self._post_response(
+                "kt00007",
+                "/api/dostk/acnt",
+                request_body,
+                extra_headers=continuation_headers,
+            )
+            records = response.body.get("acnt_ord_cntr_prps_dtl") or []
+            if isinstance(records, list):
+                rows.extend(record for record in records if isinstance(record, dict))
+
+            cont_yn = self._response_header(response.headers, "cont-yn").upper()
+            next_key = self._response_header(response.headers, "next-key")
+            if cont_yn != "Y" or not next_key:
+                break
+            if next_key in continuation_keys:
+                raise KiwoomRestApiError(
+                    f"{query_date} 체결내역 연속조회 키가 반복되어 조회를 중단했습니다."
+                )
+            continuation_keys.add(next_key)
+            continuation_headers = {"cont-yn": "Y", "next-key": next_key}
+        else:
+            raise KiwoomRestApiError(
+                f"{query_date} 체결내역이 {MAX_TRADE_HISTORY_PAGES_PER_DAY}페이지를 초과했습니다."
+            )
+
+        executions: list[TradeExecution] = []
+        seen: set[tuple[str, str, str, int, float, str]] = set()
+        for row in rows:
+            side = self._trade_side(row.get("io_tp_nm"), row.get("trde_tp"))
+            quantity = _integer(row.get("cntr_qty"))
+            if side is None or quantity <= 0:
+                continue
+            price = _price(row.get("cntr_uv") or row.get("ord_uv"))
+            order_no = str(row.get("ord_no") or "").strip()
+            symbol = normalize_symbol(str(row.get("stk_cd") or "").lstrip("AJQ"))
+            timestamp = self._trade_timestamp(
+                query_date,
+                row.get("cnfm_tm") or row.get("ord_tm"),
+            )
+            key = (order_no, side, symbol, quantity, price, timestamp)
+            if key in seen:
+                continue
+            seen.add(key)
+            executions.append(
+                TradeExecution(
+                    timestamp=timestamp,
+                    side=side,
+                    symbol=symbol,
+                    symbol_name=str(row.get("stk_nm") or "").strip(),
+                    quantity=quantity,
+                    price=price,
+                    order_no=order_no,
+                    order_mode=f"키움 {self.get_server_name()}",
+                    message=(
+                        "키움 kt00007 계좌 실제 체결 · "
+                        f"{query_date[0:4]}-{query_date[4:6]}-{query_date[6:8]}"
+                    ),
+                )
+            )
+        return sorted(executions, key=lambda item: item.timestamp, reverse=True)
+
     def request_account_cash(self, account: str) -> AccountCash:
         account = clean_account_number(account) or self._account
         if not account or account != self._account:
@@ -475,6 +893,50 @@ class KiwoomRestApiClient:
             d2_estimated_deposit=_number(body.get("d2_entra")),
             message="REST API 예수금 조회 완료",
         )
+
+    def request_unfilled_orders(
+        self,
+        account: str,
+        symbol: str = "",
+    ) -> list[UnfilledOrder]:
+        account = clean_account_number(account) or self._account
+        if not account or account != self._account:
+            raise KiwoomRestApiError("REST API 토큰의 계좌번호와 선택 계좌가 일치하지 않습니다.")
+        normalized = normalize_symbol(symbol)
+        body = self._post(
+            "ka10075",
+            "/api/dostk/acnt",
+            {
+                "all_stk_tp": "1" if normalized else "0",
+                "trde_tp": "0",
+                "stex_tp": "0",
+                **({"stk_cd": normalized} if normalized else {}),
+            },
+        )
+        rows = body.get("oso") or []
+        orders: list[UnfilledOrder] = []
+        if isinstance(rows, list):
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                side = self._trade_side(row.get("io_tp_nm"), row.get("trde_tp"))
+                if side is None:
+                    continue
+                orders.append(
+                    UnfilledOrder(
+                        order_no=str(row.get("ord_no") or "").strip(),
+                        symbol=normalize_symbol(str(row.get("stk_cd") or "").lstrip("AJQ")),
+                        symbol_name=str(row.get("stk_nm") or "").strip(),
+                        side=side,
+                        order_quantity=_integer(row.get("ord_qty")),
+                        unfilled_quantity=_integer(row.get("oso_qty")),
+                        order_price=_price(row.get("ord_pric")),
+                        current_price=_price(row.get("cur_prc")),
+                        timestamp=str(row.get("tm") or "").strip(),
+                        status=str(row.get("ord_stt") or "미체결").strip(),
+                    )
+                )
+        return orders
 
     def register_real_time_price(self, symbol: str, screen_no: str = "") -> str:
         del screen_no
@@ -582,32 +1044,55 @@ class KiwoomRestApiClient:
                     "실거래 주문을 차단했습니다."
                 )
             order_mode = "실거래"
-        if request.quantity <= 0:
+        if request.action != "CANCEL" and request.quantity <= 0:
             raise KiwoomRestApiError("주문 수량은 1주 이상이어야 합니다.")
         if request.side not in {"BUY", "SELL"}:
             raise KiwoomRestApiError("주문 구분은 매수 또는 매도여야 합니다.")
         if clean_account_number(request.account) != self._account:
             raise KiwoomRestApiError("REST API 토큰의 계좌번호와 주문 계좌가 일치하지 않습니다.")
 
-        api_id = "kt10000" if request.side == "BUY" else "kt10001"
-        body = self._post(
-            api_id,
-            "/api/dostk/ordr",
-            {
+        if request.action in {"MODIFY", "CANCEL"} and not request.original_order_no.strip():
+            raise KiwoomRestApiError("정정 또는 취소할 원주문번호를 입력해 주세요.")
+
+        if request.action == "MODIFY":
+            if request.price <= 0:
+                raise KiwoomRestApiError("정정 주문의 중간가를 다시 조회해 주세요.")
+            api_id = "kt10002"
+            request_body = {
+                "dmst_stex_tp": "KRX",
+                "orig_ord_no": request.original_order_no.strip(),
+                "stk_cd": normalize_symbol(request.symbol),
+                "mdfy_qty": str(request.quantity),
+                "mdfy_uv": str(int(request.price)),
+                "mdfy_cond_uv": "",
+            }
+        elif request.action == "CANCEL":
+            api_id = "kt10003"
+            request_body = {
+                "dmst_stex_tp": "KRX",
+                "orig_ord_no": request.original_order_no.strip(),
+                "stk_cd": normalize_symbol(request.symbol),
+                "cncl_qty": str(max(0, int(request.quantity))),
+            }
+        else:
+            api_id = "kt10000" if request.side == "BUY" else "kt10001"
+            trade_type = str(request.hoga or "3").lstrip("0") or "0"
+            request_body = {
                 "dmst_stex_tp": "KRX",
                 "stk_cd": normalize_symbol(request.symbol),
                 "ord_qty": str(request.quantity),
-                "ord_uv": "",
-                "trde_tp": "3",
+                "ord_uv": str(int(request.price)) if request.price > 0 else "",
+                "trde_tp": trade_type,
                 "cond_uv": "",
-            },
-        )
+            }
+        body = self._post(api_id, "/api/dostk/ordr", request_body)
         order_no = str(body.get("ord_no") or "").strip()
         if not order_no:
             raise KiwoomRestApiError("REST API 주문번호가 수신되지 않았습니다.")
         self.last_order_no = order_no
         side_name = "매수" if request.side == "BUY" else "매도"
-        return f"REST {order_mode} {side_name}주문 접수 완료 (주문번호 {order_no})"
+        action_name = {"NEW": "", "MODIFY": "정정 ", "CANCEL": "취소 "}[request.action]
+        return f"REST {order_mode} {side_name}{action_name}주문 접수 완료 (주문번호 {order_no})"
 
     def pump_messages(self) -> None:
         return
@@ -790,6 +1275,16 @@ class KiwoomRestApiClient:
         body: dict[str, Any],
         authorized: bool = True,
     ) -> dict[str, Any]:
+        return self._post_response(api_id, path, body, authorized=authorized).body
+
+    def _post_response(
+        self,
+        api_id: str,
+        path: str,
+        body: dict[str, Any],
+        authorized: bool = True,
+        extra_headers: dict[str, str] | None = None,
+    ) -> RestResponse:
         if authorized and not self._has_valid_token():
             raise KiwoomRestApiError("REST API 토큰이 없거나 만료되었습니다.")
         self._rate_limiter.acquire(api_id)
@@ -799,6 +1294,8 @@ class KiwoomRestApiClient:
         }
         if authorized:
             headers["authorization"] = f"Bearer {self._token}"
+        if extra_headers:
+            headers.update(extra_headers)
         response = self._requester(
             "POST",
             f"{self.base_url}{path}",
@@ -822,11 +1319,47 @@ class KiwoomRestApiClient:
                 )
             elif normalized_code == 8010:
                 message = (
-                    f"{message} 키움 REST API 포털의 IP 등록 현황과 "
+                    f"{message} 키움 계좌·IP 등록 페이지의 IP 등록 현황과 "
                     "현재 인터넷 공인 IP가 같은지 확인해 주세요."
                 )
             raise KiwoomRestApiError(f"{api_id} 오류 {normalized_code}: {message}")
-        return response_body
+        return RestResponse(response.status_code, response.headers, response_body)
+
+    @staticmethod
+    def _response_header(headers: dict[str, str], name: str) -> str:
+        target = name.casefold()
+        for key, value in headers.items():
+            if str(key).casefold() == target:
+                return str(value or "").strip()
+        return ""
+
+    @staticmethod
+    def _trade_side(label: Any, code: Any) -> str | None:
+        text = str(label or "").strip()
+        if "매수" in text:
+            return "BUY"
+        if "매도" in text:
+            return "SELL"
+        normalized_code = str(code or "").strip()
+        if normalized_code == "2":
+            return "BUY"
+        if normalized_code == "1":
+            return "SELL"
+        return None
+
+    @staticmethod
+    def _trade_timestamp(order_date: str, raw_time: Any) -> str:
+        digits = "".join(character for character in str(raw_time or "") if character.isdigit())
+        if len(digits) >= 14:
+            value = digits[:14]
+        elif len(digits) >= 6:
+            value = f"{order_date}{digits[-6:]}"
+        else:
+            value = f"{order_date}000000"
+        return (
+            f"{value[0:4]}-{value[4:6]}-{value[6:8]}T"
+            f"{value[8:10]}:{value[10:12]}:{value[12:14]}"
+        )
 
     def _has_valid_token(self) -> bool:
         return bool(self._token and self._clock() < self._token_expires_at - 30.0)
