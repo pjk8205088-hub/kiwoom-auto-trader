@@ -4,7 +4,7 @@ import math
 from collections import defaultdict
 from datetime import datetime
 
-from .models import OrderSide, PerformanceSummary, TradeExecution
+from .models import OrderBookSnapshot, OrderSide, PerformanceSummary, TradeExecution
 
 
 def krx_tick_size(price: float) -> int:
@@ -36,6 +36,32 @@ def midpoint_limit_price(best_ask: float, best_bid: float, side: OrderSide) -> i
     units = midpoint / tick
     rounded = math.floor(units) if side == "BUY" else math.ceil(units)
     return max(tick, int(rounded * tick))
+
+
+def automatic_limit_price(book: OrderBookSnapshot, side: OrderSide) -> tuple[int, str]:
+    """Choose an empty quote level first, then fall back to the midpoint."""
+
+    if not book.levels:
+        raise ValueError("자동가를 계산하려면 10호가 정보가 필요합니다.")
+
+    if side == "BUY":
+        empty_prices = [
+            float(level.bid_price)
+            for level in book.levels
+            if float(level.bid_price) > 0 and int(level.bid_quantity) <= 0
+        ]
+        if empty_prices:
+            return int(min(empty_prices)), "빈 매수호가 최하단"
+    else:
+        empty_prices = [
+            float(level.ask_price)
+            for level in book.levels
+            if float(level.ask_price) > 0 and int(level.ask_quantity) <= 0
+        ]
+        if empty_prices:
+            return int(max(empty_prices)), "빈 매도호가 최상단"
+
+    return midpoint_limit_price(book.best_ask, book.best_bid, side), "중간가 대체"
 
 
 def daily_return_percent(estimated_assets: float, realized_profit: float) -> float:

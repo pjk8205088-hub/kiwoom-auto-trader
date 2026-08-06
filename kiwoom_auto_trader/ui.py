@@ -22,7 +22,7 @@ from .app_security import (
     personalized_message,
     verify_secret,
 )
-from .audio_alerts import OrderVoiceNotifier
+from .audio_alerts import OrderVoiceNotifier, TradeSoundNotifier
 from .charting import moving_average, timeframe_label
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
@@ -41,7 +41,7 @@ from .models import (
     VolumeRankQuote,
     WatchlistQuote,
 )
-from .order_pricing import daily_return_percent, midpoint_limit_price
+from .order_pricing import automatic_limit_price, daily_return_percent, midpoint_limit_price
 from .price_triggers import OneShotPriceTrigger, OneShotPriceTriggerBook
 from .rest_api import KIWOOM_REST_GUIDE, KIWOOM_REST_PORTAL
 from .service import ACCOUNT_TRADE_HISTORY_DAYS, AutoTradingService
@@ -1087,6 +1087,10 @@ class TraderApp(tk.Tk):
             storage=Storage(db_path, trade_history_path=trade_history_path)
         )
         self.voice_notifier = OrderVoiceNotifier()
+        self.sound_notifier = TradeSoundNotifier(
+            self.service.storage.get_app_setting("audio.buy_sound", ""),
+            self.service.storage.get_app_setting("audio.sell_sound", ""),
+        )
         self._known_execution_keys: set[tuple[object, ...]] | None = None
         self._load_persisted_preferences()
         self._refresh_after_id: str | None = None
@@ -1157,6 +1161,7 @@ class TraderApp(tk.Tk):
             value=f"{self._saved_window_opacity}%"
         )
         self._build_ui()
+        self._apply_order_price_mode_labels()
         self._buy_percent_trace_id = self.buy_percent_var.trace_add(
             "write",
             lambda *_args: self._on_price_trigger_percent_changed("BUY"),
@@ -2013,8 +2018,8 @@ class TraderApp(tk.Tk):
         window = tk.Toplevel(self)
         self._application_settings_window = window
         window.title("카와이 증권 설정")
-        window.geometry("560x520")
-        window.minsize(520, 480)
+        window.geometry("560x650")
+        window.minsize(520, 600)
         window.transient(self)
         window.configure(background=UI_BACKGROUND)
 
@@ -2026,6 +2031,12 @@ class TraderApp(tk.Tk):
         opacity_var = tk.DoubleVar(value=self.window_opacity_var.get())
         opacity_text_var = tk.StringVar(value=f"{int(round(opacity_var.get()))}%")
         original_opacity = int(round(self.window_opacity_var.get()))
+        buy_sound_var = tk.StringVar(
+            value=self.service.storage.get_app_setting("audio.buy_sound", "") or ""
+        )
+        sell_sound_var = tk.StringVar(
+            value=self.service.storage.get_app_setting("audio.sell_sound", "") or ""
+        )
 
         body = ttk.Frame(window, padding=20)
         body.pack(fill="both", expand=True)
@@ -2094,6 +2105,23 @@ class TraderApp(tk.Tk):
             style="Muted.TLabel",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(7, 0))
 
+        sound_frame = ttk.LabelFrame(body, text="체결 효과음 (WAV)", padding=12)
+        sound_frame.pack(fill="x", pady=(12, 0))
+        for row, label, variable in (
+            (0, "매수 체결 효과음", buy_sound_var),
+            (1, "매도 체결 효과음", sell_sound_var),
+        ):
+            ttk.Label(sound_frame, text=label, width=16).grid(row=row, column=0, sticky="w", pady=3)
+            ttk.Entry(sound_frame, textvariable=variable).grid(
+                row=row, column=1, sticky="ew", padx=(8, 6), pady=3
+            )
+            ttk.Button(
+                sound_frame,
+                text="찾아보기",
+                command=lambda target=variable: self._choose_sound_file(target, window),
+            ).grid(row=row, column=2, pady=3)
+        sound_frame.columnconfigure(1, weight=1)
+
         def cancel() -> None:
             self.window_opacity_var.set(original_opacity)
             self._apply_window_opacity(original_opacity)
@@ -2114,9 +2142,20 @@ class TraderApp(tk.Tk):
                 tray_var.get(),
                 mask_var.get(),
                 opacity_var.get(),
+                buy_sound_var.get(),
+                sell_sound_var.get(),
             ),
         ).pack(side="right", padx=(0, 8))
         window.protocol("WM_DELETE_WINDOW", cancel)
+
+    def _choose_sound_file(self, variable: tk.StringVar, parent: tk.Misc) -> None:
+        selected = filedialog.askopenfilename(
+            parent=parent,
+            title="체결 효과음 선택",
+            filetypes=(("WAV 소리 파일", "*.wav"), ("모든 파일", "*.*")),
+        )
+        if selected:
+            variable.set(selected)
 
     def _save_application_settings(
         self,
@@ -2127,6 +2166,8 @@ class TraderApp(tk.Tk):
         minimize_to_tray: bool,
         account_mask: bool,
         opacity: object,
+        buy_sound: str = "",
+        sell_sound: str = "",
     ) -> None:
         name = str(nickname or "").strip()
         if not name:
@@ -2146,6 +2187,8 @@ class TraderApp(tk.Tk):
             "window.minimize_to_tray": bool(minimize_to_tray),
             "privacy.mask_account": bool(account_mask),
             "window.opacity": percent,
+            "audio.buy_sound": str(buy_sound or "").strip(),
+            "audio.sell_sound": str(sell_sound or "").strip(),
         }
         for key, value in values.items():
             self.service.storage.set_app_setting(key, value)
@@ -2158,6 +2201,7 @@ class TraderApp(tk.Tk):
         self._saved_window_opacity = percent
         self.window_opacity_var.set(percent)
         self._apply_window_opacity(percent)
+        self.sound_notifier.set_paths(buy_sound, sell_sound)
         try:
             self.wm_attributes("-topmost", self.always_on_top_enabled)
         except tk.TclError:
@@ -2489,6 +2533,9 @@ class TraderApp(tk.Tk):
         self.allow_real_order_var = tk.BooleanVar(value=False)
         self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
         self.trade_mode_var = tk.StringVar(value="AUTO")
+        self.order_price_mode_var = tk.StringVar(
+            value=self.service.storage.get_app_setting("orders.price_mode", "AUTO") or "AUTO"
+        )
         self.use_margin_var = tk.BooleanVar(value=False)
         self.original_order_no_var = tk.StringVar(value="")
         self.quick_slot_var = tk.IntVar(value=1)
@@ -2504,6 +2551,7 @@ class TraderApp(tk.Tk):
         self.auto_started_at_var = tk.StringVar(value="자동운용 시작 시각: 아직 시작하지 않음")
         self.auto_trade_capability_var = tk.StringVar(value="자동매매 OFF")
         self.auto_trade_detail_var = tk.StringVar(value="준비 확인: 계좌 연결이 필요합니다.")
+        self.minute_trade_value_var = tk.StringVar(value="1분 거래대금: 조회 전")
         self.holding_monitor_state_var = tk.StringVar(value="감시 OFF")
         self.holding_monitor_detail_var = tk.StringVar(
             value="자동운용을 시작하면 매입한 주식의 보유수량을 감시합니다."
@@ -2787,13 +2835,13 @@ class TraderApp(tk.Tk):
         )
         self.strategy_order_button = ttk.Button(
             trade_actions,
-            text="DMI 판단 후 중간가 주문",
+            text="DMI 판단 후 자동가 주문",
             command=lambda: self._evaluate_and_send_order(auto=False),
         )
         self.strategy_order_button.pack(side="left", padx=4)
         self.buy_button = ttk.Button(
             trade_actions,
-            text="중간가 매수",
+            text="자동가 매수",
             command=lambda: self._send_order("BUY", "NEW"),
         )
         self.buy_button.configure(style="Accent.TButton")
@@ -2803,7 +2851,7 @@ class TraderApp(tk.Tk):
         )
         self.sell_button = ttk.Button(
             trade_actions,
-            text="중간가 매도",
+            text="자동가 매도",
             command=lambda: self._send_order("SELL", "NEW"),
         )
         self.sell_button.configure(style="Blue.TButton")
@@ -2813,7 +2861,7 @@ class TraderApp(tk.Tk):
         )
         self.modify_button = ttk.Button(
             trade_actions,
-            text="중간가 정정",
+            text="자동가 정정",
             command=lambda: self._send_selected_order_action("MODIFY"),
         )
         self.modify_button.pack(side="left", padx=4)
@@ -2839,6 +2887,16 @@ class TraderApp(tk.Tk):
                 value=value,
                 style="Pill.TRadiobutton",
                 command=self._on_trade_mode_changed,
+            ).pack(side="left", padx=(4, 0))
+        ttk.Label(quick_settings, text="호가 방식").pack(side="left", padx=(12, 4))
+        for label, value in (("자동가", "AUTO"), ("중간가", "MIDPOINT")):
+            ttk.Radiobutton(
+                quick_settings,
+                text=label,
+                variable=self.order_price_mode_var,
+                value=value,
+                style="Pill.TRadiobutton",
+                command=self._on_order_price_mode_changed,
             ).pack(side="left", padx=(4, 0))
         ttk.Label(quick_settings, text="연동 그룹").pack(side="left", padx=(10, 4))
         group_combo = ttk.Combobox(
@@ -2886,6 +2944,11 @@ class TraderApp(tk.Tk):
         )
         self.chart_button.pack(side="left")
         ttk.Label(ready_row, textvariable=self.trade_ready_var).pack(side="left", padx=(10, 0))
+        ttk.Label(
+            ready_row,
+            textvariable=self.minute_trade_value_var,
+            foreground=UI_MUTED,
+        ).pack(side="right", padx=(8, 0))
 
         body = ttk.Frame(self, padding=(12, 6))
         self.main_body = body
@@ -4977,11 +5040,15 @@ class TraderApp(tk.Tk):
             try:
                 buy_midpoint = midpoint_limit_price(book.best_ask, book.best_bid, "BUY")
                 sell_midpoint = midpoint_limit_price(book.best_ask, book.best_bid, "SELL")
+                buy_auto, buy_reason = automatic_limit_price(book, "BUY")
+                sell_auto, sell_reason = automatic_limit_price(book, "SELL")
                 self.midpoint_status_var.set(
-                    f"중간가 지정가 · 매수 {buy_midpoint:,.0f}원 / 매도 {sell_midpoint:,.0f}원"
+                    f"자동가 매수 {buy_auto:,.0f}원({buy_reason}) / "
+                    f"매도 {sell_auto:,.0f}원({sell_reason}) · "
+                    f"중간가 {buy_midpoint:,.0f}/{sell_midpoint:,.0f}원"
                 )
             except ValueError:
-                self.midpoint_status_var.set("중간가: 유효한 매수1·매도1호가 대기")
+                self.midpoint_status_var.set("자동가·중간가: 유효한 매수1·매도1호가 대기")
         else:
             self.midpoint_status_var.set("중간가: 호가 조회 전")
 
@@ -5312,6 +5379,7 @@ class TraderApp(tk.Tk):
             self._tray_icon.stop()
             self._tray_icon = None
         self.voice_notifier.close()
+        self.sound_notifier.close()
         self.destroy()
 
     def _real_trading_account(self) -> bool:
@@ -7250,7 +7318,7 @@ class TraderApp(tk.Tk):
             )
             return
         action_label = {"NEW": "신규", "MODIFY": "정정", "CANCEL": "취소"}[normalized_action]
-        price_label = "중간가 지정" if normalized_action != "CANCEL" else "주문 취소"
+        price_label = f"{self._order_price_label()} 지정" if normalized_action != "CANCEL" else "주문 취소"
         if allow_real and not self._confirm_real_order(
             f"{price_label} {action_label} 주문",
             original_order_no=original_order_no,
@@ -7263,7 +7331,7 @@ class TraderApp(tk.Tk):
             quantity=self._order_quantity(),
             allow_real_order=allow_real,
             account_password=self._account_password_for_order(),
-            order_style="MIDPOINT",
+            order_style=self._selected_order_style(),
             action=normalized_action,
             original_order_no=original_order_no,
             use_margin=self.use_margin_var.get(),
@@ -7302,7 +7370,8 @@ class TraderApp(tk.Tk):
             quantity=self._order_quantity(),
             allow_real_order=allow_real,
             account_password=self._account_password_for_order(),
-            order_style="MIDPOINT",
+            order_style=self._selected_order_style(),
+            require_trade_value_filter=auto,
         )
         self._mark_holding_balance_refresh_due()
         self._schedule_recent_trade_history_refresh()
@@ -7318,7 +7387,7 @@ class TraderApp(tk.Tk):
             f"{title}을 실행하려고 합니다.\n"
             f"종목 {self.symbol_var.get()} / 주문수량 {self._order_quantity()}주"
             f"{original_text}\n"
-            "신규·정정 주문 가격은 매수1호가와 매도1호가의 중간가로 다시 계산합니다.\n"
+            f"신규·정정 주문 가격은 현재 선택한 {self._order_price_label()} 방식으로 다시 계산합니다.\n"
             "실거래 세션 승인이 켜져 있어 실제 주문이 전송될 수 있습니다.\n"
             "계좌, 종목, 수량을 다시 확인했습니다. 계속하시겠습니까?",
         )
@@ -7357,9 +7426,24 @@ class TraderApp(tk.Tk):
                     f"{normalize_symbol(getattr(execution, 'symbol', ''))} "
                     f"{SIDE_LABELS.get(side, side)} 체결 음성 안내",
                 )
+            sound_notifier = getattr(self, "sound_notifier", None)
+            if sound_notifier is not None and sound_notifier.play_execution(side):
+                self.service.storage.log(
+                    "INFO",
+                    "음향알림",
+                    f"{normalize_symbol(getattr(execution, 'symbol', ''))} "
+                    f"{SIDE_LABELS.get(side, side)} 체결 효과음 안내",
+                )
 
     def _refresh(self) -> None:
         snapshot = self.service.snapshot()
+        minute_value = float(getattr(snapshot, "latest_minute_trade_value", 0.0) or 0.0)
+        if minute_value > 0:
+            self.minute_trade_value_var.set(
+                f"최근 1분 거래대금 {minute_value / 100_000_000:,.1f}억원 · 자동주문 기준 40억원"
+            )
+        else:
+            self.minute_trade_value_var.set("최근 1분 거래대금: 조회 전")
         if snapshot.account_trade_history_updated_at is not None:
             self._announce_new_trade_executions(snapshot.account_trade_history)
         self._update_daily_traded_tags(snapshot.account_trade_history)
@@ -7783,7 +7867,7 @@ class TraderApp(tk.Tk):
             )
 
         range_start = (
-            datetime.now() - timedelta(days=ACCOUNT_TRADE_HISTORY_DAYS - 1)
+            datetime.now() - timedelta(days=ACCOUNT_TRADE_HISTORY_DAYS)
         ).strftime("%Y-%m-%d")
         recent_local_rows = [
             row
@@ -7912,7 +7996,7 @@ class TraderApp(tk.Tk):
             return (
                 f"거래 준비 완료: {snapshot.symbol} {name} | 계좌 {self._privacy_account_label(account)} | "
                 f"고정 운용금액 {baseline.capital_limit:,.0f}원 | "
-                f"{self._order_quantity()}주 중간가 지정 매수/매도 및 전략 판단 후 {order_mode} 가능"
+                f"{self._order_quantity()}주 {self._order_price_label()} 지정 매수/매도 및 전략 판단 후 {order_mode} 가능"
             )
         missing = []
         if not snapshot.account_info.connected:
@@ -8003,6 +8087,27 @@ class TraderApp(tk.Tk):
                 "자동매매 모드를 선택했습니다. 자동운용 시작 전 조건을 확인해 주세요.",
             )
         self._refresh()
+
+    def _selected_order_style(self) -> str:
+        mode = getattr(self, "order_price_mode_var", None)
+        return "AUTOMATIC" if mode is None or mode.get() == "AUTO" else "MIDPOINT"
+
+    def _order_price_label(self) -> str:
+        return "자동가" if self._selected_order_style() == "AUTOMATIC" else "중간가"
+
+    def _on_order_price_mode_changed(self) -> None:
+        value = self.order_price_mode_var.get()
+        self.service.storage.set_app_setting("orders.price_mode", value)
+        self._apply_order_price_mode_labels()
+        self.service.storage.log("INFO", "주문", f"주문 호가 방식을 {self._order_price_label()}(으)로 변경했습니다.")
+        self._refresh()
+
+    def _apply_order_price_mode_labels(self) -> None:
+        label = self._order_price_label()
+        self.strategy_order_button.configure(text=f"DMI 판단 후 {label} 주문")
+        self.buy_button.configure(text=f"{label} 매수")
+        self.sell_button.configure(text=f"{label} 매도")
+        self.modify_button.configure(text=f"{label} 정정")
 
     def _activate_quick_order(self, slot: int) -> None:
         index = max(0, min(9, int(slot) - 1))
@@ -8333,13 +8438,18 @@ class TraderApp(tk.Tk):
                     f"{direction_sign}{trigger.percent:g}% 목표 {trigger.target_price:,.0f}원에 도달했습니다. "
                     "설정을 해제하고 주문을 1회 요청합니다.",
                 )
+                selected_order_style = (
+                    self._selected_order_style()
+                    if hasattr(self, "_selected_order_style")
+                    else "MIDPOINT"
+                )
                 self.service.send_kiwoom_order(
                     account=self._account_for_api(),
                     side=trigger.side,
                     quantity=trigger.quantity,
                     allow_real_order=trigger.allow_real_order,
                     account_password=self._account_password_for_order(),
-                    order_style="MIDPOINT",
+                    order_style=selected_order_style,
                     use_margin=(
                         bool(self.use_margin_var.get())
                         if hasattr(self, "use_margin_var")

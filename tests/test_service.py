@@ -381,6 +381,71 @@ class AutoTradingServiceTests(unittest.TestCase):
             self.assertEqual(cancel_order.action, "CANCEL")
             self.assertEqual(cancel_order.original_order_no, "0000999")
 
+    def test_automatic_order_uses_empty_quote_level_before_midpoint_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "automatic-orders.sqlite3")
+            )
+            fake_rest = FakeRestApi()
+            fake_rest.request_order_book = lambda symbol: OrderBookSnapshot(
+                symbol=symbol,
+                levels=(
+                    OrderBookLevel(1, 4_090, 100, 4_080, 100),
+                    OrderBookLevel(2, 4_100, 50, 4_070, 0),
+                ),
+                source="테스트",
+            )
+            service.rest_api = fake_rest
+            service.start_rest_connection("app-key", "secret-key")
+            service.symbol = "005930"
+            service.current_price = 4_080
+            service.max_capital = 100_000
+
+            service.send_kiwoom_order(
+                "1234567890",
+                "BUY",
+                1,
+                order_style="AUTOMATIC",
+            )
+
+            self.assertEqual(len(fake_rest.order_requests), 1)
+            self.assertEqual(fake_rest.order_requests[0].price, 4_070)
+            self.assertEqual(fake_rest.order_requests[0].hoga, "00")
+
+    def test_automatic_strategy_waits_below_forty_eok_minute_trade_value(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(
+                storage=Storage(Path(directory) / "trade-value-gate.sqlite3")
+            )
+            fake_rest = FakeRestApi()
+            fake_rest.request_minute_candles = lambda symbol, interval=1, count=1: [
+                Candle(
+                    high=100_000,
+                    low=100_000,
+                    close=100_000,
+                    volume=10,
+                    timestamp="20260711101500",
+                )
+            ]
+            service.rest_api = fake_rest
+            service.start_rest_connection("app-key", "secret-key")
+            service.symbol = "005930"
+            service.current_price = 100_000
+            service.max_capital = 1_000_000
+            service.evaluate_strategy_with_market_data = lambda _symbol: TradeDecision(
+                "BUY", "거래대금 기준 테스트", "BULLISH"
+            )
+
+            decision = service.evaluate_and_send_order_with_market_data(
+                "1234567890",
+                quantity=1,
+                require_trade_value_filter=True,
+            )
+
+            self.assertEqual(decision.action, "HOLD")
+            self.assertIn("40억원", decision.reason)
+            self.assertEqual(fake_rest.order_calls, 0)
+
     def test_loads_order_book_and_unfilled_orders_into_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             service = AutoTradingService(

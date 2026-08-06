@@ -39,7 +39,11 @@ from .models import (
     WatchlistQuote,
 )
 from .order_manager import OrderManager
-from .order_pricing import midpoint_limit_price, performance_from_executions
+from .order_pricing import (
+    automatic_limit_price,
+    midpoint_limit_price,
+    performance_from_executions,
+)
 from .rest_api import KiwoomRestApiClient, KiwoomRestApiError
 from .risk import DailyLossCircuitBreaker, DailyRiskStatus, RiskManager
 from .storage import Storage
@@ -49,6 +53,7 @@ from .symbols import clean_account_number, known_symbol_name, mask_account_numbe
 
 API_ERRORS = (KiwoomOpenApiError, KiwoomRestApiError)
 ACCOUNT_TRADE_HISTORY_DAYS = 10
+MINUTE_TRADE_VALUE_GATE = 4_000_000_000.0
 
 
 @dataclass
@@ -85,6 +90,7 @@ class ServiceSnapshot:
     daily_performance: PerformanceSummary | None = None
     monthly_performance: PerformanceSummary | None = None
     daily_risk_status: DailyRiskStatus | None = None
+    latest_minute_trade_value: float = 0.0
     logs: list[tuple] = field(default_factory=list)
 
 
@@ -150,6 +156,8 @@ class AutoTradingService:
         self.last_api_message = ""
         self.last_order_account_access_verified: bool | None = None
         self.started_at: datetime | None = None
+        self.latest_minute_trade_value = 0.0
+        self.latest_minute_trade_value_timestamp = ""
 
     def configure(
         self,
@@ -561,6 +569,43 @@ class AutoTradingService:
             return midpoint_limit_price(book.best_ask, book.best_bid, normalized_side)
         except ValueError as exc:
             raise KiwoomOpenApiError(str(exc)) from exc
+
+    def automatic_price(self, side: str, symbol: str | None = None) -> tuple[int, str]:
+        normalized_side = "BUY" if side == "BUY" else "SELL"
+        book = self.request_order_book(symbol)
+        if book is None:
+            raise KiwoomOpenApiError(self.last_api_message or "호가 조회에 실패했습니다.")
+        try:
+            return automatic_limit_price(book, normalized_side)
+        except ValueError as exc:
+            raise KiwoomOpenApiError(str(exc)) from exc
+
+    def request_latest_minute_trade_value(self, symbol: str | None = None) -> float | None:
+        """Read the newest 1-minute candle and expose its value in won.
+
+        The filter is applied only when the connected Kiwoom API supplies minute
+        candles. Mock adapters and older adapters without this endpoint keep the
+        previous behavior so offline UI tests remain usable.
+        """
+        target = normalize_symbol(symbol or self.symbol)
+        api = self._active_api()
+        request_candles = getattr(api, "request_minute_candles", None)
+        if not target or not callable(request_candles):
+            return None
+        try:
+            candles = list(request_candles(target, interval=1, count=1) or [])
+        except API_ERRORS as exc:
+            self.last_api_message = str(exc)
+            self.storage.log("ERROR", "거래대금", self.last_api_message)
+            return None
+        if not candles:
+            self.latest_minute_trade_value = 0.0
+            self.latest_minute_trade_value_timestamp = ""
+            return 0.0
+        candle = candles[0]
+        self.latest_minute_trade_value = max(0.0, float(candle.close)) * max(0, int(candle.volume))
+        self.latest_minute_trade_value_timestamp = str(candle.timestamp or "")
+        return self.latest_minute_trade_value
 
     def request_unfilled_orders(
         self,
@@ -1203,12 +1248,20 @@ class AutoTradingService:
                 raise KiwoomOpenApiError("종목 세팅을 먼저 완료해 주세요.")
             if normalized_action in {"MODIFY", "CANCEL"} and not original_order_no.strip():
                 raise KiwoomOpenApiError("정정 또는 취소할 원주문번호를 선택해 주세요.")
-            if normalized_action in {"NEW", "MODIFY"} and normalized_style == "MIDPOINT":
-                order_price = float(self.midpoint_price(result_side, self.symbol))
+            if normalized_action in {"NEW", "MODIFY"} and normalized_style in {"MIDPOINT", "AUTOMATIC", "AUTO"}:
+                if normalized_style in {"AUTOMATIC", "AUTO"}:
+                    order_price, price_reason = self.automatic_price(result_side, self.symbol)
+                    self.storage.log(
+                        "INFO",
+                        "호가",
+                        f"{self.symbol} {result_side} 자동가 {order_price:,.0f}원 ({price_reason})",
+                    )
+                else:
+                    order_price = float(self.midpoint_price(result_side, self.symbol))
                 hoga = "00"
                 order_total = max(0, int(quantity)) * order_price
             elif normalized_action == "MODIFY":
-                raise KiwoomOpenApiError("정정 주문은 최신 중간가를 다시 조회해 전송합니다.")
+                raise KiwoomOpenApiError("정정 주문은 최신 자동가 또는 중간가를 다시 조회해 전송합니다.")
             elif normalized_action == "CANCEL":
                 order_price = 0.0
                 order_total = 0.0
@@ -1359,6 +1412,7 @@ class AutoTradingService:
         allow_real_order: bool = False,
         account_password: str = "",
         order_style: str = "MIDPOINT",
+        require_trade_value_filter: bool = False,
     ) -> TradeDecision | None:
         if quantity <= 0:
             self.last_api_message = "주문 수량은 1주 이상 선택해 주세요."
@@ -1371,6 +1425,17 @@ class AutoTradingService:
         if decision.action == "HOLD":
             self.storage.log("INFO", "자동주문", "전략 판단 결과 대기라 주문하지 않았습니다.")
             return decision
+
+        if require_trade_value_filter:
+            minute_value = self.request_latest_minute_trade_value(self.symbol)
+            if minute_value is not None and minute_value < MINUTE_TRADE_VALUE_GATE:
+                reason = (
+                    f"1분봉 거래대금 {minute_value / 100_000_000:,.1f}억원이 기준 "
+                    f"{MINUTE_TRADE_VALUE_GATE / 100_000_000:,.0f}억원보다 작아 자동주문을 대기합니다."
+                )
+                self.last_api_message = reason
+                self.storage.log("INFO", "자동주문", reason)
+                return replace(decision, action="HOLD", reason=reason)
 
         if decision.action == "BUY":
             existing_quantity = self._holding_quantity(self.symbol)
@@ -1518,6 +1583,7 @@ class AutoTradingService:
             daily_performance=self.performance_summary("daily"),
             monthly_performance=self.performance_summary("monthly"),
             daily_risk_status=self.daily_risk_status,
+            latest_minute_trade_value=self.latest_minute_trade_value,
             logs=self.storage.recent_logs(10),
         )
 

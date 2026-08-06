@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from queue import Queue
 from threading import Thread
+
+try:
+    import winsound
+except ImportError:  # pragma: no cover - available on Windows EXE runtime
+    winsound = None
 
 try:
     import pythoncom
@@ -70,3 +76,32 @@ class OrderVoiceNotifier:
             self._available = False
         finally:
             pythoncom.CoUninitialize()
+
+
+class TradeSoundNotifier:
+    """Play optional user-selected WAV sounds after a confirmed execution."""
+
+    def __init__(self, buy_path: str = "", sell_path: str = "") -> None:
+        self._paths = {"BUY": str(buy_path or ""), "SELL": str(sell_path or "")}
+        self.last_error = ""
+
+    def set_paths(self, buy_path: str = "", sell_path: str = "") -> None:
+        self._paths = {"BUY": str(buy_path or ""), "SELL": str(sell_path or "")}
+
+    def sound_path(self, side: str) -> str:
+        return self._paths.get(str(side or "").strip().upper(), "")
+
+    def play_execution(self, side: str) -> bool:
+        path = self.sound_path(side)
+        if not path or winsound is None or not Path(path).is_file():
+            return False
+        try:
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            self.last_error = ""
+            return True
+        except Exception as exc:  # pragma: no cover - Windows audio driver varies
+            self.last_error = str(exc)
+            return False
+
+    def close(self) -> None:
+        return None
