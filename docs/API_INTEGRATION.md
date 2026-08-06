@@ -56,17 +56,7 @@ OpenAPI+ 로그인 창은 키움 ActiveX가 직접 표시합니다. 보이지 �
 청산은 별도 최종 확인을 통과한 경우에만 실행합니다. 이 긴급 청산만 예외적으로
 시장가를 사용합니다.
 
-## 6. KB증권 연동
-
-KB증권 핀테크스토어는 가입 신청, 관리자 승인, 제휴 검토, 앱 등록과 별도
-자격증명이 필요한 파트너용 API입니다. 일반 키움 키를 KB에 재사용할 수 없습니다.
-프로그램의 `KB 제휴 API 안내`에서 공식 페이지를 열 수 있으며, 실제 KB 주문 연동은
-KB증권이 승인한 API 명세와 테스트 자격증명을 받은 뒤 별도 어댑터로 추가해야 합니다.
-
-- [KB증권 핀테크스토어](https://store.kbsec.com/login)
-- [KB증권 제휴 안내](https://store.kbsec.com/aboutpartner)
-
-## 7. 공식 참고 주소
+## 6. 공식 참고 주소
 
 - [키움 REST API 소개](https://openapi.kiwoom.com/intro?dummyVal=0)
 - [키움 REST API 관리](https://openapi.kiwoom.com/mgmt/VOpenApiRegView?dummyVal=0)

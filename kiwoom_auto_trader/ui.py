@@ -4961,16 +4961,6 @@ class TraderApp(tk.Tk):
                 "https://github.com/Kiwoom-Securities/Kiwoom-REST-API"
             ),
         ).pack(side="left", padx=4)
-        ttk.Button(
-            links,
-            text="KB 제휴 API 안내",
-            command=lambda: webbrowser.open("https://store.kbsec.com/aboutpartner"),
-        ).pack(side="left", padx=4)
-        ttk.Label(
-            links,
-            text="KB: 제휴 승인·별도 자격증명 필요",
-            foreground=UI_MUTED,
-        ).pack(side="left", padx=(8, 0))
 
         self.main_notebook.bind(
             "<<NotebookTabChanged>>",
