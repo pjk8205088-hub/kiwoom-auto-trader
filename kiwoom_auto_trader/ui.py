@@ -15,6 +15,8 @@ from time import monotonic
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from .app_security import (
+    DEFAULT_PIN,
+    DEFAULT_RECOVERY_PASSWORD,
     hash_secret,
     is_valid_pin,
     is_valid_recovery_password,
@@ -693,10 +695,10 @@ class PinSetupDialog(tk.Toplevel):
         self.resizable(False, False)
         self.result: tuple[str, str, str] | None = None
         self.nickname_var = tk.StringVar(value=nickname)
-        self.pin_var = tk.StringVar(value="")
-        self.pin_confirm_var = tk.StringVar(value="")
-        self.recovery_var = tk.StringVar(value="")
-        self.recovery_confirm_var = tk.StringVar(value="")
+        self.pin_var = tk.StringVar(value=DEFAULT_PIN)
+        self.pin_confirm_var = tk.StringVar(value=DEFAULT_PIN)
+        self.recovery_var = tk.StringVar(value=DEFAULT_RECOVERY_PASSWORD)
+        self.recovery_confirm_var = tk.StringVar(value=DEFAULT_RECOVERY_PASSWORD)
         self.status_var = tk.StringVar(value="")
 
         self.transient(parent)
@@ -732,7 +734,7 @@ class PinSetupDialog(tk.Toplevel):
 
         ttk.Label(
             body,
-            text="복구 비밀번호는 8자 이상이며 영문·숫자·특수문자를 모두 포함해야 합니다.",
+            text="복구 비밀번호는 기본값 222222이며, 직접 바꿀 때는 8자 이상 영문·숫자·특수문자를 권장합니다.",
             wraplength=420,
             style="Muted.TLabel",
         ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(7, 4))

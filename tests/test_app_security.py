@@ -22,6 +22,8 @@ class AppSecurityTests(unittest.TestCase):
         self.assertTrue(is_valid_pin("123456"))
         self.assertFalse(is_valid_pin("12345"))
         self.assertFalse(is_valid_pin("12A456"))
+        self.assertTrue(is_valid_pin("111111"))
+        self.assertTrue(is_valid_recovery_password("222222"))
         self.assertTrue(is_valid_recovery_password("Kawaii8!"))
         self.assertFalse(is_valid_recovery_password("Kawaii88"))
 
