@@ -1,8 +1,7 @@
 import unittest
 
-from kiwoom_auto_trader.models import OrderBookLevel, OrderBookSnapshot, TradeExecution
+from kiwoom_auto_trader.models import TradeExecution
 from kiwoom_auto_trader.order_pricing import (
-    automatic_limit_price,
     daily_return_percent,
     midpoint_limit_price,
     performance_from_executions,
@@ -10,25 +9,6 @@ from kiwoom_auto_trader.order_pricing import (
 
 
 class OrderPricingTests(unittest.TestCase):
-    def test_automatic_price_prefers_empty_quote_level(self):
-        book = OrderBookSnapshot(
-            "005930",
-            levels=(
-                OrderBookLevel(1, 4_135, 100, 4_130, 100),
-                OrderBookLevel(2, 4_140, 50, 4_125, 0),
-                OrderBookLevel(3, 4_145, 0, 4_120, 80),
-            ),
-        )
-        self.assertEqual(automatic_limit_price(book, "BUY"), (4_125, "빈 매수호가 최하단"))
-        self.assertEqual(automatic_limit_price(book, "SELL"), (4_145, "빈 매도호가 최상단"))
-
-    def test_automatic_price_falls_back_to_midpoint_without_empty_level(self):
-        book = OrderBookSnapshot(
-            "005930",
-            levels=(OrderBookLevel(1, 4_135, 100, 4_130, 100),),
-        )
-        self.assertEqual(automatic_limit_price(book, "BUY"), (4_130, "중간가 대체"))
-
     def test_midpoint_uses_side_aware_valid_tick(self):
         self.assertEqual(midpoint_limit_price(4_135, 4_130, "BUY"), 4_130)
         self.assertEqual(midpoint_limit_price(4_135, 4_130, "SELL"), 4_135)

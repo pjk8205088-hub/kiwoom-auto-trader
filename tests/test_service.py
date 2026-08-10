@@ -381,7 +381,7 @@ class AutoTradingServiceTests(unittest.TestCase):
             self.assertEqual(cancel_order.action, "CANCEL")
             self.assertEqual(cancel_order.original_order_no, "0000999")
 
-    def test_automatic_order_uses_empty_quote_level_before_midpoint_fallback(self):
+    def test_legacy_automatic_price_mode_is_forced_to_manual_midpoint(self):
         with tempfile.TemporaryDirectory() as directory:
             service = AutoTradingService(
                 storage=Storage(Path(directory) / "automatic-orders.sqlite3")
@@ -409,32 +409,17 @@ class AutoTradingServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(len(fake_rest.order_requests), 1)
-            self.assertEqual(fake_rest.order_requests[0].price, 4_070)
+            self.assertEqual(fake_rest.order_requests[0].price, 4_085)
             self.assertEqual(fake_rest.order_requests[0].hoga, "00")
 
-    def test_automatic_strategy_waits_below_forty_eok_minute_trade_value(self):
+    def test_strategy_order_api_is_disabled(self):
         with tempfile.TemporaryDirectory() as directory:
             service = AutoTradingService(
-                storage=Storage(Path(directory) / "trade-value-gate.sqlite3")
+                storage=Storage(Path(directory) / "strategy-orders-disabled.sqlite3")
             )
             fake_rest = FakeRestApi()
-            fake_rest.request_minute_candles = lambda symbol, interval=1, count=1: [
-                Candle(
-                    high=100_000,
-                    low=100_000,
-                    close=100_000,
-                    volume=10,
-                    timestamp="20260711101500",
-                )
-            ]
             service.rest_api = fake_rest
             service.start_rest_connection("app-key", "secret-key")
-            service.symbol = "005930"
-            service.current_price = 100_000
-            service.max_capital = 1_000_000
-            service.evaluate_strategy_with_market_data = lambda _symbol: TradeDecision(
-                "BUY", "거래대금 기준 테스트", "BULLISH"
-            )
 
             decision = service.evaluate_and_send_order_with_market_data(
                 "1234567890",
@@ -442,8 +427,8 @@ class AutoTradingServiceTests(unittest.TestCase):
                 require_trade_value_filter=True,
             )
 
-            self.assertEqual(decision.action, "HOLD")
-            self.assertIn("40억원", decision.reason)
+            self.assertIsNone(decision)
+            self.assertIn("자동매수", service.last_api_message)
             self.assertEqual(fake_rest.order_calls, 0)
 
     def test_loads_order_book_and_unfilled_orders_into_snapshot(self):
@@ -823,7 +808,7 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(sell.action, "SELL")
         self.assertIsNotNone(service.latest_dmi)
 
-    def test_dmi_buy_transition_sends_one_mock_order_per_candle(self):
+    def test_dmi_strategy_never_sends_an_order(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_dmi_order_test.sqlite3"
         if db.exists():
             db.unlink()
@@ -833,16 +818,13 @@ class AutoTradingServiceTests(unittest.TestCase):
         service.start_rest_connection("app-key", "secret-key")
         service.configure("005930", 1_000_000, StrategySettings(dmi_period=3))
         service.current_price = 100_000
-        candles = dmi_buy_transition_candles()
-        service.request_daily_dmi_candles = lambda _symbol=None: list(reversed(candles))
 
         first = service.evaluate_and_send_order_with_market_data("1234567890", quantity=3)
         duplicate = service.evaluate_and_send_order_with_market_data("1234567890", quantity=3)
 
-        self.assertEqual(first.action, "BUY")
-        self.assertEqual(duplicate.action, "HOLD")
-        self.assertEqual(fake_rest.order_calls, 1)
-        self.assertEqual(fake_rest.order_requests[0].quantity, 3)
+        self.assertIsNone(first)
+        self.assertIsNone(duplicate)
+        self.assertEqual(fake_rest.order_calls, 0)
 
     def test_retries_mock_sell_request_but_not_buy(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_sell_retry_test.sqlite3"
@@ -917,17 +899,17 @@ class AutoTradingServiceTests(unittest.TestCase):
             account_password="9876",
         )
 
-        self.assertEqual(decision.action, "BUY")
+        self.assertIsNone(decision)
         self.assertEqual(
             fake_openapi.balance_calls,
-            [("1234567890", "9876"), ("1234567890", "9876")],
+            [("1234567890", "9876")],
         )
-        self.assertEqual(len(fake_openapi.order_requests), 2)
+        self.assertEqual(len(fake_openapi.order_requests), 1)
         self.assertNotIn("9876", repr(service.storage.recent_logs(50)))
 
         blocked = service.send_kiwoom_order("1234567890", "BUY", 1)
 
-        self.assertEqual(len(fake_openapi.order_requests), 2)
+        self.assertEqual(len(fake_openapi.order_requests), 1)
         self.assertFalse(service.last_order_account_access_verified)
         self.assertIn("비밀번호", blocked)
 
@@ -1046,7 +1028,7 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(fake_rest.order_calls, 0)
         self.assertIn("종목 세팅", message)
 
-    def test_strategy_sell_uses_selected_share_quantity(self):
+    def test_strategy_sell_never_sends_an_order(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_sell_qty_test.sqlite3"
         if db.exists():
             db.unlink()
@@ -1055,25 +1037,14 @@ class AutoTradingServiceTests(unittest.TestCase):
         service.rest_api = fake_rest
         service.start_rest_connection("app-key", "secret-key")
         service.symbol = "005930"
-        service.balance_summary = BalanceSummary(
-            account="1234567890",
-            holdings=(Holding("005930", "삼성전자", 10, 70000, 72000, 20000, 2.8),),
-        )
-        fake_rest.balance_summary = service.balance_summary
-        service.evaluate_strategy_with_market_data = lambda _symbol: TradeDecision(
-            "SELL",
-            "테스트 매도",
-            "BEARISH",
-        )
 
         decision = service.evaluate_and_send_order_with_market_data(
             "1234567890",
             quantity=3,
         )
 
-        self.assertEqual(decision.action, "SELL")
-        self.assertEqual(fake_rest.order_calls, 1)
-        self.assertEqual(fake_rest.order_requests[0].quantity, 3)
+        self.assertIsNone(decision)
+        self.assertEqual(fake_rest.order_calls, 0)
 
 
 if __name__ == "__main__":

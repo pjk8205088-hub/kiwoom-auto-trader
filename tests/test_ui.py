@@ -17,7 +17,6 @@ from kiwoom_auto_trader.models import (
     VolumeRankQuote,
     WatchlistQuote,
 )
-from kiwoom_auto_trader.price_triggers import OneShotPriceTriggerBook
 from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
@@ -25,7 +24,6 @@ from kiwoom_auto_trader.ui import (
     _account_access_confirmed,
     _account_password_input_allowed,
     _account_password_session_ready,
-    _automatic_trade_readiness,
     _baseline_validation_message,
     _clamp_dmi_period,
     _clamp_window_opacity_percent,
@@ -71,7 +69,7 @@ class UiHelperTests(unittest.TestCase):
         )
         executions = [
             TradeExecution(
-                timestamp="2026-07-27T10:15:03",
+                timestamp="2026-08-08T10:15:03",
                 side="BUY",
                 symbol="012200",
                 symbol_name="계양전기",
@@ -83,7 +81,7 @@ class UiHelperTests(unittest.TestCase):
         ]
         local_rows = [
             (
-                "2026-07-27T10:15:00",
+                "2026-08-08T10:15:00",
                 "BUY",
                 "012200",
                 "계양전기",
@@ -96,7 +94,7 @@ class UiHelperTests(unittest.TestCase):
                 "주문 접수",
             ),
             (
-                "2026-07-27T10:16:00",
+                "2026-08-08T10:16:00",
                 "SELL",
                 "012200",
                 "계양전기",
@@ -122,9 +120,9 @@ class UiHelperTests(unittest.TestCase):
             executions,
             local_rows,
         )
-        self.assertEqual(recent_rows[0][0], "07-27 10:16:00")
+        self.assertEqual(recent_rows[0][0], "08-08 10:16:00")
         self.assertEqual(recent_rows[0][5], "실패")
-        self.assertEqual(recent_rows[1][0], "07-27 10:15:03")
+        self.assertEqual(recent_rows[1][0], "08-08 10:15:03")
         self.assertEqual(recent_rows[1][5], "체결")
 
     def test_clamps_dmi_period_to_button_range(self):
@@ -223,31 +221,6 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(trend, "▼ 하락 -0.69%")
         self.assertEqual(direction, "down")
 
-    def test_automatic_trade_readiness_is_independent_of_market_hours(self):
-        ready, missing = _automatic_trade_readiness(
-            account_ready=True,
-            symbol_ready=True,
-            quantity_ready=True,
-            baseline_ready=True,
-            authorization_ready=True,
-            automation_configured=True,
-        )
-
-        self.assertTrue(ready)
-        self.assertEqual(missing, ())
-
-        ready, missing = _automatic_trade_readiness(
-            account_ready=True,
-            symbol_ready=False,
-            quantity_ready=False,
-            baseline_ready=True,
-            authorization_ready=True,
-            automation_configured=True,
-        )
-
-        self.assertFalse(ready)
-        self.assertEqual(missing, ("종목 세팅", "주문 수량"))
-
     def test_holding_monitor_turns_blue_only_for_running_owned_symbol(self):
         balance = BalanceSummary(
             account="12345678",
@@ -271,7 +244,7 @@ class UiHelperTests(unittest.TestCase):
             balance_summary=balance,
         )
         self.assertFalse(stopped)
-        self.assertIn("자동운용 중지", stopped_detail)
+        self.assertIn("실시간 감시 중지", stopped_detail)
 
     def test_holding_monitor_stays_off_when_selected_stock_is_not_owned(self):
         balance = BalanceSummary(
@@ -587,208 +560,6 @@ class UiHelperTests(unittest.TestCase):
             _market_session_text(None, False, True),
             "실시간 등록 완료·다음 체결 대기",
         )
-
-    def test_live_rest_price_setting_arms_session_without_mock_connection(self):
-        class Variable:
-            def __init__(self, value=""):
-                self.value = value
-
-            def get(self):
-                return self.value
-
-            def set(self, value):
-                self.value = value
-
-        account_info = SimpleNamespace(connection_method="REST API", server_type="실거래")
-        service = SimpleNamespace(
-            account_info=account_info,
-            real_time_symbol="005930",
-            storage=SimpleNamespace(log=MagicMock()),
-            configure=MagicMock(),
-            request_daily_dmi_candles=MagicMock(),
-            latest_dmi=SimpleNamespace(pattern_state="BEARISH"),
-            pattern_state="BEARISH",
-            strategy=SimpleNamespace(settings=SimpleNamespace(dmi_period=14)),
-        )
-        app = SimpleNamespace(
-            service=service,
-            symbol_var=Variable("005930"),
-            buy_percent_var=Variable(""),
-            sell_percent_var=Variable("0.2"),
-            allow_real_order_var=Variable(False),
-            price_triggers=OneShotPriceTriggerBook(),
-            _real_order_session_armed=False,
-            _require_live_connection=lambda: True,
-            _selected_symbol_ready=lambda: True,
-            _account_connection_confirmed=lambda _info: True,
-            _password_session_ready=lambda: True,
-            _selected_trading_baseline=lambda: TradingBaseline(
-                "005930",
-                1_000_000,
-                70_000,
-                "2026-07-19",
-            ),
-            _order_quantity=lambda: 2,
-            _account_for_api=lambda: "12345678",
-            _operating_capital=lambda: 1_000_000,
-            _settings=lambda: None,
-            _real_order_session_ready=lambda: False,
-            _update_price_trigger_status=MagicMock(),
-            _refresh=MagicMock(),
-            _clear_real_order_authorization=MagicMock(),
-        )
-
-        with patch("kiwoom_auto_trader.ui.messagebox.askyesno", return_value=True):
-            TraderApp._arm_price_trigger(app, "SELL")
-
-        trigger = app.price_triggers.get("SELL")
-        self.assertIsNotNone(trigger)
-        self.assertTrue(trigger.allow_real_order)
-        self.assertEqual(trigger.account, "12345678")
-        self.assertEqual(trigger.target_price, 69_860)
-        self.assertTrue(app._real_order_session_armed)
-        self.assertTrue(app.allow_real_order_var.get())
-        service.storage.log.assert_any_call(
-            "WARN",
-            "주문",
-            "1234-5678 실거래 자동주문 세션을 가격 조건 설정과 함께 승인했습니다.",
-        )
-
-    def test_live_price_setting_waits_without_being_consumed_before_market_open(self):
-        triggers = OneShotPriceTriggerBook()
-        triggers.arm(
-            "BUY",
-            "005930",
-            70_000,
-            0.2,
-            2,
-            allow_real_order=True,
-            account="12345678",
-        )
-        app = SimpleNamespace(
-            _processing_price_triggers=False,
-            _real_trading_account=lambda: True,
-            _regular_market_open=lambda: False,
-            price_triggers=triggers,
-        )
-
-        processed = TraderApp._process_one_shot_price_triggers(app)
-
-        self.assertFalse(processed)
-        self.assertIsNotNone(triggers.get("BUY"))
-
-    def test_open_market_crossed_targets_send_automatic_buy_and_sell(self):
-        class Variable:
-            def __init__(self, value=""):
-                self.value = value
-
-            def get(self):
-                return self.value
-
-            def set(self, value):
-                self.value = value
-
-        for side, current_price in (("BUY", 4_165), ("SELL", 4_125)):
-            with self.subTest(side=side):
-                triggers = OneShotPriceTriggerBook()
-                triggers.arm(
-                    side,
-                    "012200",
-                    4_130,
-                    0.02 if side == "BUY" else 0.1,
-                    2,
-                    allow_real_order=True,
-                    account="12345678",
-                )
-                service = SimpleNamespace(
-                    account_info=SimpleNamespace(
-                        connection_method="REST API",
-                        server_type="실거래",
-                    ),
-                    storage=SimpleNamespace(log=MagicMock()),
-                    pattern_state="BULLISH" if side == "BUY" else "BEARISH",
-                    configure=MagicMock(),
-                    current_price=0,
-                    send_kiwoom_order=MagicMock(return_value="주문 접수 완료"),
-                )
-                app = SimpleNamespace(
-                    service=service,
-                    _processing_price_triggers=False,
-                    _real_trading_account=lambda: True,
-                    _regular_market_open=lambda: True,
-                    _selected_current_price=lambda: current_price,
-                    price_triggers=triggers,
-                    symbol_var=Variable("012200"),
-                    buy_percent_var=Variable("0.02"),
-                    sell_percent_var=Variable("0.1"),
-                    _update_price_trigger_status=MagicMock(),
-                    _account_connection_confirmed=lambda _info: True,
-                    _account_for_api=lambda: "12345678",
-                    _real_order_session_ready=lambda: True,
-                    _operating_capital=lambda: 70_000,
-                    _settings=lambda: None,
-                    _account_password_for_order=lambda: "",
-                    _handle_order_account_verification=MagicMock(),
-                    _mark_holding_balance_refresh_due=MagicMock(),
-                    _schedule_recent_trade_history_refresh=MagicMock(),
-                )
-
-                processed = TraderApp._process_one_shot_price_triggers(app)
-
-                self.assertTrue(processed)
-                self.assertIsNone(triggers.get(side))
-                service.send_kiwoom_order.assert_called_once_with(
-                    account="12345678",
-                    side=side,
-                    quantity=2,
-                    allow_real_order=True,
-                    account_password="",
-                    order_style="MIDPOINT",
-                    use_margin=False,
-                )
-
-    def test_crossed_price_waits_until_dmi_direction_matches(self):
-        class Variable:
-            def __init__(self, value=""):
-                self.value = value
-
-            def get(self):
-                return self.value
-
-            def set(self, value):
-                self.value = value
-
-        triggers = OneShotPriceTriggerBook()
-        triggers.arm(
-            "BUY",
-            "012200",
-            4_130,
-            0.02,
-            2,
-            allow_real_order=True,
-            account="12345678",
-        )
-        service = SimpleNamespace(
-            account_info=SimpleNamespace(connection_method="REST API", server_type="실거래"),
-            pattern_state="BEARISH",
-            storage=SimpleNamespace(log=MagicMock()),
-            send_kiwoom_order=MagicMock(),
-        )
-        app = SimpleNamespace(
-            service=service,
-            _processing_price_triggers=False,
-            _real_trading_account=lambda: True,
-            _regular_market_open=lambda: True,
-            _selected_current_price=lambda: 4_165,
-            price_triggers=triggers,
-            symbol_var=Variable("012200"),
-        )
-
-        processed = TraderApp._process_one_shot_price_triggers(app)
-
-        self.assertFalse(processed)
-        self.assertIsNotNone(triggers.get("BUY"))
-        service.send_kiwoom_order.assert_not_called()
 
     def test_main_status_hides_internal_mock_state_and_account_details(self):
         snapshot = ServiceSnapshot(

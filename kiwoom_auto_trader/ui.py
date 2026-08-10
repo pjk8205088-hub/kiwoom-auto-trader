@@ -41,8 +41,7 @@ from .models import (
     VolumeRankQuote,
     WatchlistQuote,
 )
-from .order_pricing import automatic_limit_price, daily_return_percent, midpoint_limit_price
-from .price_triggers import OneShotPriceTrigger, OneShotPriceTriggerBook
+from .order_pricing import daily_return_percent, midpoint_limit_price
 from .rest_api import KIWOOM_REST_GUIDE, KIWOOM_REST_PORTAL
 from .service import ACCOUNT_TRADE_HISTORY_DAYS, AutoTradingService
 from .storage import Storage
@@ -390,26 +389,6 @@ def _market_session_text(
     return f"정규장 비운영({status.operation_code or '미확인'})"
 
 
-def _automatic_trade_readiness(
-    account_ready: bool,
-    symbol_ready: bool,
-    quantity_ready: bool,
-    baseline_ready: bool,
-    authorization_ready: bool,
-    automation_configured: bool,
-) -> tuple[bool, tuple[str, ...]]:
-    checks = (
-        (account_ready, "계좌 연결"),
-        (symbol_ready, "종목 세팅"),
-        (quantity_ready, "주문 수량"),
-        (baseline_ready, "금액 세팅"),
-        (authorization_ready, "실거래 승인"),
-        (automation_configured, "자동매수·자동매도 조건"),
-    )
-    missing = tuple(label for ready, label in checks if not ready)
-    return not missing, missing
-
-
 def _holding_monitor_display(
     running: bool,
     symbol: str,
@@ -437,8 +416,8 @@ def _holding_monitor_display(
     quantity = max(0, int(holding.quantity)) if holding is not None else 0
     if not running:
         if quantity > 0:
-            return False, f"{name} 주식 {quantity}주 보유 · 자동운용 중지로 감시하지 않음"
-        return False, "자동운용을 시작하면 매입한 주식의 보유수량을 감시합니다."
+            return False, f"{name} 주식 {quantity}주 보유 · 실시간 감시 중지"
+        return False, "실시간 감시를 시작하면 선택 종목의 보유수량을 확인합니다."
     if balance_summary is None:
         return False, f"{name} 주식 · 계좌 잔고 확인 중"
     if quantity > 0:
@@ -617,8 +596,8 @@ class KiwoomRestLoginDialog(tk.Toplevel):
             "실전투자 AppKey와 SecretKey를 사용하세요. 키움 계좌·IP 등록 페이지에 "
             "사용 계좌와 현재 공인 IP가 등록되어 있어야 합니다. 연결 후 프로그램이 "
             "토큰과 등록 계좌를 다시 확인하고 계좌·잔고·시세를 조회합니다. "
-            "모의투자 연결 없이 실전투자로 바로 설정할 수 있습니다. 실제 주문은 자동매수·자동매도 "
-            "설정 시 실행 세션을 승인하고, 키움 정규장 장중 신호가 확인된 경우에만 활성화됩니다."
+            "모의투자 연결 없이 실전투자로 바로 설정할 수 있습니다. 실제 주문은 화면의 "
+            "수동 주문 버튼을 누르고 최종 확인한 경우에만 전송됩니다."
         )
 
     def _choose_key_file(self, target: tk.StringVar, key_name: str) -> None:
@@ -1125,8 +1104,6 @@ class TraderApp(tk.Tk):
         self.watchlist_detail_vars: dict[str, tk.StringVar] = {}
         self._chart_render_state: dict[tk.Canvas, dict] = {}
         self._chart_visible_count = 100
-        self.price_triggers = OneShotPriceTriggerBook()
-        self._processing_price_triggers = False
         self._trading_baseline: TradingBaseline | None = None
         self._real_order_session_armed = False
         self._last_auto_market_state: tuple[str, str, bool] | None = None
@@ -1162,14 +1139,6 @@ class TraderApp(tk.Tk):
         )
         self._build_ui()
         self._apply_order_price_mode_labels()
-        self._buy_percent_trace_id = self.buy_percent_var.trace_add(
-            "write",
-            lambda *_args: self._on_price_trigger_percent_changed("BUY"),
-        )
-        self._sell_percent_trace_id = self.sell_percent_var.trace_add(
-            "write",
-            lambda *_args: self._on_price_trigger_percent_changed("SELL"),
-        )
         self._account_password_trace_id = self.account_password_var.trace_add(
             "write",
             self._on_account_password_changed,
@@ -2526,16 +2495,8 @@ class TraderApp(tk.Tk):
         self.order_qty_var = tk.StringVar(value="0")
         self.order_qty_display_var = tk.StringVar(value="0주")
         self.current_price_display_var = tk.StringVar(value="미조회")
-        self.buy_percent_var = tk.StringVar(value="")
-        self.sell_percent_var = tk.StringVar(value="")
-        self.buy_trigger_status_var = tk.StringVar(value="입력 후 설정 필요")
-        self.sell_trigger_status_var = tk.StringVar(value="입력 후 설정 필요")
         self.allow_real_order_var = tk.BooleanVar(value=False)
-        self.kiwoom_auto_order_var = tk.BooleanVar(value=True)
-        self.trade_mode_var = tk.StringVar(value="AUTO")
-        self.order_price_mode_var = tk.StringVar(
-            value=self.service.storage.get_app_setting("orders.price_mode", "AUTO") or "AUTO"
-        )
+        self.order_price_mode_var = tk.StringVar(value="MIDPOINT")
         self.use_margin_var = tk.BooleanVar(value=False)
         self.original_order_no_var = tk.StringVar(value="")
         self.quick_slot_var = tk.IntVar(value=1)
@@ -2548,13 +2509,12 @@ class TraderApp(tk.Tk):
         self.circuit_liquidation_var = tk.BooleanVar(value=False)
         self.log_chart_var = tk.BooleanVar(value=False)
         self.market_session_var = tk.StringVar(value="장 상태: 키움 신호 대기")
-        self.auto_started_at_var = tk.StringVar(value="자동운용 시작 시각: 아직 시작하지 않음")
-        self.auto_trade_capability_var = tk.StringVar(value="자동매매 OFF")
-        self.auto_trade_detail_var = tk.StringVar(value="준비 확인: 계좌 연결이 필요합니다.")
-        self.minute_trade_value_var = tk.StringVar(value="1분 거래대금: 조회 전")
+        self.auto_started_at_var = tk.StringVar(value="실시간 감시 시작 시각: 아직 시작하지 않음")
+        self.auto_trade_capability_var = tk.StringVar(value="자동주문 미사용")
+        self.auto_trade_detail_var = tk.StringVar(value="자동매수·자동매도 기능이 제거되었습니다. 수동 주문만 사용할 수 있습니다.")
         self.holding_monitor_state_var = tk.StringVar(value="감시 OFF")
         self.holding_monitor_detail_var = tk.StringVar(
-            value="자동운용을 시작하면 매입한 주식의 보유수량을 감시합니다."
+            value="실시간 감시를 시작하면 매입한 주식의 보유수량을 감시합니다."
         )
         self.account_summary_var = tk.StringVar(
             value="계좌 창: 로그인 전입니다. 키움 로그인 후 계좌번호 앞4자리+뒤4자리와 잔고가 표시됩니다."
@@ -2651,11 +2611,11 @@ class TraderApp(tk.Tk):
         actions.columnconfigure(4, weight=1)
         ttk.Button(
             actions,
-            text="자동 운용 시작",
+            text="실시간 감시 시작",
             command=self._start,
             style="Accent.TButton",
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(actions, text="자동 운용 중지", command=self._stop).grid(
+        ttk.Button(actions, text="실시간 감시 중지", command=self._stop).grid(
             row=0,
             column=1,
             sticky="w",
@@ -2677,10 +2637,10 @@ class TraderApp(tk.Tk):
             style="Danger.Badge.TLabel",
         )
         self.holding_monitor_badge.grid(row=2, column=0, sticky="w", pady=(5, 0))
-        ttk.Checkbutton(
+        ttk.Label(
             actions,
-            text="자동운용 시 일봉 DMI 강약 전환 주문도 함께 사용",
-            variable=self.kiwoom_auto_order_var,
+            text="수동 주문 전용",
+            foreground=UI_MUTED,
         ).grid(row=0, column=3, sticky="w", padx=(8, 0))
         ttk.Label(actions, textvariable=self.market_session_var).grid(
             row=0,
@@ -2770,7 +2730,7 @@ class TraderApp(tk.Tk):
         ).pack(side="left")
         self.allow_real_order_checkbutton = ttk.Checkbutton(
             kiwoom_controls,
-            text="실거래 자동주문 승인",
+            text="실거래 수동주문 허용",
             variable=self.allow_real_order_var,
             command=self._toggle_real_order_authorization,
         )
@@ -2816,8 +2776,14 @@ class TraderApp(tk.Tk):
             padx=2,
         )
 
-        self._build_percent_trigger_box(order_controls, "BUY", 2)
-        self._build_percent_trigger_box(order_controls, "SELL", 3)
+        manual_info = ttk.LabelFrame(order_controls, text="수동 주문 안내", padding=8)
+        manual_info.grid(row=0, column=2, columnspan=2, sticky="nsew", padx=(4, 0))
+        ttk.Label(
+            manual_info,
+            text="수동 주문 전용\n매수·매도 버튼을 눌렀을 때만 주문합니다.",
+            foreground=UI_MUTED,
+            justify="left",
+        ).pack(anchor="w")
 
         api_actions = ttk.Frame(controls)
         api_actions.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
@@ -2833,15 +2799,9 @@ class TraderApp(tk.Tk):
             side="left",
             padx=4,
         )
-        self.strategy_order_button = ttk.Button(
-            trade_actions,
-            text="DMI 판단 후 자동가 주문",
-            command=lambda: self._evaluate_and_send_order(auto=False),
-        )
-        self.strategy_order_button.pack(side="left", padx=4)
         self.buy_button = ttk.Button(
             trade_actions,
-            text="자동가 매수",
+            text="수동 매수",
             command=lambda: self._send_order("BUY", "NEW"),
         )
         self.buy_button.configure(style="Accent.TButton")
@@ -2851,7 +2811,7 @@ class TraderApp(tk.Tk):
         )
         self.sell_button = ttk.Button(
             trade_actions,
-            text="자동가 매도",
+            text="수동 매도",
             command=lambda: self._send_order("SELL", "NEW"),
         )
         self.sell_button.configure(style="Blue.TButton")
@@ -2861,7 +2821,7 @@ class TraderApp(tk.Tk):
         )
         self.modify_button = ttk.Button(
             trade_actions,
-            text="자동가 정정",
+            text="수동 정정",
             command=lambda: self._send_selected_order_action("MODIFY"),
         )
         self.modify_button.pack(side="left", padx=4)
@@ -2878,26 +2838,8 @@ class TraderApp(tk.Tk):
         quick_settings.pack(fill="x")
         quick_buttons = ttk.Frame(quick_row)
         quick_buttons.pack(fill="x", pady=(5, 0))
-        ttk.Label(quick_settings, text="주문 모드").pack(side="left")
-        for label, value in (("자동", "AUTO"), ("수동", "MANUAL")):
-            ttk.Radiobutton(
-                quick_settings,
-                text=label,
-                variable=self.trade_mode_var,
-                value=value,
-                style="Pill.TRadiobutton",
-                command=self._on_trade_mode_changed,
-            ).pack(side="left", padx=(4, 0))
-        ttk.Label(quick_settings, text="호가 방식").pack(side="left", padx=(12, 4))
-        for label, value in (("자동가", "AUTO"), ("중간가", "MIDPOINT")):
-            ttk.Radiobutton(
-                quick_settings,
-                text=label,
-                variable=self.order_price_mode_var,
-                value=value,
-                style="Pill.TRadiobutton",
-                command=self._on_order_price_mode_changed,
-            ).pack(side="left", padx=(4, 0))
+        ttk.Label(quick_settings, text="수동 주문 전용").pack(side="left")
+        ttk.Label(quick_settings, text="중간가 지정가").pack(side="left", padx=(10, 4))
         ttk.Label(quick_settings, text="연동 그룹").pack(side="left", padx=(10, 4))
         group_combo = ttk.Combobox(
             quick_settings,
@@ -2944,11 +2886,6 @@ class TraderApp(tk.Tk):
         )
         self.chart_button.pack(side="left")
         ttk.Label(ready_row, textvariable=self.trade_ready_var).pack(side="left", padx=(10, 0))
-        ttk.Label(
-            ready_row,
-            textvariable=self.minute_trade_value_var,
-            foreground=UI_MUTED,
-        ).pack(side="right", padx=(8, 0))
 
         body = ttk.Frame(self, padding=(12, 6))
         self.main_body = body
@@ -2978,7 +2915,7 @@ class TraderApp(tk.Tk):
         chart_header = ttk.Frame(self.dmi_chart_tab)
         chart_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         chart_header.columnconfigure(0, weight=1)
-        self.chart_caption_var = tk.StringVar(value="키움 3분봉 | 자동매매 기준 일봉 DMI")
+        self.chart_caption_var = tk.StringVar(value="키움 3분봉 | 일봉 DMI 조회")
         ttk.Label(
             chart_header,
             textvariable=self.chart_caption_var,
@@ -3339,7 +3276,7 @@ class TraderApp(tk.Tk):
         self.compact_trend_var = tk.StringVar(value="─ 보합 0.00%")
         self.compact_assets_var = tk.StringVar(value="추정자산 -")
         self.compact_profit_var = tk.StringVar(value="당일 실현손익 -")
-        self.compact_run_state_var = tk.StringVar(value="자동매매 OFF")
+        self.compact_run_state_var = tk.StringVar(value="실시간 감시 OFF")
 
         panel = ttk.Frame(
             self,
@@ -3561,7 +3498,7 @@ class TraderApp(tk.Tk):
             f"당일 실현손익 {realized:+,.0f}원" if performance is not None else "당일 실현손익 -"
         )
         running = bool(getattr(snapshot, "running", False))
-        self.compact_run_state_var.set("자동매매 ON" if running else "자동매매 OFF")
+        self.compact_run_state_var.set("실시간 감시 ON" if running else "실시간 감시 OFF")
         self.compact_run_state_badge.configure(
             style="Success.Badge.TLabel" if running else "Danger.Badge.TLabel"
         )
@@ -4717,7 +4654,6 @@ class TraderApp(tk.Tk):
             set_at=datetime.now().isoformat(timespec="seconds"),
         )
         self.service.storage.save_trading_baseline(baseline)
-        self._clear_all_price_triggers()
         self._apply_trading_baseline(baseline)
         self.service.configure(baseline.symbol, baseline.capital_limit, self._settings())
         self.service.storage.log(
@@ -4738,7 +4674,6 @@ class TraderApp(tk.Tk):
             "고정 운용금액 리세팅으로 실거래 세션 승인을 해제했습니다."
         )
         self.service.storage.remove_trading_baseline(baseline.symbol)
-        self._clear_all_price_triggers()
         self._apply_trading_baseline(None)
         self.service.configure(baseline.symbol, self._operating_capital(), self._settings())
         self.service.storage.log(
@@ -4747,49 +4682,6 @@ class TraderApp(tk.Tk):
             f"{baseline.symbol}의 고정 운용금액과 기준가를 리세팅했습니다.",
         )
         self._refresh()
-
-    def _build_percent_trigger_box(self, parent: ttk.Frame, side: str, column: int) -> None:
-        is_buy = side == "BUY"
-        title = (
-            "오를때 DMI 자동 매수"
-            if is_buy
-            else "내릴때 DMI 자동 매도"
-        )
-        sign = "+" if is_buy else "-"
-        button_text = "DMI 매수 설정" if is_buy else "DMI 매도 설정"
-        percentage_var = self.buy_percent_var if is_buy else self.sell_percent_var
-        status_var = self.buy_trigger_status_var if is_buy else self.sell_trigger_status_var
-
-        box = ttk.LabelFrame(parent, text=title, padding=8)
-        box.grid(row=0, column=column, sticky="nsew", padx=(4, 0 if column == 3 else 4))
-        ttk.Label(box, text=sign, font=(UI_DISPLAY_FONT, 11, "bold")).grid(row=0, column=0)
-        ttk.Entry(
-            box,
-            textvariable=percentage_var,
-            width=6,
-            justify="right",
-            validate="key",
-            validatecommand=(self.register(_percentage_input_allowed), "%P"),
-        ).grid(row=0, column=1, padx=(4, 2))
-        ttk.Label(box, text="%").grid(row=0, column=2, padx=(0, 6))
-        button = ttk.Button(
-            box,
-            text=button_text,
-            width=13,
-            command=lambda: self._arm_price_trigger(side),
-        )
-        button.grid(row=0, column=3)
-        ttk.Label(box, textvariable=status_var, foreground=UI_MUTED).grid(
-            row=1,
-            column=0,
-            columnspan=4,
-            sticky="w",
-            pady=(5, 0),
-        )
-        if is_buy:
-            self.buy_trigger_button = button
-        else:
-            self.sell_trigger_button = button
 
     def _build_market_control_tab(self) -> None:
         tab = ttk.Frame(self.main_notebook, padding=(10, 10, 10, 8))
@@ -4838,11 +4730,6 @@ class TraderApp(tk.Tk):
             text="손실 한도 설정",
             command=self._set_daily_loss_limit,
         ).pack(side="left", padx=(6, 8))
-        ttk.Checkbutton(
-            risk_row,
-            text="한도 도달 시 전량청산",
-            variable=self.circuit_liquidation_var,
-        ).pack(side="left")
         self.daily_risk_badge = ttk.Label(
             risk_row,
             textvariable=self.daily_risk_status_var,
@@ -5030,15 +4917,12 @@ class TraderApp(tk.Tk):
             try:
                 buy_midpoint = midpoint_limit_price(book.best_ask, book.best_bid, "BUY")
                 sell_midpoint = midpoint_limit_price(book.best_ask, book.best_bid, "SELL")
-                buy_auto, buy_reason = automatic_limit_price(book, "BUY")
-                sell_auto, sell_reason = automatic_limit_price(book, "SELL")
                 self.midpoint_status_var.set(
-                    f"자동가 매수 {buy_auto:,.0f}원({buy_reason}) / "
-                    f"매도 {sell_auto:,.0f}원({sell_reason}) · "
-                    f"중간가 {buy_midpoint:,.0f}/{sell_midpoint:,.0f}원"
+                    f"수동 중간가 매수 {buy_midpoint:,.0f}원 / "
+                    f"매도 {sell_midpoint:,.0f}원"
                 )
             except ValueError:
-                self.midpoint_status_var.set("자동가·중간가: 유효한 매수1·매도1호가 대기")
+                self.midpoint_status_var.set("중간가: 유효한 매수1·매도1호가 대기")
         else:
             self.midpoint_status_var.set("중간가: 호가 조회 전")
 
@@ -5087,7 +4971,6 @@ class TraderApp(tk.Tk):
                 f"당일 주문 잠금 · {risk_status.loss_rate:.2f}%"
             )
             self.daily_risk_badge.configure(style="Danger.Badge.TLabel")
-            self._queue_daily_risk_liquidation(risk_status.trade_date)
         else:
             self.daily_risk_status_var.set(
                 f"정상 · {risk_status.loss_rate:.2f}% / -{risk_status.limit_percent:g}%"
@@ -5134,6 +5017,8 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _queue_daily_risk_liquidation(self, trade_date: str) -> None:
+        return
+
         if (
             not self.circuit_liquidation_var.get()
             or self._daily_risk_handling
@@ -5261,36 +5146,29 @@ class TraderApp(tk.Tk):
 
     def _start(self) -> None:
         self._save_settings()
-        if self.kiwoom_auto_order_var.get():
-            if not self._require_live_connection():
-                return
-            if not self._trading_ready():
-                self._show_warning("자동운용 준비 필요", self.trade_ready_var.get())
-                return
-            if self.service.real_time_symbol != normalize_symbol(self.symbol_var.get()):
-                self.service.register_real_time_price(self.symbol_var.get())
-            if self._real_trading_account() and not self._regular_market_open():
-                self.service.storage.log(
-                    "INFO",
-                    "자동주문",
-                    "자동운용을 준비했습니다. 키움 장시작시간(0s) 또는 "
-                    "주식체결(0B) 장중 신호가 확인되면 일봉 DMI 전략 판단과 주문을 시작합니다.",
-                )
+        if not self._require_live_connection():
+            return
+        if self._selected_symbol_ready() and self.service.real_time_symbol != normalize_symbol(self.symbol_var.get()):
+            self.service.register_real_time_price(self.symbol_var.get())
         self.service.start()
         self._mark_holding_balance_refresh_due()
         self._refresh_holding_balance_if_due(force=True)
+        self.service.storage.log(
+            "INFO",
+            "보유감시",
+            "실시간 감시를 시작했습니다. 주문은 수동 버튼으로만 전송됩니다.",
+        )
         self._refresh()
 
     def _stop(self) -> None:
         self.service.stop()
         self._mark_holding_balance_refresh_due()
-        self._clear_real_order_authorization("자동운용 중지로 실거래 세션 승인을 해제했습니다.")
+        self._clear_real_order_authorization("실시간 감시 중지로 실거래 수동주문 승인을 해제했습니다.")
         self._refresh()
 
     def _emergency_stop(self) -> None:
         self.service.emergency_stop()
         self._mark_holding_balance_refresh_due()
-        self._clear_all_price_triggers()
         account_ready = self._account_connection_confirmed(self.service.account_info)
         account = self._account_for_api()
         allow_real = self._real_order_session_ready()
@@ -5299,7 +5177,7 @@ class TraderApp(tk.Tk):
             can_send = False
         if can_send and messagebox.askyesno(
             "긴급 일괄 청산 최종 확인",
-            "자동운용을 중지했습니다.\n"
+            "실시간 감시를 중지했습니다.\n"
             "이어서 모든 미체결 주문을 취소하고 보유 전 종목을 시장가로 전량 매도합니다.\n\n"
             "실제 주문이 전송될 수 있습니다. 계속하시겠습니까?",
         ):
@@ -5322,7 +5200,7 @@ class TraderApp(tk.Tk):
         elif account_ready and self._real_trading_account() and not allow_real:
             self._show_warning(
                 "긴급 정지만 완료",
-                "자동운용은 중지했지만 실거래 세션 승인이 없어 실제 취소·청산 주문은 보내지 않았습니다.",
+                "실시간 감시는 중지했지만 실거래 수동주문 승인이 없어 실제 취소·청산 주문은 보내지 않았습니다.",
             )
         self._clear_real_order_authorization("긴급 정지로 실거래 세션 승인을 해제했습니다.")
         self._refresh()
@@ -5424,13 +5302,13 @@ class TraderApp(tk.Tk):
             return
 
         confirmed = messagebox.askyesno(
-            "실거래 자동주문 세션 승인",
+            "실거래 수동주문 세션 승인",
             f"계좌 {mask_account_number(account)} / 종목 {self.symbol_var.get()} "
             f"{self.symbol_name_var.get()}\n"
             f"주문 수량 {self._order_quantity()}주 / 고정 운용금액 {baseline.capital_limit:,.0f}원\n\n"
-            "키움 정규장 장중 신호가 확인되면 DMI 전환 또는 설정한 가격 조건에 따라 "
-            "추가 확인 없이 실제 시장가 주문이 전송될 수 있습니다.\n"
-            "이 승인은 앱 종료, 자동운용 중지, 연결 해제 또는 긴급 정지 시 사라집니다.\n\n"
+            "이 승인은 화면의 수동 주문 버튼을 눌렀을 때 실거래 전송을 허용합니다.\n"
+            "자동매수·자동매도 주문은 제공하지 않습니다. 앱 종료, 감시 중지, 연결 해제 "
+            "또는 긴급 정지 시 승인이 사라집니다.\n\n"
             "계좌, 종목, 수량과 운용금액을 확인했으며 이번 실행 세션의 실거래를 승인하시겠습니까?",
         )
         self._real_order_session_armed = confirmed
@@ -5439,7 +5317,7 @@ class TraderApp(tk.Tk):
             self.service.storage.log(
                 "WARN",
                 "주문",
-                f"{mask_account_number(account)} 실거래 자동주문 세션을 사용자가 승인했습니다.",
+                f"{mask_account_number(account)} 실거래 수동주문 세션을 사용자가 승인했습니다.",
             )
         self._refresh()
 
@@ -6456,7 +6334,6 @@ class TraderApp(tk.Tk):
         digits = "".join(character for character in self.symbol_var.get() if character.isdigit())
         if len(digits) != 6 or digits == "000000":
             self.symbol_name_var.set("")
-            self._clear_all_price_triggers()
             self._load_trading_baseline("000000")
             self.current_price_display_var.set("미조회")
             messagebox.showwarning("종목번호 확인", "000000이 아닌 6자리 종목번호를 입력해 주세요.")
@@ -6476,7 +6353,6 @@ class TraderApp(tk.Tk):
         name = self.service.lookup_symbol_name(normalized)
         self.symbol_name_var.set(name or "조회 실패")
         if normalized != previous_symbol:
-            self._clear_all_price_triggers()
             self.current_price_display_var.set("미조회")
         self.service.storage.log(
             "INFO" if name else "WARN",
@@ -6633,7 +6509,7 @@ class TraderApp(tk.Tk):
     def _run_tick(self) -> None:
         current_price = self._selected_current_price()
         if current_price <= 0:
-            self.service.last_api_message = "키움 실제 현재가를 불러온 뒤 자동운용을 시작해 주세요."
+            self.service.last_api_message = "키움 실제 현재가를 불러온 뒤 수동 주문을 준비해 주세요."
             self._refresh()
             return
         self.service.step(current_price)
@@ -6823,7 +6699,7 @@ class TraderApp(tk.Tk):
             text=(
                 f"{self.service.symbol} {self.service.symbol_name} | 키움 {label}봉 | "
                 f"차트 DMI({self.service.strategy.settings.dmi_period}봉) | "
-                f"자동매매 기준 일봉 DMI({self.service.strategy.settings.dmi_period}일)"
+                f"키움 일봉 DMI({self.service.strategy.settings.dmi_period}일)"
             ),
             font=(UI_DISPLAY_FONT, 13, "bold"),
         ).pack(anchor="w", pady=(0, 8))
@@ -7334,38 +7210,10 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _evaluate_and_send_order(self, auto: bool = False) -> None:
-        if not self._ensure_live_connection():
-            if not auto:
-                self._show_warning("키움 API 연결 필요", self.service.account_info.message)
-            self._refresh()
-            return
-        if not self._trading_ready():
-            if not auto:
-                self._show_warning("주문 준비 필요", self.trade_ready_var.get())
-            return
-        allow_real = self._real_order_session_ready()
-        if allow_real and not self._regular_market_open():
-            if not auto:
-                self._show_warning(
-                    "정규장 장중 확인 필요",
-                    "키움 장시작시간(0s) 또는 주식체결(0B)에서 정규장 장중을 "
-                    "확인한 뒤 실거래 주문할 수 있습니다.",
-                )
-            return
-        if allow_real and not auto and not self._confirm_real_order("전략 판단 후 주문"):
-            return
-        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
-        self.service.evaluate_and_send_order_with_market_data(
-            account=self._account_for_api(),
-            quantity=self._order_quantity(),
-            allow_real_order=allow_real,
-            account_password=self._account_password_for_order(),
-            order_style=self._selected_order_style(),
-            require_trade_value_filter=auto,
+        self._show_warning(
+            "자동주문 사용 안 함",
+            "자동매수·자동매도 기능이 제거되었습니다. 화면의 수동 매수·매도 버튼만 사용해 주세요.",
         )
-        self._mark_holding_balance_refresh_due()
-        self._schedule_recent_trade_history_refresh()
-        self._handle_order_account_verification()
         self._refresh()
 
     def _confirm_real_order(self, title: str, original_order_no: str = "") -> bool:
@@ -7427,23 +7275,12 @@ class TraderApp(tk.Tk):
 
     def _refresh(self) -> None:
         snapshot = self.service.snapshot()
-        minute_value = float(getattr(snapshot, "latest_minute_trade_value", 0.0) or 0.0)
-        if minute_value > 0:
-            self.minute_trade_value_var.set(
-                f"최근 1분 거래대금 {minute_value / 100_000_000:,.1f}억원 · 자동주문 기준 40억원"
-            )
-        else:
-            self.minute_trade_value_var.set("최근 1분 거래대금: 조회 전")
         if snapshot.account_trade_history_updated_at is not None:
             self._announce_new_trade_executions(snapshot.account_trade_history)
         self._update_daily_traded_tags(snapshot.account_trade_history)
         self._draw_brand_rail()
         self._update_compact_monitor(snapshot)
         self._update_current_price_display()
-        if self._process_one_shot_price_triggers():
-            snapshot = self.service.snapshot()
-            self._update_compact_monitor(snapshot)
-            self._update_current_price_display()
         account = snapshot.account_info
         connection_method = account.connection_method or "OpenAPI+"
         if not account.connected:
@@ -7469,13 +7306,11 @@ class TraderApp(tk.Tk):
         if snapshot.started_at is not None:
             started_label = snapshot.started_at.strftime("%Y-%m-%d %H:%M:%S")
             running_label = "운용 중" if snapshot.running else "최근 시작"
-            self.auto_started_at_var.set(f"자동운용 시작 시각: {started_label} · {running_label}")
+            self.auto_started_at_var.set(f"실시간 감시 시작 시각: {started_label} · {running_label}")
         self._update_auto_trade_capability(snapshot)
         self._update_holding_monitor(snapshot)
         self._update_side_summary(snapshot)
         self._update_dmi_display(snapshot.dmi)
-        self._update_price_trigger_status("BUY")
-        self._update_price_trigger_status("SELL")
         self.status_text.set(self._format_main_status(snapshot))
         if snapshot.symbol_name and self.symbol_name_var.get() != snapshot.symbol_name:
             self.symbol_name_var.set(snapshot.symbol_name)
@@ -7488,7 +7323,7 @@ class TraderApp(tk.Tk):
         self.chart_caption_var.set(
             f"{snapshot.symbol} {snapshot.symbol_name} | {chart_label}봉 {len(snapshot.chart_candles)}개 | "
             f"{snapshot.chart_source} | 차트 DMI({self.service.strategy.settings.dmi_period}봉) | "
-            f"자동매매 기준 일봉 DMI({self.service.strategy.settings.dmi_period}일)"
+            f"키움 일봉 DMI({self.service.strategy.settings.dmi_period}일)"
         )
         self._update_trade_buttons()
         holdings = list(snapshot.balance_summary.holdings) if snapshot.balance_summary else []
@@ -7526,7 +7361,7 @@ class TraderApp(tk.Tk):
             self._render_watchlist_rows()
         if not self._compact_mode:
             self.after_idle(self._draw_main_dmi_chart)
-        self._schedule_auto_tick()
+        self._schedule_refresh_tick()
         self._schedule_chart_refresh()
         self._schedule_volume_rank_refresh()
         self._schedule_trade_value_rank_refresh()
@@ -7553,29 +7388,11 @@ class TraderApp(tk.Tk):
             self.dmi_state_badge.configure(style="Neutral.Badge.TLabel")
 
     def _update_auto_trade_capability(self, snapshot) -> None:
-        real_account = snapshot.account_info.server_type == "실거래"
-        authorization_ready = not real_account or self._real_order_session_ready()
-        automation_configured = bool(
-            self.kiwoom_auto_order_var.get()
-            or self.price_triggers.get("BUY")
-            or self.price_triggers.get("SELL")
+        self.auto_trade_capability_var.set("자동주문 미사용")
+        self.auto_trade_capability_badge.configure(style="Neutral.Badge.TLabel")
+        self.auto_trade_detail_var.set(
+            "자동매수·자동매도 기능은 제공하지 않습니다. 수동 주문만 사용할 수 있습니다."
         )
-        ready, missing = _automatic_trade_readiness(
-            account_ready=self._account_connection_confirmed(snapshot.account_info),
-            symbol_ready=self._selected_symbol_ready(),
-            quantity_ready=self._order_quantity_valid(),
-            baseline_ready=self._selected_trading_baseline() is not None,
-            authorization_ready=authorization_ready,
-            automation_configured=automation_configured,
-        )
-        if ready:
-            self.auto_trade_capability_var.set("자동매매 가능 ON")
-            self.auto_trade_capability_badge.configure(style="Success.Badge.TLabel")
-            self.auto_trade_detail_var.set("준비 완료 · 장 운영 시간과 무관한 준비 상태")
-            return
-        self.auto_trade_capability_var.set("자동매매 OFF")
-        self.auto_trade_capability_badge.configure(style="Danger.Badge.TLabel")
-        self.auto_trade_detail_var.set(f"준비 필요: {', '.join(missing)}")
 
     def _update_holding_monitor(self, snapshot) -> None:
         monitor_balance = snapshot.balance_summary
@@ -7685,61 +7502,9 @@ class TraderApp(tk.Tk):
             return
         if self.service.running:
             self._refresh_holding_balance_if_due()
-        has_dmi_price_trigger = bool(
-            self.price_triggers.get("BUY") or self.price_triggers.get("SELL")
-        )
-        if has_dmi_price_trigger:
-            if self._trading_ready():
-                self.service.request_daily_dmi_candles(
-                    self.symbol_var.get(),
-                    log_result=False,
-                )
-                self._process_one_shot_price_triggers()
-            self._refresh()
-            return
-        if self.service.running:
-            if self.kiwoom_auto_order_var.get():
-                if self._trading_ready():
-                    market_status = self.service.latest_market_session_status()
-                    if self._real_trading_account():
-                        market_code = market_status.operation_code if market_status else ""
-                        market_source = market_status.source if market_status else ""
-                        market_open = self._regular_market_open()
-                        market_state = (market_code, market_source, market_open)
-                        if market_state != self._last_auto_market_state:
-                            self._last_auto_market_state = market_state
-                            if market_open:
-                                self.service.storage.log(
-                                    "WARN",
-                                    "자동주문",
-                                    "키움 정규장 장중 실시간 신호를 확인해 실거래 자동운용을 시작합니다.",
-                                )
-                            else:
-                                self.service.storage.log(
-                                    "INFO",
-                                    "자동주문",
-                                    f"{_market_session_text(market_status, market_open, self.service.is_real_time_registered())} "
-                                    "상태이므로 "
-                                    "주문 없이 대기합니다.",
-                                )
-                        if not market_open:
-                            self._refresh()
-                            return
-                    self._evaluate_and_send_order(auto=True)
-                else:
-                    self.service.stop()
-                    self.service.storage.log(
-                        "ERROR",
-                        "자동주문",
-                        "키움 API 연결 또는 주문 준비 상태가 해제되어 자동운용을 중지했습니다.",
-                    )
-                    self._refresh()
-            else:
-                self._run_tick()
-        else:
-            self._refresh()
+        self._refresh()
 
-    def _schedule_auto_tick(self) -> None:
+    def _schedule_refresh_tick(self) -> None:
         if self._refresh_after_id is None:
             self._refresh_after_id = self.after(3000, self._auto_tick)
 
@@ -7755,8 +7520,6 @@ class TraderApp(tk.Tk):
             self._update_current_price_display()
             if self._compact_mode:
                 self._update_compact_monitor(self.service)
-            if self._process_one_shot_price_triggers():
-                self._refresh()
             self._update_watchlist_live_row()
             if self.service.chart_timeframe.endswith("s"):
                 candles = self.service.chart_candles_for_display()
@@ -7764,7 +7527,7 @@ class TraderApp(tk.Tk):
                 self.chart_caption_var.set(
                     f"{self.service.symbol} {self.service.symbol_name} | {label}봉 {len(candles)}개 | "
                     f"{self.service.chart_source} | 차트 DMI({self.service.strategy.settings.dmi_period}봉) | "
-                    f"자동매매 기준 일봉 DMI({self.service.strategy.settings.dmi_period}일)"
+                    f"키움 일봉 DMI({self.service.strategy.settings.dmi_period}일)"
                 )
                 if not self._compact_mode:
                     self._draw_main_dmi_chart()
@@ -7986,7 +7749,7 @@ class TraderApp(tk.Tk):
             return (
                 f"거래 준비 완료: {snapshot.symbol} {name} | 계좌 {self._privacy_account_label(account)} | "
                 f"고정 운용금액 {baseline.capital_limit:,.0f}원 | "
-                f"{self._order_quantity()}주 {self._order_price_label()} 지정 매수/매도 및 전략 판단 후 {order_mode} 가능"
+                f"{self._order_quantity()}주 수동 {self._order_price_label()} 매수/매도 {order_mode} 가능"
             )
         missing = []
         if not snapshot.account_info.connected:
@@ -8040,7 +7803,6 @@ class TraderApp(tk.Tk):
 
         if self.service.running:
             self.service.stop()
-        self._clear_all_price_triggers()
         if self._real_order_session_ready():
             self._clear_real_order_authorization(
                 "DMI 계산 기간 변경으로 실거래 세션 승인을 해제했습니다."
@@ -8059,45 +7821,31 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _on_trade_mode_changed(self) -> None:
-        automatic = self.trade_mode_var.get() == "AUTO"
-        self.kiwoom_auto_order_var.set(automatic)
-        if not automatic:
-            if self.service.running:
-                self.service.stop()
-            self._clear_all_price_triggers()
-            self.service.storage.log(
-                "INFO",
-                "주문모드",
-                "수동매매 모드로 전환해 자동운용과 일회성 자동주문을 중지했습니다.",
-            )
-        else:
-            self.service.storage.log(
-                "INFO",
-                "주문모드",
-                "자동매매 모드를 선택했습니다. 자동운용 시작 전 조건을 확인해 주세요.",
-            )
+        self.service.storage.log(
+            "WARN",
+            "주문모드",
+            "자동매수·자동매도 기능이 제거되어 수동 주문만 사용할 수 있습니다.",
+        )
         self._refresh()
 
     def _selected_order_style(self) -> str:
-        mode = getattr(self, "order_price_mode_var", None)
-        return "AUTOMATIC" if mode is None or mode.get() == "AUTO" else "MIDPOINT"
+        return "MIDPOINT"
 
     def _order_price_label(self) -> str:
-        return "자동가" if self._selected_order_style() == "AUTOMATIC" else "중간가"
+        return "중간가"
 
     def _on_order_price_mode_changed(self) -> None:
-        value = self.order_price_mode_var.get()
-        self.service.storage.set_app_setting("orders.price_mode", value)
+        self.order_price_mode_var.set("MIDPOINT")
+        self.service.storage.set_app_setting("orders.price_mode", "MIDPOINT")
         self._apply_order_price_mode_labels()
-        self.service.storage.log("INFO", "주문", f"주문 호가 방식을 {self._order_price_label()}(으)로 변경했습니다.")
+        self.service.storage.log("INFO", "주문", "수동 주문은 중간가 지정가로 전송합니다.")
         self._refresh()
 
     def _apply_order_price_mode_labels(self) -> None:
         label = self._order_price_label()
-        self.strategy_order_button.configure(text=f"DMI 판단 후 {label} 주문")
-        self.buy_button.configure(text=f"{label} 매수")
-        self.sell_button.configure(text=f"{label} 매도")
-        self.modify_button.configure(text=f"{label} 정정")
+        self.buy_button.configure(text=f"수동 {label} 매수")
+        self.sell_button.configure(text=f"수동 {label} 매도")
+        self.modify_button.configure(text=f"수동 {label} 정정")
 
     def _activate_quick_order(self, slot: int) -> None:
         index = max(0, min(9, int(slot) - 1))
@@ -8161,303 +7909,10 @@ class TraderApp(tk.Tk):
         current_price = self._selected_current_price()
         self.current_price_display_var.set(f"{current_price:,.0f}원" if current_price > 0 else "미조회")
 
-    def _arm_price_trigger(self, side: str) -> None:
-        if not self._require_live_connection():
-            return
-        if not self._selected_symbol_ready():
-            messagebox.showwarning("종목 세팅 필요", "6자리 종목번호를 입력하고 '종목 세팅'을 먼저 눌러 주세요.")
-            return
-        if not self._account_connection_confirmed(self.service.account_info):
-            messagebox.showwarning("계좌 연결 필요", "계좌 연결과 잔고 확인을 먼저 완료해 주세요.")
-            return
-        if (
-            self.service.account_info.connection_method != "REST API"
-            and not self._password_session_ready()
-        ):
-            messagebox.showwarning(
-                "계좌 비밀번호 확인 필요",
-                "화면의 계좌 비밀번호를 숫자 4~8자리로 입력하고 '비밀번호 세팅'을 먼저 눌러 주세요.",
-            )
-            return
-
-        baseline = self._selected_trading_baseline()
-        if baseline is None:
-            messagebox.showwarning(
-                "금액 세팅 필요",
-                "계좌 주문가능금액과 현재가를 확인한 뒤 '금액 세팅'을 먼저 눌러 주세요.",
-            )
-            return
-
-        quantity = self._order_quantity()
-        percentage_var = self.buy_percent_var if side == "BUY" else self.sell_percent_var
-        try:
-            percent = float(percentage_var.get().strip())
-            candidate = OneShotPriceTrigger.create(
-                side,
-                self.symbol_var.get(),
-                baseline.reference_price,
-                percent,
-                quantity,
-                account=self._account_for_api(),
-            )
-        except (TypeError, ValueError) as exc:
-            messagebox.showwarning("자동주문 설정 확인", str(exc))
-            return
-
-        self.service.configure(
-            candidate.symbol,
-            self._operating_capital(),
-            self._settings(),
-        )
-        self.service.request_daily_dmi_candles(candidate.symbol)
-        if self.service.latest_dmi is None:
-            messagebox.showwarning(
-                "일봉 DMI 계산 필요",
-                f"DMI({self.service.strategy.settings.dmi_period}일) 계산에 필요한 "
-                f"키움 일봉을 불러오지 못했습니다. 연결과 종목을 확인해 주세요.\n\n"
-                f"{self.service.last_api_message}",
-            )
-            return
-
-        allow_real_order = False
-        session_armed_by_setting = False
-        direction = "상승" if side == "BUY" else "하락"
-        direction_sign = "+" if side == "BUY" else "-"
-        required_dmi = "강세" if side == "BUY" else "약세"
-        current_dmi = PATTERN_VALUE_TO_LABEL.get(self.service.pattern_state, "계산 전")
-        if self.service.account_info.server_type != "모의투자":
-            session_approval_needed = not self._real_order_session_ready()
-            action = "매수" if side == "BUY" else "매도"
-            credential_note = (
-                "키움 REST 접근토큰으로 계좌와 잔고를 다시 확인합니다."
-                if self.service.account_info.connection_method == "REST API"
-                else "화면에서 세팅한 계좌 비밀번호로 주문 직전 잔고를 다시 확인합니다."
-            )
-            session_note = (
-                "이 설정과 동시에 현재 실행의 실거래 자동주문 세션을 승인합니다.\n"
-                "모의투자 연결은 필요하지 않으며, 정규장 시작 전에는 주문하지 않고 대기합니다."
-                if session_approval_needed
-                else "현재 실행의 실거래 자동주문 세션 승인을 사용합니다."
-            )
-            if not messagebox.askyesno(
-                "실거래 일회성 자동주문 확인",
-                f"일봉 DMI({self.service.strategy.settings.dmi_period}일)가 {required_dmi}이고\n"
-                f"고정 기준가 {candidate.base_price:,.0f}원 대비 "
-                f"{direction_sign}{candidate.percent:.2f}% {direction} 조건을 함께 만족하면\n"
-                f"목표가 {candidate.target_price:,.0f}원 도달 시 {candidate.quantity}주를 자동 {action}합니다.\n\n"
-                f"현재 DMI 상태: {current_dmi}\n"
-                f"{credential_note}\n{session_note}\n"
-                "조건 충족 시 추가 확인 없이 실제 주문이 1회 전송됩니다. 설정하시겠습니까?",
-            ):
-                return
-            if session_approval_needed:
-                self._real_order_session_armed = True
-                self.allow_real_order_var.set(True)
-                session_armed_by_setting = True
-                self.service.storage.log(
-                    "WARN",
-                    "주문",
-                    f"{mask_account_number(candidate.account)} 실거래 자동주문 세션을 "
-                    "가격 조건 설정과 함께 승인했습니다.",
-                )
-            allow_real_order = True
-
-        trigger = self.price_triggers.arm(
-            side,
-            candidate.symbol,
-            candidate.base_price,
-            candidate.percent,
-            candidate.quantity,
-            allow_real_order,
-            candidate.account,
-        )
-        self._update_price_trigger_status(side)
-        if self.service.real_time_symbol != trigger.symbol:
-            self.service.register_real_time_price(trigger.symbol)
-        if self.service.real_time_symbol != trigger.symbol:
-            self.price_triggers.clear(side)
-            if session_armed_by_setting:
-                self._clear_real_order_authorization(
-                    "실시간 시세 연결 실패로 방금 승인한 실거래 세션을 해제했습니다."
-                )
-            self._update_price_trigger_status(side)
-            messagebox.showwarning("실시간 시세 연결 실패", self.service.last_api_message)
-            return
-
-        action = "자동매수" if side == "BUY" else "자동매도"
-        self.service.storage.log(
-            "WARN" if trigger.allow_real_order else "INFO",
-            action,
-            f"일회성 DMI {required_dmi} + {direction} {action} 설정: "
-            f"기준 {trigger.base_price:,.0f}원 / "
-            f"목표 {trigger.target_price:,.0f}원 / {direction_sign}{trigger.percent:.2f}% / "
-            f"{trigger.quantity}주 / DMI {self.service.strategy.settings.dmi_period}일",
-        )
-        self._refresh()
-
-    def _update_price_trigger_status(self, side: str) -> None:
-        trigger = self.price_triggers.get(side)
-        status_var = self.buy_trigger_status_var if side == "BUY" else self.sell_trigger_status_var
-        button = self.buy_trigger_button if side == "BUY" else self.sell_trigger_button
-        action = "DMI 매수" if side == "BUY" else "DMI 매도"
-        direction = "상승" if side == "BUY" else "하락"
-        direction_sign = "+" if side == "BUY" else "-"
-        required_dmi = "강세" if side == "BUY" else "약세"
-        if trigger is None:
-            value = (self.buy_percent_var if side == "BUY" else self.sell_percent_var).get().strip()
-            status_var.set(f"{value}% 입력됨 · 설정 버튼 필요" if value else "입력 후 설정 필요")
-            button.configure(text=f"{action} 설정")
-            return
-        if self.service.account_info.server_type == "모의투자":
-            order_mode = "모의주문 대기"
-        elif self.service.account_info.connection_method == "REST API":
-            order_mode = "실주문 대기·REST 토큰"
-        else:
-            order_mode = "실주문 대기·비밀번호 확인"
-        if self._real_trading_account() and not self._regular_market_open():
-            if self.service.is_real_time_registered():
-                order_mode += "·다음 체결 대기"
-            else:
-                order_mode += "·실시간 등록 대기"
-        current_dmi = PATTERN_VALUE_TO_LABEL.get(self.service.pattern_state, "계산 전")
-        dmi_wait = (
-            f"DMI {required_dmi} 확인"
-            if self.service.pattern_state == trigger.required_pattern
-            else f"현재 {current_dmi}·DMI {required_dmi} 대기"
-        )
-        status_var.set(
-            f"{order_mode} | {dmi_wait} + {direction} {direction_sign}{trigger.percent:g}% → "
-            f"{trigger.target_price:,.0f}원 | {trigger.quantity}주"
-        )
-        button.configure(text=f"{action} 재설정")
-
-    def _on_price_trigger_percent_changed(self, side: str) -> None:
-        trigger = self.price_triggers.get(side)
-        if trigger is not None:
-            self.price_triggers.clear(side)
-            self.service.storage.log(
-                "WARN",
-                "자동매수" if side == "BUY" else "자동매도",
-                "등락률 입력값이 변경되어 기존 자동주문 설정을 해제했습니다.",
-            )
-        self._update_price_trigger_status(side)
-
-    def _clear_price_trigger(self, side: str) -> None:
-        self.price_triggers.clear(side)
-        if side == "BUY":
-            self.buy_percent_var.set("")
-        else:
-            self.sell_percent_var.set("")
-        self._update_price_trigger_status(side)
-
-    def _clear_all_price_triggers(self) -> None:
-        self.price_triggers.clear()
-        self.buy_percent_var.set("")
-        self.sell_percent_var.set("")
-        self._update_price_trigger_status("BUY")
-        self._update_price_trigger_status("SELL")
-
-    def _process_one_shot_price_triggers(self) -> bool:
-        if self._processing_price_triggers:
-            return False
-        if self._real_trading_account() and not self._regular_market_open():
-            return False
-        current_price = self._selected_current_price()
-        if current_price <= 0:
-            return False
-        triggered = self.price_triggers.pop_triggered(
-            self.symbol_var.get(),
-            current_price,
-            self.service.pattern_state,
-        )
-        if not triggered:
-            return False
-
-        self._processing_price_triggers = True
-        try:
-            for trigger in triggered:
-                if trigger.side == "BUY":
-                    self.buy_percent_var.set("")
-                else:
-                    self.sell_percent_var.set("")
-                self._update_price_trigger_status(trigger.side)
-
-                action = "자동매수" if trigger.side == "BUY" else "자동매도"
-                if not self._account_connection_confirmed(self.service.account_info):
-                    self.service.storage.log("ERROR", action, "계좌 연결이 해제되어 일회성 설정만 종료했습니다.")
-                    continue
-                if trigger.account and clean_account_number(self._account_for_api()) != trigger.account:
-                    self.service.storage.log(
-                        "ERROR",
-                        action,
-                        "자동주문을 설정한 계좌와 현재 선택 계좌가 달라 주문하지 않았습니다.",
-                    )
-                    continue
-                if (
-                    self.service.account_info.connection_method != "REST API"
-                    and not self._password_session_ready()
-                ):
-                    self.service.storage.log(
-                        "ERROR",
-                        action,
-                        "화면의 계좌 비밀번호 확인 상태가 해제되어 주문하지 않았습니다.",
-                    )
-                    continue
-                if trigger.allow_real_order:
-                    real_ready = (
-                        self.service.account_info.server_type != "모의투자"
-                        and self._real_order_session_ready()
-                        and self._regular_market_open()
-                    )
-                    if not real_ready:
-                        self.service.storage.log("ERROR", action, "실거래 안전장치가 해제되어 주문하지 않았습니다.")
-                        continue
-                elif self.service.account_info.server_type != "모의투자":
-                    self.service.storage.log("ERROR", action, "모의투자 연결이 아니어서 주문하지 않았습니다.")
-                    continue
-
-                self.service.configure(trigger.symbol, self._operating_capital(), self._settings())
-                self.service.current_price = current_price
-                direction = "상승" if trigger.side == "BUY" else "하락"
-                direction_sign = "+" if trigger.side == "BUY" else "-"
-                required_dmi = "강세" if trigger.side == "BUY" else "약세"
-                self.service.storage.log(
-                    "WARN" if trigger.allow_real_order else "INFO",
-                    action,
-                    f"일봉 DMI가 {required_dmi}이고 현재가 {current_price:,.0f}원이 {direction} "
-                    f"{direction_sign}{trigger.percent:g}% 목표 {trigger.target_price:,.0f}원에 도달했습니다. "
-                    "설정을 해제하고 주문을 1회 요청합니다.",
-                )
-                selected_order_style = (
-                    self._selected_order_style()
-                    if hasattr(self, "_selected_order_style")
-                    else "MIDPOINT"
-                )
-                self.service.send_kiwoom_order(
-                    account=self._account_for_api(),
-                    side=trigger.side,
-                    quantity=trigger.quantity,
-                    allow_real_order=trigger.allow_real_order,
-                    account_password=self._account_password_for_order(),
-                    order_style=selected_order_style,
-                    use_margin=(
-                        bool(self.use_margin_var.get())
-                        if hasattr(self, "use_margin_var")
-                        else False
-                    ),
-                )
-                self._mark_holding_balance_refresh_due()
-                self._schedule_recent_trade_history_refresh()
-                self._handle_order_account_verification()
-        finally:
-            self._processing_price_triggers = False
-        return True
-
     def _update_trade_buttons(self) -> None:
         state = "normal" if self._trading_ready() else "disabled"
         self.buy_button.configure(state=state)
         self.sell_button.configure(state=state)
-        self.strategy_order_button.configure(state=state)
         original_ready = bool(self.original_order_no_var.get().strip())
         correction_state = state if original_ready else "disabled"
         self.modify_button.configure(state=correction_state)
