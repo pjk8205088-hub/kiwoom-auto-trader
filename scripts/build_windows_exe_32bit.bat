@@ -50,10 +50,10 @@ pyinstaller ^
   --icon "assets\kiwoom_trade.ico" ^
   --add-data "assets\kiwoom_trade.ico;assets" ^
   --add-data "assets\kiwoom_trade.png;assets" ^
-  --name KawaiiSecurities-32bit-v43 ^
+  --name KawaiiSecurities-32bit-v45 ^
   kiwoom_auto_trader\main.py
 
 if errorlevel 1 exit /b 1
 
 echo.
-echo Build complete: dist\KawaiiSecurities-32bit-v43.exe
+echo Build complete: dist\KawaiiSecurities-32bit-v45.exe

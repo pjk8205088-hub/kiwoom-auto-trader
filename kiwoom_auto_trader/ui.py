@@ -26,6 +26,20 @@ from .app_security import (
 )
 from .audio_alerts import OrderVoiceNotifier, TradeSoundNotifier
 from .charting import moving_average, timeframe_label
+from .kb_hts import (
+    KbHtsStatus,
+    build_kb_handoff_text,
+    detect_kb_hts,
+    focus_kb_hts_window,
+    launch_kb_hts,
+    normalize_kb_symbol,
+)
+from .kb_rest_api import (
+    KB_OPENAPI_DOCS,
+    KB_OPENAPI_PORTAL,
+    KbOpenApiClient,
+    KbOpenApiError,
+)
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
     is_valid_account_password,
@@ -1034,6 +1048,468 @@ class WatchlistMemoDialog(tk.Toplevel):
         self.destroy()
 
 
+class KbManualTradeWindow(tk.Toplevel):
+    """Separate KB H-able/API manual-trading window.
+
+    The old Kiwoom strategy loop is intentionally not used here. H-able
+    handoff remains available, while the official KB Open API can be used for
+    a quote and an explicitly confirmed manual cash order.
+    """
+
+    def __init__(self, parent: "TraderApp") -> None:
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("KB H-able 수동매매")
+        self.geometry("760x700")
+        self.minsize(680, 620)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self._close)
+
+        self.symbol_var = tk.StringVar(value=parent.symbol_var.get())
+        self.name_var = tk.StringVar(value=parent.symbol_name_var.get())
+        self.price_var = tk.StringVar(value="현재가 미조회")
+        self.order_price_var = tk.StringVar(value="")
+        self.quantity_var = tk.StringVar(value="1")
+        self.side_var = tk.StringVar(value="BUY")
+        self.status_var = tk.StringVar(value="KB HTS OFF")
+        self.kb_api_status_var = tk.StringVar(value="KB API OFF")
+        self.kb_app_key_var = tk.StringVar(value="")
+        self.kb_app_secret_var = tk.StringVar(value="")
+        self.kb_account_var = tk.StringVar(value="")
+        self.kb_account_password_var = tk.StringVar(value="")
+        self.kb_order_enabled_var = tk.BooleanVar(value=False)
+        self._kb_quote_symbol = ""
+        self._kb_quote_at = 0.0
+        self.detail_var = tk.StringVar(value="KB H-able 실행 여부를 확인해 주세요.")
+        self.handoff_var = tk.StringVar(
+            value="종목을 세팅하고 현재가를 불러온 뒤 HTS 전달을 누르세요."
+        )
+
+        body = ttk.Frame(self, padding=16)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+
+        header = ttk.Frame(body)
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        header.columnconfigure(1, weight=1)
+        ttk.Label(
+            header,
+            text="KB H-able 수동매매",
+            font=(UI_DISPLAY_FONT, 16, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.status_button = ttk.Button(
+            header,
+            textvariable=self.status_var,
+            command=lambda: self._refresh_status(show_message=True),
+            style="Danger.TButton",
+        )
+        self.status_button.grid(row=0, column=2, padx=(8, 0))
+
+        connection_row = ttk.Frame(body)
+        connection_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        ttk.Button(
+            connection_row,
+            text="KB HTS 실행 파일 선택",
+            command=self._choose_hts_executable,
+        ).pack(side="left")
+        ttk.Button(
+            connection_row,
+            text="KB HTS 실행",
+            command=self._launch_hts,
+            style="Blue.TButton",
+        ).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            connection_row,
+            text="연결 상태 확인",
+            command=lambda: self._refresh_status(show_message=True),
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            connection_row,
+            textvariable=self.detail_var,
+            foreground=UI_MUTED,
+        ).pack(side="left", padx=(12, 0))
+
+        api_box = ttk.LabelFrame(body, text="KB Open API 연결 · 수동 주문", padding=10)
+        api_box.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        for column in range(7):
+            api_box.columnconfigure(column, weight=1 if column in {1, 3, 5} else 0)
+        ttk.Label(api_box, text="App Key").grid(row=0, column=0, sticky="w")
+        ttk.Entry(api_box, textvariable=self.kb_app_key_var, width=20).grid(
+            row=0, column=1, sticky="ew", padx=(6, 10)
+        )
+        ttk.Label(api_box, text="App Secret").grid(row=0, column=2, sticky="w")
+        ttk.Entry(api_box, textvariable=self.kb_app_secret_var, show="*", width=20).grid(
+            row=0, column=3, sticky="ew", padx=(6, 10)
+        )
+        ttk.Button(
+            api_box,
+            text="KB API 연결",
+            command=self._connect_kb_api,
+            style="Blue.TButton",
+        ).grid(row=0, column=4, padx=(0, 6))
+        ttk.Button(api_box, text="연결 해제", command=self._disconnect_kb_api).grid(
+            row=0, column=5, sticky="w"
+        )
+        ttk.Label(api_box, textvariable=self.kb_api_status_var, foreground=UI_MUTED).grid(
+            row=0, column=6, sticky="e", padx=(8, 0)
+        )
+        ttk.Label(api_box, text="KB 계좌번호(주문 시)").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(api_box, textvariable=self.kb_account_var, width=18).grid(
+            row=1, column=1, sticky="w", padx=(6, 10), pady=(8, 0)
+        )
+        ttk.Label(api_box, text="계좌 비밀번호(주문 시)").grid(row=1, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(api_box, textvariable=self.kb_account_password_var, show="*", width=14).grid(
+            row=1, column=3, sticky="w", padx=(6, 10), pady=(8, 0)
+        )
+        ttk.Checkbutton(
+            api_box,
+            text="KB API 수동 주문 허용",
+            variable=self.kb_order_enabled_var,
+        ).grid(row=1, column=4, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(
+            api_box,
+            text="KB Open API 안내",
+            command=lambda: webbrowser.open(KB_OPENAPI_PORTAL),
+        ).grid(row=1, column=6, sticky="e", pady=(8, 0))
+        ttk.Label(
+            api_box,
+            text="키는 저장하지 않으며, 주문은 확인창 승인 후에만 전송됩니다.",
+            foreground=UI_MUTED,
+        ).grid(row=2, column=0, columnspan=7, sticky="w", pady=(8, 0))
+
+        symbol_box = ttk.LabelFrame(body, text="종목·현재가 연동", padding=12)
+        symbol_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        symbol_box.columnconfigure(1, weight=1)
+        ttk.Label(symbol_box, text="종목번호(6자리)").grid(row=0, column=0, sticky="w")
+        symbol_entry = ttk.Entry(symbol_box, textvariable=self.symbol_var, width=14)
+        symbol_entry.grid(row=0, column=1, sticky="w", padx=(10, 8))
+        ttk.Button(
+            symbol_box,
+            text="종목 세팅·현재가 조회",
+            command=self._set_symbol,
+        ).grid(row=0, column=2, sticky="w")
+        ttk.Label(symbol_box, text="회사명").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(
+            symbol_box,
+            textvariable=self.name_var,
+            font=(UI_DISPLAY_FONT, 10, "bold"),
+        ).grid(row=1, column=1, sticky="w", padx=(10, 8), pady=(10, 0))
+        ttk.Label(symbol_box, text="현재가").grid(row=1, column=2, sticky="e", pady=(10, 0))
+        ttk.Label(
+            symbol_box,
+            textvariable=self.price_var,
+            font=(UI_DISPLAY_FONT, 12, "bold"),
+        ).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=(10, 0))
+        symbol_entry.bind("<Return>", lambda _event: self._set_symbol())
+
+        order_box = ttk.LabelFrame(body, text="수동 주문 입력", padding=12)
+        order_box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        order_box.columnconfigure(1, weight=1)
+        ttk.Label(order_box, text="주문 구분").grid(row=0, column=0, sticky="w")
+        side_buttons = ttk.Frame(order_box)
+        side_buttons.grid(row=0, column=1, sticky="w", padx=(10, 0))
+        self.buy_side_button = ttk.Button(
+            side_buttons,
+            text="매수",
+            command=lambda: self._set_side("BUY"),
+            style="Accent.TButton",
+        )
+        self.buy_side_button.pack(side="left")
+        self.sell_side_button = ttk.Button(
+            side_buttons,
+            text="매도",
+            command=lambda: self._set_side("SELL"),
+            style="Blue.TButton",
+        )
+        self.sell_side_button.pack(side="left", padx=(6, 0))
+        ttk.Label(order_box, text="수량").grid(row=1, column=0, sticky="w", pady=(10, 0))
+        quantity_row = ttk.Frame(order_box)
+        quantity_row.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
+        ttk.Entry(quantity_row, textvariable=self.quantity_var, width=8, justify="center").pack(side="left")
+        ttk.Button(quantity_row, text="-", width=3, command=lambda: self._change_quantity(-1)).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(quantity_row, text="+", width=3, command=lambda: self._change_quantity(1)).pack(
+            side="left", padx=(4, 0)
+        )
+        ttk.Label(order_box, text="주문 가격(기본 현재가)").grid(
+            row=2, column=0, sticky="w", pady=(10, 0)
+        )
+        ttk.Entry(order_box, textvariable=self.order_price_var, width=16).grid(
+            row=2, column=1, sticky="w", padx=(10, 0), pady=(10, 0)
+        )
+
+        handoff_box = ttk.LabelFrame(body, text="HTS 전달", padding=12)
+        handoff_box.grid(row=5, column=0, sticky="ew", pady=(0, 10))
+        handoff_box.columnconfigure(0, weight=1)
+        ttk.Label(
+            handoff_box,
+            text="HTS 전달은 입력값을 복사하는 기능입니다. KB API 주문은 별도 허용 체크와 최종 확인 후에만 전송됩니다.",
+            foreground=UI_MUTED,
+            wraplength=650,
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            handoff_box,
+            text="종목·현재가 KB HTS 전달",
+            command=self._handoff,
+            style="Blue.TButton",
+        ).grid(row=1, column=0, sticky="w", pady=(10, 0))
+        order_buttons = ttk.Frame(handoff_box)
+        order_buttons.grid(row=1, column=1, sticky="e", pady=(10, 0))
+        ttk.Button(
+            order_buttons,
+            text="KB API 매수 주문",
+            command=lambda: self._submit_api_order("BUY"),
+            style="Accent.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            order_buttons,
+            text="KB API 매도 주문",
+            command=lambda: self._submit_api_order("SELL"),
+            style="Blue.TButton",
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            handoff_box,
+            textvariable=self.handoff_var,
+            foreground=UI_MUTED,
+            wraplength=650,
+            justify="left",
+        ).grid(row=2, column=0, sticky="w", pady=(8, 0))
+
+        ttk.Label(
+            body,
+            text="계좌번호·계좌비밀번호는 KB 수동 화면에서 사용하지 않습니다.",
+            foreground=UI_GREEN,
+        ).grid(row=6, column=0, sticky="w", pady=(4, 0))
+        self._set_side("BUY")
+        self._refresh_market()
+        self._refresh_status()
+        _show_centered_dialog(self)
+
+    def _close(self) -> None:
+        self.parent_app._kb_manual_window = None
+        self.destroy()
+
+    def _set_side(self, side: str) -> None:
+        self.side_var.set("SELL" if str(side).upper() == "SELL" else "BUY")
+        self.buy_side_button.configure(style="Accent.TButton" if self.side_var.get() == "BUY" else "TButton")
+        self.sell_side_button.configure(style="Blue.TButton" if self.side_var.get() == "SELL" else "TButton")
+
+    def _change_quantity(self, delta: int) -> None:
+        try:
+            quantity = int(self.quantity_var.get() or 0)
+        except ValueError:
+            quantity = 0
+        self.quantity_var.set(str(max(1, quantity + int(delta))))
+
+    def _connect_kb_api(self) -> None:
+        try:
+            message = self.parent_app.kb_api.connect(
+                self.kb_app_key_var.get(),
+                self.kb_app_secret_var.get(),
+            )
+        except KbOpenApiError as exc:
+            self.kb_api_status_var.set("KB API OFF")
+            self.parent_app._show_warning("KB Open API 연결", str(exc), parent=self)
+            return
+        self.kb_api_status_var.set("KB API ON")
+        self.handoff_var.set(message)
+        self._refresh_market()
+
+    def _disconnect_kb_api(self) -> None:
+        self.parent_app.kb_api.disconnect()
+        self.kb_api_status_var.set("KB API OFF")
+        self.handoff_var.set("KB Open API 연결을 해제했습니다.")
+
+    def _refresh_kb_api_quote(self, force: bool = False) -> bool:
+        if not self.parent_app.kb_api.is_connected:
+            return False
+        symbol = normalize_kb_symbol(self.symbol_var.get())
+        if not symbol:
+            return False
+        cached_quote = self.parent_app.kb_api.last_quote
+        if (
+            not force
+            and cached_quote is not None
+            and self._kb_quote_symbol == symbol
+            and monotonic() - self._kb_quote_at < 1.0
+        ):
+            self.name_var.set(cached_quote.name or "종목명 미조회")
+            self.price_var.set(
+                f"{cached_quote.current_price:,.0f}원"
+                if cached_quote.current_price > 0
+                else "현재가 미조회"
+            )
+            return True
+        try:
+            quote = self.parent_app.kb_api.request_current_price(symbol)
+        except KbOpenApiError as exc:
+            self.handoff_var.set(f"KB 현재가 조회 실패: {exc}")
+            return False
+        self.symbol_var.set(quote.symbol)
+        self.name_var.set(quote.name or "종목명 미조회")
+        self.price_var.set(f"{quote.current_price:,.0f}원" if quote.current_price > 0 else "현재가 미조회")
+        if quote.current_price > 0:
+            self.order_price_var.set(f"{quote.current_price:,.0f}")
+        self._kb_quote_symbol = quote.symbol
+        self._kb_quote_at = monotonic()
+        self.parent_app.symbol_var.set(quote.symbol)
+        self.parent_app.symbol_name_var.set(quote.name or "종목명 미조회")
+        self.kb_api_status_var.set("KB API ON")
+        return True
+
+    def _submit_api_order(self, side: str) -> None:
+        if not self.kb_order_enabled_var.get():
+            self.parent_app._show_warning(
+                "KB API 주문 잠금",
+                "실제 주문을 보내려면 먼저 'KB API 수동 주문 허용'을 체크해 주세요.",
+                parent=self,
+            )
+            return
+        if not self.parent_app.kb_api.is_connected:
+            self.parent_app._show_warning("KB API 주문", "먼저 KB API 연결을 완료해 주세요.", parent=self)
+            return
+        symbol = normalize_kb_symbol(self.symbol_var.get())
+        account = "".join(character for character in self.kb_account_var.get() if character.isdigit())
+        password = self.kb_account_password_var.get().strip()
+        try:
+            quantity = int(self.quantity_var.get() or 0)
+            price = float(str(self.order_price_var.get() or "0").replace(",", ""))
+        except ValueError:
+            quantity, price = 0, 0.0
+        if not symbol or not account or quantity <= 0 or price <= 0:
+            self.parent_app._show_warning(
+                "KB API 주문 입력",
+                "종목번호, KB 계좌번호, 수량, 주문가격을 확인해 주세요.",
+                parent=self,
+            )
+            return
+        if not password.isdigit() or not 4 <= len(password) <= 8:
+            self.parent_app._show_warning(
+                "KB API 주문 입력",
+                "계좌 비밀번호는 4~8자리 숫자로 입력해 주세요.",
+                parent=self,
+            )
+            return
+        side_label = "매수" if side == "BUY" else "매도"
+        confirmed = messagebox.askyesno(
+            "KB 실계좌 수동 주문 확인",
+            f"KB Open API로 {side_label} 주문을 전송합니다.\n\n"
+            f"종목: {symbol}\n수량: {quantity}주\n가격: {price:,.0f}원\n\n"
+            "이 주문은 KB 실계좌에 전송될 수 있습니다. 계속하시겠습니까?",
+            parent=self,
+        )
+        if not confirmed:
+            return
+        try:
+            order_no = self.parent_app.kb_api.place_cash_order(
+                account=account,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                account_password=password,
+            )
+        except KbOpenApiError as exc:
+            self.handoff_var.set(f"KB {side_label} 주문 실패: {exc}")
+            self.parent_app._show_warning("KB API 주문 실패", str(exc), parent=self)
+            return
+        self.handoff_var.set(f"KB {side_label} 주문 접수 완료 · 주문번호 {order_no}")
+        messagebox.showinfo("KB API 주문 접수", f"{side_label} 주문이 접수되었습니다.\n주문번호: {order_no}", parent=self)
+
+    def _refresh_status(self, show_message: bool = False) -> KbHtsStatus:
+        status = self.parent_app._check_kb_hts_status(show_message=False)
+        self.status_var.set("KB HTS ON" if status.connected else "KB HTS OFF")
+        self.status_button.configure(
+            style="Success.TButton" if status.connected else "Danger.TButton"
+        )
+        self.detail_var.set(status.message)
+        if show_message:
+            self.parent_app._show_kb_status_message(status, parent=self)
+        return status
+
+    def _refresh_market(self) -> None:
+        app = self.parent_app
+        symbol = normalize_kb_symbol(app.symbol_var.get())
+        self.symbol_var.set(symbol or app.symbol_var.get())
+        self.name_var.set(app.symbol_name_var.get().strip())
+        if self._refresh_kb_api_quote():
+            return
+        try:
+            price = float(app._selected_current_price() or app.service.current_price or 0)
+        except (AttributeError, TypeError, ValueError):
+            price = 0.0
+        self.price_var.set(f"{price:,.0f}원" if price > 0 else "현재가 미조회")
+        if not self.order_price_var.get().strip() and price > 0:
+            self.order_price_var.set(f"{price:,.0f}")
+
+    def _set_symbol(self) -> None:
+        symbol = normalize_kb_symbol(self.symbol_var.get())
+        if not symbol:
+            self.handoff_var.set("6자리 종목번호를 입력해 주세요. 예: 005930")
+            return
+        self.symbol_var.set(symbol)
+        app = self.parent_app
+        app.symbol_var.set(symbol)
+        if app.kb_api.is_connected:
+            self._refresh_kb_api_quote(force=True)
+        else:
+            app._set_symbol()
+            if app.service.account_info.connected:
+                app._request_current_price()
+        self._refresh_market()
+
+    def _choose_hts_executable(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="KB H-able 실행 파일 선택",
+            filetypes=(("실행 파일", "*.exe"), ("모든 파일", "*.*")),
+        )
+        if not path:
+            return
+        self.parent_app.service.storage.set_app_setting("kb.hts_path", path)
+        self.handoff_var.set(f"KB H-able 실행 경로를 저장했습니다: {Path(path).name}")
+
+    def _launch_hts(self) -> None:
+        path = self.parent_app.service.storage.get_app_setting("kb.hts_path", "")
+        ok, message = launch_kb_hts(path)
+        self.handoff_var.set(message)
+        if not ok:
+            self.parent_app._show_warning("KB HTS 실행", message, parent=self)
+        self.after(1200, self._refresh_status)
+
+    def _handoff(self) -> None:
+        self._refresh_market()
+        try:
+            price = float(str(self.order_price_var.get() or "0").replace(",", ""))
+        except ValueError:
+            price = 0.0
+        try:
+            quantity = max(1, int(self.quantity_var.get() or 0))
+        except ValueError:
+            quantity = 1
+        payload = build_kb_handoff_text(
+            self.symbol_var.get(),
+            self.name_var.get(),
+            price,
+            self.side_var.get(),
+            quantity,
+        )
+        try:
+            self.clipboard_clear()
+            self.clipboard_append(payload)
+            self.update()
+        except tk.TclError:
+            self.handoff_var.set("클립보드 접근에 실패했습니다. KB H-able을 직접 확인해 주세요.")
+            return
+        focused = focus_kb_hts_window()
+        destination = "KB H-able 창을 앞으로 가져왔습니다." if focused else "KB H-able 창을 찾지 못했습니다."
+        self.handoff_var.set(
+            f"{destination} 종목·가격·주문 입력값을 클립보드에 복사했습니다. H-able에서 확인 후 직접 주문하세요."
+        )
+
+
 class TraderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -1067,6 +1543,9 @@ class TraderApp(tk.Tk):
         self.service = AutoTradingService(
             storage=Storage(db_path, trade_history_path=trade_history_path)
         )
+        # KB Open API is isolated from the Kiwoom service and is used only by
+        # the separate, user-confirmed manual trading window.
+        self.kb_api = KbOpenApiClient()
         self.voice_notifier = OrderVoiceNotifier()
         self.sound_notifier = TradeSoundNotifier(
             self.service.storage.get_app_setting("audio.buy_sound", ""),
@@ -1080,6 +1559,9 @@ class TraderApp(tk.Tk):
         self._trade_history_after_id: str | None = None
         self._volume_rank_after_id: str | None = None
         self._trade_value_rank_after_id: str | None = None
+        self._kb_hts_poll_after_id: str | None = None
+        self._kb_manual_window: KbManualTradeWindow | None = None
+        self._kb_hts_status = KbHtsStatus()
         self._account_poll_count = 0
         self._selected_account_full = ""
         self._account_access_verified = False
@@ -1741,6 +2223,22 @@ class TraderApp(tk.Tk):
             foreground=[("disabled", UI_SURFACE)],
         )
         style.configure(
+            "Success.TButton",
+            background=UI_GREEN,
+            foreground=UI_SURFACE,
+            bordercolor=UI_GREEN,
+            lightcolor=UI_GREEN,
+            darkcolor=UI_GREEN,
+            focuscolor=UI_GREEN,
+            anchor="center",
+            justify="center",
+        )
+        style.map(
+            "Success.TButton",
+            background=[("pressed", "#0F6D31"), ("active", "#1A9B4C")],
+            foreground=[("disabled", UI_SURFACE)],
+        )
+        style.configure(
             "Danger.TButton",
             background=UI_SURFACE,
             foreground=UI_RED,
@@ -2264,6 +2762,8 @@ class TraderApp(tk.Tk):
         self.columnconfigure(1, weight=0, minsize=EXPANDED_SIDE_PANEL_WIDTH)
         self.rowconfigure(2, weight=1)
         self.connection_state_var = tk.StringVar(value="OFF 연결 안됨")
+        self.kb_hts_status_var = tk.StringVar(value="KB HTS OFF")
+        self.kb_hts_detail_var = tk.StringVar(value="KB H-able 실행 여부를 확인해 주세요.")
         self.clock_var = tk.StringVar(value="----년 --월 --일 --:--:--")
         self.transfer_state_var = tk.StringVar(value="전송 상태 대기")
         self.active_symbol_tag_var = tk.StringVar(value="")
@@ -2283,7 +2783,7 @@ class TraderApp(tk.Tk):
         self._brand_rail_canvas.grid(
             row=0,
             column=0,
-            columnspan=8,
+            columnspan=10,
             sticky="ew",
             pady=(0, 6),
         )
@@ -2379,19 +2879,31 @@ class TraderApp(tk.Tk):
             style="Neutral.Badge.TLabel",
         )
         self.connection_badge.grid(row=1, column=5, padx=(0, 8))
+        self.kb_hts_button = ttk.Button(
+            header,
+            textvariable=self.kb_hts_status_var,
+            command=lambda: self._check_kb_hts_status(show_message=True),
+            style="Danger.TButton",
+        )
+        self.kb_hts_button.grid(row=1, column=6, padx=(0, 8))
+        ttk.Button(
+            header,
+            text="KB 수동매매",
+            command=self._open_kb_manual_window,
+            style="Blue.TButton",
+        ).grid(row=1, column=7, padx=(0, 8))
         ttk.Button(header, text="관심종목", command=self._open_watchlist_window).grid(
             row=1,
-            column=6,
+            column=8,
             padx=(0, 8),
         )
         ttk.Button(
             header,
-            text="긴급 일괄 청산",
-            command=self._emergency_stop,
-            style="Danger.TButton",
-        ).grid(row=1, column=7)
+            text="KB HTS 안내",
+            command=lambda: webbrowser.open("https://www.kbsec.com/go.able?linkcd=s060100080002"),
+        ).grid(row=1, column=9)
         status_strip = ttk.Frame(header, style="Header.TFrame")
-        status_strip.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(7, 0))
+        status_strip.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(7, 0))
         status_strip.columnconfigure(0, weight=1)
         ttk.Label(
             status_strip,
@@ -2456,7 +2968,7 @@ class TraderApp(tk.Tk):
         )
         self.transfer_badge.grid(row=0, column=7, sticky="e")
         tag_strip = ttk.Frame(header, style="Header.TFrame")
-        tag_strip.grid(row=3, column=0, columnspan=8, sticky="ew", pady=(5, 0))
+        tag_strip.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(5, 0))
         tag_strip.columnconfigure(1, weight=1)
         ttk.Label(
             tag_strip,
@@ -2472,7 +2984,7 @@ class TraderApp(tk.Tk):
         self._update_connection_badge(False)
         self._build_window_opacity_control()
 
-        controls = ttk.LabelFrame(self, text="종목 · 전략 · 계좌 설정", padding=(12, 10))
+        controls = ttk.LabelFrame(self, text="종목 · KB HTS 수동매매 설정", padding=(12, 10))
         self.controls = controls
         controls.grid(row=1, column=0, sticky="ew", padx=12)
         for idx in range(10):
@@ -2522,6 +3034,9 @@ class TraderApp(tk.Tk):
             value="계좌 창: 로그인 전입니다. 키움 로그인 후 계좌번호 앞4자리+뒤4자리와 잔고가 표시됩니다."
         )
         self.trade_ready_var = tk.StringVar(value="거래 준비: 종목번호와 회사명, 계좌번호를 확인해 주세요.")
+        self.kb_manual_summary_var = tk.StringVar(
+            value="KB HTS 수동매매 · 계좌번호와 계좌비밀번호를 사용하지 않습니다."
+        )
 
         self._field(controls, "종목번호(6자리)", self.symbol_var, 0)
         ttk.Label(controls, text="회사명").grid(row=0, column=1, sticky="w")
@@ -2610,19 +3125,32 @@ class TraderApp(tk.Tk):
 
         actions = ttk.Frame(controls)
         actions.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(12, 0))
-        actions.columnconfigure(4, weight=1)
+        actions.columnconfigure(3, weight=1)
         ttk.Button(
             actions,
-            text="실시간 감시 시작",
-            command=self._start,
+            text="KB 수동매매 창 열기",
+            command=self._open_kb_manual_window,
             style="Accent.TButton",
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(actions, text="실시간 감시 중지", command=self._stop).grid(
+        ttk.Button(
+            actions,
+            text="KB HTS 상태 확인",
+            command=lambda: self._check_kb_hts_status(show_message=True),
+        ).grid(row=0, column=1, sticky="w", padx=6)
+        ttk.Label(
+            actions,
+            text="자동매매 기능 삭제 · KB HTS 수동 주문 전용",
+            foreground=UI_GREEN,
+            font=(UI_DISPLAY_FONT, 9, "bold"),
+        ).grid(row=0, column=2, sticky="w", padx=(6, 8))
+        ttk.Label(actions, textvariable=self.market_session_var).grid(
             row=0,
-            column=1,
-            sticky="w",
-            padx=6,
+            column=3,
+            sticky="e",
+            padx=(14, 0),
         )
+
+        # Kept as non-rendered compatibility widgets for the old refresh code.
         self.auto_trade_capability_badge = ttk.Label(
             actions,
             textvariable=self.auto_trade_capability_var,
@@ -2630,7 +3158,6 @@ class TraderApp(tk.Tk):
             padding=(10, 3),
             style="Danger.Badge.TLabel",
         )
-        self.auto_trade_capability_badge.grid(row=0, column=2, sticky="w", padx=(6, 8))
         self.holding_monitor_badge = ttk.Label(
             actions,
             textvariable=self.holding_monitor_state_var,
@@ -2638,41 +3165,11 @@ class TraderApp(tk.Tk):
             padding=(10, 3),
             style="Danger.Badge.TLabel",
         )
-        self.holding_monitor_badge.grid(row=2, column=0, sticky="w", pady=(5, 0))
-        ttk.Label(
-            actions,
-            text="수동 주문 전용",
-            foreground=UI_MUTED,
-        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
-        ttk.Label(actions, textvariable=self.market_session_var).grid(
-            row=0,
-            column=4,
-            sticky="e",
-            padx=(14, 0),
-        )
-        ttk.Label(
-            actions,
-            textvariable=self.auto_started_at_var,
-            foreground=UI_MUTED,
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(5, 0))
-        ttk.Label(
-            actions,
-            textvariable=self.auto_trade_detail_var,
-            foreground=UI_MUTED,
-        ).grid(row=1, column=2, columnspan=3, sticky="w", padx=(6, 0), pady=(5, 0))
         self.holding_monitor_detail_label = ttk.Label(
             actions,
             textvariable=self.holding_monitor_detail_var,
             foreground=UI_RED,
             font=(UI_DISPLAY_FONT, 9, "bold"),
-        )
-        self.holding_monitor_detail_label.grid(
-            row=2,
-            column=1,
-            columnspan=4,
-            sticky="w",
-            padx=(8, 0),
-            pady=(5, 0),
         )
 
         kiwoom_controls = ttk.Frame(controls)
@@ -2794,13 +3291,8 @@ class TraderApp(tk.Tk):
         trade_actions = ttk.Frame(api_actions)
         trade_actions.pack(fill="x", pady=(5, 0))
         ttk.Button(data_actions, text="3분봉 데이터 불러오기", command=self._request_three_minute).pack(side="left")
-        ttk.Button(data_actions, text="계좌잔고 불러오기", command=self._request_balance).pack(side="left", padx=4)
         ttk.Button(data_actions, text="실시간 시세 시작", command=self._register_real_time).pack(side="left", padx=4)
         ttk.Button(data_actions, text="실시간 시세 중지", command=self._unregister_real_time).pack(side="left", padx=4)
-        ttk.Button(data_actions, text="일봉+DMI 강약 판단", command=self._evaluate_market_strategy).pack(
-            side="left",
-            padx=4,
-        )
         self.buy_button = ttk.Button(
             trade_actions,
             text="수동 매수",
@@ -2889,6 +3381,19 @@ class TraderApp(tk.Tk):
         self.chart_button.pack(side="left")
         ttk.Label(ready_row, textvariable=self.trade_ready_var).pack(side="left", padx=(10, 0))
 
+        # The legacy Kiwoom account/order controls remain as internal
+        # compatibility widgets for stored data, but are intentionally not
+        # rendered in the KB-only manual workflow.
+        kiwoom_controls.grid_remove()
+        order_controls.grid_remove()
+        trade_actions.pack_forget()
+        quick_row.grid_remove()
+        ready_row.grid_remove()
+        for widget in controls.grid_slaves():
+            info = widget.grid_info()
+            if int(info.get("row", -1)) in (0, 1) and int(info.get("column", -1)) >= 2:
+                widget.grid_remove()
+
         body = ttk.Frame(self, padding=(12, 6))
         self.main_body = body
         body.grid(row=2, column=0, sticky="nsew")
@@ -2896,13 +3401,14 @@ class TraderApp(tk.Tk):
         body.rowconfigure(1, weight=1)
 
         self.status_text = tk.StringVar(value="")
-        ttk.Label(
+        self.account_summary_label = ttk.Label(
             body,
-            textvariable=self.account_summary_var,
+            textvariable=self.kb_manual_summary_var,
             font=(UI_FONT, 10),
             wraplength=1120,
             justify="left",
-        ).grid(
+        )
+        self.account_summary_label.grid(
             row=0, column=0, sticky="ew", pady=(0, 10)
         )
 
@@ -3271,6 +3777,51 @@ class TraderApp(tk.Tk):
         self.bind("<Control-Shift-O>", lambda _event: self._restore_full_opacity())
         self.bind("<Control-Shift-Q>", lambda _event: self._emergency_stop())
         self._update_clock()
+        self._schedule_kb_hts_poll()
+
+    def _open_kb_manual_window(self) -> None:
+        if self._kb_manual_window is not None and self._kb_manual_window.winfo_exists():
+            self._kb_manual_window.lift()
+            self._kb_manual_window.focus_force()
+            self._kb_manual_window._refresh_market()
+            self._kb_manual_window._refresh_status()
+            return
+        self._kb_manual_window = KbManualTradeWindow(self)
+
+    def _check_kb_hts_status(self, show_message: bool = False) -> KbHtsStatus:
+        status = detect_kb_hts()
+        self._kb_hts_status = status
+        self.kb_hts_status_var.set("KB HTS ON" if status.connected else "KB HTS OFF")
+        self.kb_hts_detail_var.set(status.message)
+        self.kb_hts_button.configure(
+            style="Success.TButton" if status.connected else "Danger.TButton"
+        )
+        if show_message:
+            self._show_kb_status_message(status)
+        return status
+
+    def _show_kb_status_message(
+        self,
+        status: KbHtsStatus,
+        parent: tk.Misc | None = None,
+    ) -> None:
+        detail = status.message
+        if status.connected:
+            detail += "\n\n실행 상태만 확인한 것입니다. 주문은 KB H-able에서 직접 확인하고 전송하세요."
+        else:
+            detail += "\n\nKB H-able을 실행한 뒤 다시 상태를 확인하세요."
+        messagebox.showinfo("KB HTS 연결 상태", detail, parent=parent or self)
+
+    def _schedule_kb_hts_poll(self) -> None:
+        if self._kb_hts_poll_after_id is None:
+            self._kb_hts_poll_after_id = self.after(4000, self._poll_kb_hts_status)
+
+    def _poll_kb_hts_status(self) -> None:
+        self._kb_hts_poll_after_id = None
+        self._check_kb_hts_status(show_message=False)
+        if self._kb_manual_window is not None and self._kb_manual_window.winfo_exists():
+            self._kb_manual_window._refresh_status()
+        self._schedule_kb_hts_poll()
 
     def _build_compact_monitor(self) -> None:
         self.compact_stock_var = tk.StringVar(value="감시 종목 미선택")
@@ -5238,6 +5789,12 @@ class TraderApp(tk.Tk):
         if self._trade_value_rank_after_id is not None:
             self.after_cancel(self._trade_value_rank_after_id)
             self._trade_value_rank_after_id = None
+        if self._kb_hts_poll_after_id is not None:
+            self.after_cancel(self._kb_hts_poll_after_id)
+            self._kb_hts_poll_after_id = None
+        if self._kb_manual_window is not None and self._kb_manual_window.winfo_exists():
+            self._kb_manual_window.destroy()
+            self._kb_manual_window = None
         self._cancel_rank_tooltip()
         if self._market_control_after_id is not None:
             self.after_cancel(self._market_control_after_id)
@@ -6363,6 +6920,8 @@ class TraderApp(tk.Tk):
         )
         if name:
             self._show_symbol_tag(name)
+        if self._kb_manual_window is not None and self._kb_manual_window.winfo_exists():
+            self._kb_manual_window._refresh_market()
         self._refresh()
 
     def _open_symbol_search(self) -> None:
@@ -6496,8 +7055,6 @@ class TraderApp(tk.Tk):
         identity_rejected = bool(account_info.user_id and not account_info.connected)
         if account_info.connected or login_failed or identity_rejected or self._account_poll_count >= 120:
             self._set_login_buttons_state("normal")
-            if self._account_connection_confirmed(account_info):
-                self._show_account_info_window()
             return
         self._schedule_account_poll()
 
@@ -6525,6 +7082,8 @@ class TraderApp(tk.Tk):
             return
         self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
         self.service.request_current_price(self.symbol_var.get())
+        if self._kb_manual_window is not None and self._kb_manual_window.winfo_exists():
+            self._kb_manual_window._refresh_market()
         self._refresh()
 
     def _request_three_minute(self) -> None:
@@ -7283,6 +7842,8 @@ class TraderApp(tk.Tk):
         self._draw_brand_rail()
         self._update_compact_monitor(snapshot)
         self._update_current_price_display()
+        if self._kb_manual_window is not None and self._kb_manual_window.winfo_exists():
+            self._kb_manual_window._refresh_market()
         account = snapshot.account_info
         connection_method = account.connection_method or "OpenAPI+"
         if not account.connected:
@@ -7317,6 +7878,12 @@ class TraderApp(tk.Tk):
         if snapshot.symbol_name and self.symbol_name_var.get() != snapshot.symbol_name:
             self.symbol_name_var.set(snapshot.symbol_name)
         self.account_summary_var.set(self._format_account_summary(snapshot))
+        price = self._selected_current_price()
+        price_text = f"{price:,.0f}원" if price > 0 else "현재가 미조회"
+        self.kb_manual_summary_var.set(
+            f"KB HTS 수동매매 · 종목 {snapshot.symbol} {snapshot.symbol_name or '종목명 미조회'} · "
+            f"현재가 {price_text} · 계좌번호/계좌비밀번호 미사용 · {self.kb_hts_status_var.get()}"
+        )
         self.trade_ready_var.set(self._format_trade_ready(snapshot))
         self._render_market_control(snapshot)
         if self.chart_timeframe_var.get() != snapshot.chart_timeframe:
