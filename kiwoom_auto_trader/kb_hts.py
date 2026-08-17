@@ -1,6 +1,6 @@
-"""Small, safe handoff helpers for the KB H-able desktop HTS.
+"""Small, safe handoff helpers for the KB desktop HTS.
 
-KB H-able is a separate desktop application.  This module intentionally does
+KB HTS is a separate desktop application.  This module intentionally does
 not automate clicks or submit orders: it only detects a running HTS window,
 can launch a user-selected executable, and prepares values for a manual
 handoff.  A broker-supported KB API can be added behind this boundary later.
@@ -89,7 +89,7 @@ def _contains_hint(value: str, hints: tuple[str, ...]) -> bool:
 
 
 def detect_kb_hts() -> KbHtsStatus:
-    """Detect the separately running KB H-able process/window on Windows."""
+    """Detect the separately running KB HTS process/window on Windows."""
 
     process_found = any(
         _contains_hint(name, KB_HTS_PROCESS_HINTS)
@@ -109,7 +109,7 @@ def detect_kb_hts() -> KbHtsStatus:
     elif process_found:
         message = "KB HTS ON · 프로세스 실행 중"
     else:
-        message = "KB HTS OFF · H-able을 실행해 주세요."
+        message = "KB HTS OFF · 프로그램을 실행해 주세요."
     return KbHtsStatus(
         process_found=process_found,
         window_found=window_found,
@@ -120,23 +120,23 @@ def detect_kb_hts() -> KbHtsStatus:
 
 
 def launch_kb_hts(executable_path: str = "") -> tuple[bool, str]:
-    """Launch a user-selected H-able executable without guessing its path."""
+    """Launch a user-selected KB HTS executable without guessing its path."""
 
     path_text = str(executable_path or "").strip().strip('"')
     if not path_text:
-        return False, "KB H-able 실행 파일 경로를 설정해 주세요."
+        return False, "KB HTS 실행 파일 경로를 설정해 주세요."
     path = Path(path_text).expanduser()
     if not path.is_file():
-        return False, f"KB H-able 실행 파일을 찾을 수 없습니다: {path}"
+        return False, f"KB HTS 실행 파일을 찾을 수 없습니다: {path}"
     try:
         subprocess.Popen([str(path)], cwd=str(path.parent))
     except OSError as exc:
-        return False, f"KB H-able 실행 실패: {exc}"
-    return True, f"KB H-able 실행 요청 완료: {path.name}"
+        return False, f"KB HTS 실행 실패: {exc}"
+    return True, f"KB HTS 실행 요청 완료: {path.name}"
 
 
 def focus_kb_hts_window() -> bool:
-    """Bring a matching H-able window forward when pywin32 is available."""
+    """Bring a matching KB HTS window forward when pywin32 is available."""
 
     if os.name != "nt":
         return False
@@ -180,7 +180,7 @@ def build_kb_handoff_text(
     side: object,
     quantity: object,
 ) -> str:
-    """Create a readable clipboard payload for manual H-able entry."""
+    """Create a readable clipboard payload for manual KB HTS entry."""
 
     normalized = normalize_kb_symbol(symbol) or "미설정"
     display_name = str(name or "").strip() or "종목명 미조회"
@@ -195,7 +195,7 @@ def build_kb_handoff_text(
     side_label = "매수" if str(side or "").upper() == "BUY" else "매도"
     price_label = f"{price_value:,.0f}원" if price_value > 0 else "현재가 미조회"
     return (
-        "KB H-able 수동 주문 입력값\n"
+        "KB HTS 수동 주문 입력값\n"
         f"종목코드\t{normalized}\n"
         f"종목명\t{display_name}\n"
         f"현재가\t{price_label}\n"

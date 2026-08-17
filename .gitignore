@@ -15,3 +15,4 @@ tmp/
 *_appkey.txt
 *_secretkey.txt
 *_appsecret.txt
+kb_openapi_token_*.json

@@ -1,4 +1,7 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from kiwoom_auto_trader.kb_rest_api import KbOpenApiClient, KbOpenApiError
 from kiwoom_auto_trader.rest_api import RestResponse
@@ -74,6 +77,66 @@ class KbOpenApiClientTests(unittest.TestCase):
         client = KbOpenApiClient(requester=requester, clock=lambda: 1000.0)
         with self.assertRaises(KbOpenApiError):
             client.connect("app", "secret")
+
+    def test_token_file_round_trip_excludes_app_credentials(self) -> None:
+        calls = []
+
+        def requester(method, url, headers, body, timeout):
+            calls.append((url, headers))
+            if url.endswith("/oauth2/token"):
+                return RestResponse(
+                    200,
+                    {},
+                    {"access_token": "saved-token", "token_type": "Bearer", "expires_in": 1800},
+                )
+            return RestResponse(
+                200,
+                {},
+                {
+                    "dataHeader": {"resultCode": "200"},
+                    "dataBody": {"is_nm": "삼성전자", "now_prc": "72000"},
+                },
+            )
+
+        source = KbOpenApiClient(requester=requester, clock=lambda: 1000.0)
+        source.connect("app-key", "app-secret")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "kb_openapi_token_test.json"
+            source.save_token_file(path)
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["access_token"], "saved-token")
+            self.assertNotIn("appKey", payload)
+            self.assertNotIn("appSecret", payload)
+            self.assertNotIn("app-key", path.read_text(encoding="utf-8"))
+            self.assertNotIn("app-secret", path.read_text(encoding="utf-8"))
+
+            loaded = KbOpenApiClient(requester=requester, clock=lambda: 1100.0)
+            message = loaded.load_token_file(path)
+            quote = loaded.request_current_price("005930")
+
+        self.assertEqual(message, "KB 토큰 파일 로그인 완료")
+        self.assertTrue(loaded.is_connected)
+        self.assertEqual(quote.current_price, 72000)
+        self.assertEqual(calls[-1][1]["Authorization"], "Bearer saved-token")
+
+    def test_expired_token_file_is_rejected(self) -> None:
+        client = KbOpenApiClient(clock=lambda: 2000.0)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "kb_openapi_token_expired.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "format": "kb-openapi-access-token",
+                        "version": 1,
+                        "access_token": "expired",
+                        "token_type": "Bearer",
+                        "expires_at_epoch": 1999.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(KbOpenApiError, "만료"):
+                client.load_token_file(path)
 
 
 if __name__ == "__main__":

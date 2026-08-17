@@ -35,8 +35,7 @@ from .kb_hts import (
     normalize_kb_symbol,
 )
 from .kb_rest_api import (
-    KB_OPENAPI_DOCS,
-    KB_OPENAPI_PORTAL,
+    KB_OPENAPI_GUIDE,
     KbOpenApiClient,
     KbOpenApiError,
 )
@@ -1048,10 +1047,170 @@ class WatchlistMemoDialog(tk.Toplevel):
         self.destroy()
 
 
-class KbManualTradeWindow(tk.Toplevel):
-    """Separate KB H-able/API manual-trading window.
+class KbTokenLoginDialog(tk.Toplevel):
+    """Issue, import, and export a KB Open API bearer token."""
 
-    The old Kiwoom strategy loop is intentionally not used here. H-able
+    def __init__(self, parent: tk.Misc, client: KbOpenApiClient, on_connected) -> None:
+        super().__init__(parent)
+        self.client = client
+        self.on_connected = on_connected
+        self.title("KB Open API 토큰 로그인")
+        self.geometry("560x420")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        self.app_key_var = tk.StringVar(value="")
+        self.app_secret_var = tk.StringVar(value="")
+        self.status_var = tk.StringVar(value="토큰 미연결")
+        self.expiry_var = tk.StringVar(value="만료 시각: -")
+
+        body = ttk.Frame(self, padding=20)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(1, weight=1)
+        ttk.Label(
+            body,
+            text="KB Open API 토큰 로그인",
+            font=(UI_DISPLAY_FONT, 16, "bold"),
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 18))
+
+        ttk.Label(body, text="App Key").grid(row=1, column=0, sticky="w")
+        app_key_entry = ttk.Entry(body, textvariable=self.app_key_var, width=46)
+        app_key_entry.grid(row=1, column=1, sticky="ew", padx=(12, 0))
+        ttk.Label(body, text="App Secret").grid(row=2, column=0, sticky="w", pady=(12, 0))
+        ttk.Entry(body, textvariable=self.app_secret_var, show="*", width=46).grid(
+            row=2, column=1, sticky="ew", padx=(12, 0), pady=(12, 0)
+        )
+
+        issue_row = ttk.Frame(body)
+        issue_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        ttk.Button(
+            issue_row,
+            text="토큰 발급·연결",
+            command=self._issue_token,
+            style="Blue.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            issue_row,
+            text="토큰 파일 불러오기",
+            command=self._load_token_file,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            issue_row,
+            text="내 컴퓨터에 토큰 파일 저장",
+            command=self._save_token_file,
+        ).pack(side="left", padx=(8, 0))
+
+        status_box = ttk.LabelFrame(body, text="연결 상태", padding=12)
+        status_box.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        status_box.columnconfigure(0, weight=1)
+        ttk.Label(
+            status_box,
+            textvariable=self.status_var,
+            font=(UI_DISPLAY_FONT, 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(status_box, textvariable=self.expiry_var, foreground=UI_MUTED).grid(
+            row=1, column=0, sticky="w", pady=(6, 0)
+        )
+
+        ttk.Label(
+            body,
+            text="토큰 파일은 비밀번호처럼 보호해야 합니다. App Secret은 파일에 저장하지 않습니다.",
+            foreground=UI_MUTED,
+            wraplength=510,
+            justify="left",
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(14, 0))
+
+        footer = ttk.Frame(body)
+        footer.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        ttk.Button(
+            footer,
+            text="KB 토큰 발급 안내",
+            command=lambda: webbrowser.open(f"{KB_OPENAPI_GUIDE}#page1-2"),
+        ).pack(side="left")
+        ttk.Button(footer, text="닫기", command=self.destroy).pack(side="right")
+
+        self._refresh_status()
+        app_key_entry.focus_set()
+        _show_centered_dialog(self)
+        self.grab_set()
+
+    def _refresh_status(self, message: str = "") -> None:
+        if self.client.is_connected:
+            expires = datetime.fromtimestamp(self.client.token_expires_at).strftime("%Y-%m-%d %H:%M:%S")
+            self.status_var.set(message or "KB Access Token 연결됨")
+            self.expiry_var.set(f"만료 시각: {expires} · 남은 시간 {self.client.token_seconds_remaining:,}초")
+        else:
+            self.status_var.set(message or "토큰 미연결")
+            self.expiry_var.set("만료 시각: -")
+
+    def _notify_connected(self, message: str) -> None:
+        self._refresh_status(message)
+        self.on_connected(message)
+
+    def _issue_token(self) -> None:
+        try:
+            message = self.client.connect(self.app_key_var.get(), self.app_secret_var.get())
+        except KbOpenApiError as exc:
+            self._refresh_status("토큰 발급 실패")
+            messagebox.showerror("KB 토큰 발급 실패", str(exc), parent=self)
+            return
+        self.app_secret_var.set("")
+        self._notify_connected(message)
+
+    def _load_token_file(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="KB 토큰 파일 불러오기",
+            filetypes=(("KB 토큰 파일", "*.json"), ("모든 파일", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            message = self.client.load_token_file(path)
+        except KbOpenApiError as exc:
+            self._refresh_status("토큰 파일 로그인 실패")
+            messagebox.showerror("KB 토큰 파일 오류", str(exc), parent=self)
+            return
+        self._notify_connected(message)
+
+    def _save_token_file(self) -> None:
+        if not self.client.is_connected:
+            messagebox.showwarning(
+                "KB 토큰 파일 저장",
+                "먼저 App Key와 App Secret으로 토큰을 발급하거나 토큰 파일을 불러와 주세요.",
+                parent=self,
+            )
+            return
+        downloads = Path.home() / "Downloads"
+        initial_directory = downloads if downloads.is_dir() else Path.home()
+        initial_name = f"kb_openapi_token_{datetime.now():%Y%m%d_%H%M%S}.json"
+        path = filedialog.asksaveasfilename(
+            parent=self,
+            title="내 컴퓨터에 KB 토큰 파일 저장",
+            initialdir=str(initial_directory),
+            initialfile=initial_name,
+            defaultextension=".json",
+            filetypes=(("KB 토큰 파일", "*.json"),),
+        )
+        if not path:
+            return
+        try:
+            saved = self.client.save_token_file(path)
+        except KbOpenApiError as exc:
+            messagebox.showerror("KB 토큰 파일 저장 실패", str(exc), parent=self)
+            return
+        messagebox.showinfo(
+            "KB 토큰 파일 저장 완료",
+            f"내 컴퓨터에 저장했습니다.\n{saved}\n\n이 파일을 다른 사람에게 보내지 마세요.",
+            parent=self,
+        )
+
+
+class KbManualTradeWindow(tk.Toplevel):
+    """Separate KB HTS/API manual-trading window.
+
+    The old Kiwoom strategy loop is intentionally not used here. KB HTS
     handoff remains available, while the official KB Open API can be used for
     a quote and an explicitly confirmed manual cash order.
     """
@@ -1059,7 +1218,7 @@ class KbManualTradeWindow(tk.Toplevel):
     def __init__(self, parent: "TraderApp") -> None:
         super().__init__(parent)
         self.parent_app = parent
-        self.title("KB H-able 수동매매")
+        self.title("KB 수동거래")
         self.geometry("760x700")
         self.minsize(680, 620)
         self.transient(parent)
@@ -1073,14 +1232,12 @@ class KbManualTradeWindow(tk.Toplevel):
         self.side_var = tk.StringVar(value="BUY")
         self.status_var = tk.StringVar(value="KB HTS OFF")
         self.kb_api_status_var = tk.StringVar(value="KB API OFF")
-        self.kb_app_key_var = tk.StringVar(value="")
-        self.kb_app_secret_var = tk.StringVar(value="")
         self.kb_account_var = tk.StringVar(value="")
         self.kb_account_password_var = tk.StringVar(value="")
         self.kb_order_enabled_var = tk.BooleanVar(value=False)
         self._kb_quote_symbol = ""
         self._kb_quote_at = 0.0
-        self.detail_var = tk.StringVar(value="KB H-able 실행 여부를 확인해 주세요.")
+        self.detail_var = tk.StringVar(value="KB HTS 실행 여부를 확인해 주세요.")
         self.handoff_var = tk.StringVar(
             value="종목을 세팅하고 현재가를 불러온 뒤 HTS 전달을 누르세요."
         )
@@ -1094,7 +1251,7 @@ class KbManualTradeWindow(tk.Toplevel):
         header.columnconfigure(1, weight=1)
         ttk.Label(
             header,
-            text="KB H-able 수동매매",
+            text="KB 수동거래",
             font=(UI_DISPLAY_FONT, 16, "bold"),
         ).grid(row=0, column=0, sticky="w")
         self.status_button = ttk.Button(
@@ -1133,27 +1290,31 @@ class KbManualTradeWindow(tk.Toplevel):
         api_box.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         for column in range(7):
             api_box.columnconfigure(column, weight=1 if column in {1, 3, 5} else 0)
-        ttk.Label(api_box, text="App Key").grid(row=0, column=0, sticky="w")
-        ttk.Entry(api_box, textvariable=self.kb_app_key_var, width=20).grid(
-            row=0, column=1, sticky="ew", padx=(6, 10)
+        ttk.Button(
+            api_box,
+            text="KB 토큰 로그인",
+            command=self._connect_kb_api,
+            style="Blue.TButton",
+        ).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(
+            api_box,
+            text="토큰 파일 불러오기",
+            command=self._load_kb_token_file,
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Button(api_box, text="연결 해제", command=self._disconnect_kb_api).grid(
+            row=0, column=2, sticky="w", padx=(8, 0)
         )
-        ttk.Label(api_box, text="App Secret").grid(row=0, column=2, sticky="w")
-        ttk.Entry(api_box, textvariable=self.kb_app_secret_var, show="*", width=20).grid(
-            row=0, column=3, sticky="ew", padx=(6, 10)
+        ttk.Label(api_box, textvariable=self.kb_api_status_var, foreground=UI_MUTED).grid(
+            row=0, column=3, sticky="w", padx=(8, 0)
         )
         ttk.Button(
             api_box,
-            text="KB API 연결",
-            command=self._connect_kb_api,
-            style="Blue.TButton",
-        ).grid(row=0, column=4, padx=(0, 6))
-        ttk.Button(api_box, text="연결 해제", command=self._disconnect_kb_api).grid(
-            row=0, column=5, sticky="w"
+            text="KB Open API 안내",
+            command=lambda: webbrowser.open(KB_OPENAPI_GUIDE),
+        ).grid(row=0, column=6, sticky="e")
+        ttk.Label(api_box, text="KB 계좌번호(주문 시)").grid(
+            row=1, column=0, sticky="w", pady=(8, 0)
         )
-        ttk.Label(api_box, textvariable=self.kb_api_status_var, foreground=UI_MUTED).grid(
-            row=0, column=6, sticky="e", padx=(8, 0)
-        )
-        ttk.Label(api_box, text="KB 계좌번호(주문 시)").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(api_box, textvariable=self.kb_account_var, width=18).grid(
             row=1, column=1, sticky="w", padx=(6, 10), pady=(8, 0)
         )
@@ -1166,14 +1327,9 @@ class KbManualTradeWindow(tk.Toplevel):
             text="KB API 수동 주문 허용",
             variable=self.kb_order_enabled_var,
         ).grid(row=1, column=4, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Button(
-            api_box,
-            text="KB Open API 안내",
-            command=lambda: webbrowser.open(KB_OPENAPI_PORTAL),
-        ).grid(row=1, column=6, sticky="e", pady=(8, 0))
         ttk.Label(
             api_box,
-            text="키는 저장하지 않으며, 주문은 확인창 승인 후에만 전송됩니다.",
+            text="App Secret은 저장하지 않습니다. 토큰 파일은 직접 저장한 경우에만 생성됩니다.",
             foreground=UI_MUTED,
         ).grid(row=2, column=0, columnspan=7, sticky="w", pady=(8, 0))
 
@@ -1304,18 +1460,28 @@ class KbManualTradeWindow(tk.Toplevel):
         self.quantity_var.set(str(max(1, quantity + int(delta))))
 
     def _connect_kb_api(self) -> None:
-        try:
-            message = self.parent_app.kb_api.connect(
-                self.kb_app_key_var.get(),
-                self.kb_app_secret_var.get(),
-            )
-        except KbOpenApiError as exc:
-            self.kb_api_status_var.set("KB API OFF")
-            self.parent_app._show_warning("KB Open API 연결", str(exc), parent=self)
-            return
+        KbTokenLoginDialog(self, self.parent_app.kb_api, self._on_kb_token_connected)
+
+    def _on_kb_token_connected(self, message: str) -> None:
         self.kb_api_status_var.set("KB API ON")
         self.handoff_var.set(message)
         self._refresh_market()
+
+    def _load_kb_token_file(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self,
+            title="KB 토큰 파일 불러오기",
+            filetypes=(("KB 토큰 파일", "*.json"), ("모든 파일", "*.*")),
+        )
+        if not path:
+            return
+        try:
+            message = self.parent_app.kb_api.load_token_file(path)
+        except KbOpenApiError as exc:
+            self.kb_api_status_var.set("KB API OFF")
+            self.parent_app._show_warning("KB 토큰 파일 로그인", str(exc), parent=self)
+            return
+        self._on_kb_token_connected(message)
 
     def _disconnect_kb_api(self) -> None:
         self.parent_app.kb_api.disconnect()
@@ -1463,13 +1629,13 @@ class KbManualTradeWindow(tk.Toplevel):
     def _choose_hts_executable(self) -> None:
         path = filedialog.askopenfilename(
             parent=self,
-            title="KB H-able 실행 파일 선택",
+            title="KB HTS 실행 파일 선택",
             filetypes=(("실행 파일", "*.exe"), ("모든 파일", "*.*")),
         )
         if not path:
             return
         self.parent_app.service.storage.set_app_setting("kb.hts_path", path)
-        self.handoff_var.set(f"KB H-able 실행 경로를 저장했습니다: {Path(path).name}")
+        self.handoff_var.set(f"KB HTS 실행 경로를 저장했습니다: {Path(path).name}")
 
     def _launch_hts(self) -> None:
         path = self.parent_app.service.storage.get_app_setting("kb.hts_path", "")
@@ -1501,12 +1667,12 @@ class KbManualTradeWindow(tk.Toplevel):
             self.clipboard_append(payload)
             self.update()
         except tk.TclError:
-            self.handoff_var.set("클립보드 접근에 실패했습니다. KB H-able을 직접 확인해 주세요.")
+            self.handoff_var.set("클립보드 접근에 실패했습니다. KB HTS를 직접 확인해 주세요.")
             return
         focused = focus_kb_hts_window()
-        destination = "KB H-able 창을 앞으로 가져왔습니다." if focused else "KB H-able 창을 찾지 못했습니다."
+        destination = "KB HTS 창을 앞으로 가져왔습니다." if focused else "KB HTS 창을 찾지 못했습니다."
         self.handoff_var.set(
-            f"{destination} 종목·가격·주문 입력값을 클립보드에 복사했습니다. H-able에서 확인 후 직접 주문하세요."
+            f"{destination} 종목·가격·주문 입력값을 클립보드에 복사했습니다. KB HTS에서 확인 후 직접 주문하세요."
         )
 
 
@@ -2487,8 +2653,8 @@ class TraderApp(tk.Tk):
         window = tk.Toplevel(self)
         self._application_settings_window = window
         window.title("카와이 증권 설정")
-        window.geometry("560x650")
-        window.minsize(520, 600)
+        window.geometry("580x760")
+        window.minsize(540, 700)
         window.transient(self)
         window.configure(background=UI_BACKGROUND)
 
@@ -2591,6 +2757,54 @@ class TraderApp(tk.Tk):
             ).grid(row=row, column=2, pady=3)
         sound_frame.columnconfigure(1, weight=1)
 
+        legacy_frame = ttk.LabelFrame(body, text="기존 HTS 설정 가져오기", padding=12)
+        legacy_frame.pack(fill="x", pady=(12, 0))
+        legacy_path = self.service.storage.get_app_setting("legacy_settings.imported_path", "")
+        legacy_status_var = tk.StringVar(
+            value=f"마지막 가져오기: {legacy_path}" if legacy_path else "아직 가져온 설정 파일이 없습니다."
+        )
+        ttk.Label(
+            legacy_frame,
+            text="차트·관심종목·메모·환경설정 백업 파일을 선택하면 카와이 증권 설정 폴더에 보관합니다.",
+            style="Muted.TLabel",
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(legacy_frame, textvariable=legacy_status_var, style="Muted.TLabel").pack(
+            anchor="w",
+            pady=(6, 8),
+        )
+        ttk.Button(
+            legacy_frame,
+            text="기존 설정 가져오기",
+            command=lambda: self._import_legacy_hts_settings(legacy_status_var, window),
+        ).pack(anchor="w")
+
+        default_windows_frame = ttk.LabelFrame(body, text="PDF 기준 기본 실행 창 구성", padding=12)
+        default_windows_frame.pack(fill="x", pady=(12, 0))
+        default_windows_var = tk.StringVar(
+            value=self.service.storage.get_app_setting(
+                "hts.default_windows",
+                "0000,0001,0600,0130,0312,0321,0328,0329,0402,0913,8284",
+            )
+        )
+        ttk.Label(
+            default_windows_frame,
+            text="신규 설치 기준 기본 창: 0000 / 0001 / 0600 / 0130 / 0312 / 0321 / 0328 / 0329 / 0402 / 0913 / 8284",
+            style="Muted.TLabel",
+            wraplength=480,
+            justify="left",
+        ).pack(anchor="w")
+        ttk.Label(default_windows_frame, textvariable=default_windows_var).pack(
+            anchor="w",
+            pady=(6, 8),
+        )
+        ttk.Button(
+            default_windows_frame,
+            text="기본 실행 창 목록 저장",
+            command=lambda: self._save_default_hts_windows(default_windows_var),
+        ).pack(anchor="w")
+
         def cancel() -> None:
             self.window_opacity_var.set(original_opacity)
             self._apply_window_opacity(original_opacity)
@@ -2625,6 +2839,57 @@ class TraderApp(tk.Tk):
         )
         if selected:
             variable.set(selected)
+
+    def _import_legacy_hts_settings(
+        self,
+        status_var: tk.StringVar | None = None,
+        parent: tk.Misc | None = None,
+    ) -> None:
+        selected = filedialog.askopenfilename(
+            parent=parent or self,
+            title="기존 HTS 설정 파일 선택",
+            filetypes=(
+                ("설정/백업 파일", "*.json *.csv *.dat *.ini *.zip *.cfg *.xml"),
+                ("모든 파일", "*.*"),
+            ),
+        )
+        if not selected:
+            return
+        source = Path(selected)
+        target_dir = Path.home() / "Documents" / "KawaiiSecurities" / "imported-settings"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = target_dir / f"{stamp}_{source.name}"
+        try:
+            shutil.copy2(source, target)
+        except OSError as exc:
+            self._show_error("기존 설정 가져오기 실패", f"설정 파일을 복사하지 못했습니다. {exc}", parent)
+            return
+        self.service.storage.set_app_setting("legacy_settings.imported_path", str(target))
+        self.service.storage.set_app_setting(
+            "legacy_settings.imported_at",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        message = f"기존 설정 보관 완료: {target}"
+        if status_var is not None:
+            status_var.set(message)
+        self._update_transfer_status("good")
+        self.service.storage.log("INFO", "설정", message)
+
+    def _save_default_hts_windows(self, status_var: tk.StringVar | None = None) -> None:
+        default_windows = "0000,0001,0600,0130,0312,0321,0328,0329,0402,0913,8284"
+        self.service.storage.set_app_setting("hts.default_windows", default_windows)
+        self.service.storage.set_app_setting(
+            "hts.default_windows_saved_at",
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        )
+        if status_var is not None:
+            status_var.set(default_windows)
+        self.service.storage.log(
+            "INFO",
+            "설정",
+            f"PDF 기준 기본 실행 창 목록을 저장했습니다: {default_windows}",
+        )
 
     def _save_application_settings(
         self,
@@ -2763,7 +3028,7 @@ class TraderApp(tk.Tk):
         self.rowconfigure(2, weight=1)
         self.connection_state_var = tk.StringVar(value="OFF 연결 안됨")
         self.kb_hts_status_var = tk.StringVar(value="KB HTS OFF")
-        self.kb_hts_detail_var = tk.StringVar(value="KB H-able 실행 여부를 확인해 주세요.")
+        self.kb_hts_detail_var = tk.StringVar(value="KB HTS 실행 여부를 확인해 주세요.")
         self.clock_var = tk.StringVar(value="----년 --월 --일 --:--:--")
         self.transfer_state_var = tk.StringVar(value="전송 상태 대기")
         self.active_symbol_tag_var = tk.StringVar(value="")
@@ -2886,12 +3151,13 @@ class TraderApp(tk.Tk):
             style="Danger.TButton",
         )
         self.kb_hts_button.grid(row=1, column=6, padx=(0, 8))
-        ttk.Button(
+        self.kb_manual_button = ttk.Button(
             header,
-            text="KB 수동매매",
+            text="KB 수동거래",
             command=self._open_kb_manual_window,
             style="Blue.TButton",
-        ).grid(row=1, column=7, padx=(0, 8))
+        )
+        self.kb_manual_button.grid(row=1, column=7, padx=(0, 8))
         ttk.Button(header, text="관심종목", command=self._open_watchlist_window).grid(
             row=1,
             column=8,
@@ -2966,7 +3232,21 @@ class TraderApp(tk.Tk):
             padding=(9, 3),
             style="Neutral.Badge.TLabel",
         )
-        self.transfer_badge.grid(row=0, column=7, sticky="e")
+        self.transfer_badge.grid(row=0, column=7, sticky="e", padx=(0, 8))
+        quick_windows = ttk.Frame(status_strip, style="Header.TFrame")
+        quick_windows.grid(row=0, column=8, sticky="e")
+        for label, command in (
+            ("0", self._open_kb_manual_window),
+            ("1", self._focus_realtime_rank_panel),
+            ("2", self._open_kb_manual_window),
+            ("3", self._open_kb_manual_window),
+        ):
+            ttk.Button(
+                quick_windows,
+                text=label,
+                width=3,
+                command=command,
+            ).pack(side="left", padx=(0, 3))
         tag_strip = ttk.Frame(header, style="Header.TFrame")
         tag_strip.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(5, 0))
         tag_strip.columnconfigure(1, weight=1)
@@ -2984,7 +3264,7 @@ class TraderApp(tk.Tk):
         self._update_connection_badge(False)
         self._build_window_opacity_control()
 
-        controls = ttk.LabelFrame(self, text="종목 · KB HTS 수동매매 설정", padding=(12, 10))
+        controls = ttk.LabelFrame(self, text="종목 · KB HTS 수동거래 설정", padding=(12, 10))
         self.controls = controls
         controls.grid(row=1, column=0, sticky="ew", padx=12)
         for idx in range(10):
@@ -3035,7 +3315,7 @@ class TraderApp(tk.Tk):
         )
         self.trade_ready_var = tk.StringVar(value="거래 준비: 종목번호와 회사명, 계좌번호를 확인해 주세요.")
         self.kb_manual_summary_var = tk.StringVar(
-            value="KB HTS 수동매매 · 계좌번호와 계좌비밀번호를 사용하지 않습니다."
+            value="KB HTS 수동거래 · 계좌번호와 계좌비밀번호를 사용하지 않습니다."
         )
 
         self._field(controls, "종목번호(6자리)", self.symbol_var, 0)
@@ -3128,7 +3408,7 @@ class TraderApp(tk.Tk):
         actions.columnconfigure(3, weight=1)
         ttk.Button(
             actions,
-            text="KB 수동매매 창 열기",
+            text="KB 수동거래 창 열기",
             command=self._open_kb_manual_window,
             style="Accent.TButton",
         ).grid(row=0, column=0, sticky="w")
@@ -3788,6 +4068,16 @@ class TraderApp(tk.Tk):
             return
         self._kb_manual_window = KbManualTradeWindow(self)
 
+    def _focus_realtime_rank_panel(self) -> None:
+        if self._side_panel_collapsed:
+            self._toggle_side_panel()
+        self.lift()
+        self.volume_rank_panel.focus_set()
+        self.volume_rank_selection_var.set(
+            "1번 창 활성: 실시간 종목 조회수와 거래대금 상위창을 표시했습니다."
+        )
+        self.after_idle(self._request_rankings)
+
     def _check_kb_hts_status(self, show_message: bool = False) -> KbHtsStatus:
         status = detect_kb_hts()
         self._kb_hts_status = status
@@ -3807,9 +4097,9 @@ class TraderApp(tk.Tk):
     ) -> None:
         detail = status.message
         if status.connected:
-            detail += "\n\n실행 상태만 확인한 것입니다. 주문은 KB H-able에서 직접 확인하고 전송하세요."
+            detail += "\n\n실행 상태만 확인한 것입니다. 주문은 KB HTS에서 직접 확인하고 전송하세요."
         else:
-            detail += "\n\nKB H-able을 실행한 뒤 다시 상태를 확인하세요."
+            detail += "\n\nKB HTS를 실행한 뒤 다시 상태를 확인하세요."
         messagebox.showinfo("KB HTS 연결 상태", detail, parent=parent or self)
 
     def _schedule_kb_hts_poll(self) -> None:
@@ -4087,6 +4377,7 @@ class TraderApp(tk.Tk):
         self.volume_rank_selection_var = tk.StringVar(
             value="종목을 더블클릭하면 현재가·차트·실시간 시세가 연결됩니다."
         )
+        self.rank_sector_grouped_var = tk.BooleanVar(value=False)
         self._create_rank_marker_images()
 
         market_toolbar = ttk.Frame(panel)
@@ -4117,6 +4408,12 @@ class TraderApp(tk.Tk):
         )
         rank_group_combo.pack(side="left")
         rank_group_combo.bind("<<ComboboxSelected>>", self._save_link_group)
+        ttk.Checkbutton(
+            market_toolbar,
+            text="#섹터 모아보기",
+            variable=self.rank_sector_grouped_var,
+            command=self._toggle_sector_grouping,
+        ).pack(side="left", padx=(10, 0))
 
         volume_panel = ttk.LabelFrame(
             panel,
@@ -4666,7 +4963,7 @@ class TraderApp(tk.Tk):
         for item in self.volume_rank_table.get_children():
             self.volume_rank_table.delete(item)
         selected_item = ""
-        for quote in rows[:15]:
+        for quote in self._rank_rows_for_display(rows)[:15]:
             item_id = f"{quote.rank:02d}:{quote.symbol}"
             self.volume_rank_table.insert(
                 "",
@@ -4682,6 +4979,39 @@ class TraderApp(tk.Tk):
             self.volume_rank_table.selection_set(selected_item)
             self.volume_rank_table.focus(selected_item)
             self.volume_rank_table.see(selected_item)
+
+    def _rank_rows_for_display(self, rows: list[VolumeRankQuote]) -> list[VolumeRankQuote]:
+        if not getattr(self, "rank_sector_grouped_var", None) or not self.rank_sector_grouped_var.get():
+            return list(rows)
+
+        def sector_for(quote: VolumeRankQuote) -> str:
+            memo = self.service.storage.watchlist_memo(quote.symbol).strip()
+            first = memo.split(maxsplit=1)[0] if memo else ""
+            return first if first.startswith("#") and len(first) > 1 else "#미분류"
+
+        sector_totals: dict[str, float] = {}
+        for quote in rows:
+            sector = sector_for(quote)
+            sector_totals[sector] = sector_totals.get(sector, 0.0) + float(quote.trade_value or 0)
+        return sorted(
+            rows,
+            key=lambda quote: (
+                sector_for(quote) == "#미분류",
+                -sector_totals.get(sector_for(quote), 0.0),
+                sector_for(quote),
+                -float(quote.trade_value or 0),
+                quote.rank,
+            ),
+        )
+
+    def _toggle_sector_grouping(self) -> None:
+        enabled = bool(self.rank_sector_grouped_var.get())
+        mode = "#섹터별 모아보기 ON" if enabled else "#섹터별 모아보기 OFF"
+        self.volume_rank_selection_var.set(
+            f"{mode} · 우클릭 메모 첫 단어에 #반도체처럼 입력하면 섹터로 묶입니다."
+        )
+        self._render_volume_rank_rows(self.service.volume_ranking)
+        self._render_trade_value_rank_rows(self.service.trade_value_ranking)
 
     @staticmethod
     def _volume_rank_values(quote: VolumeRankQuote) -> tuple:
@@ -4742,7 +5072,7 @@ class TraderApp(tk.Tk):
         for item in self.trade_value_rank_table.get_children():
             self.trade_value_rank_table.delete(item)
         selected_item = ""
-        for quote in rows[:15]:
+        for quote in self._rank_rows_for_display(rows)[:15]:
             item_id = f"{quote.rank:02d}:{quote.symbol}"
             self.trade_value_rank_table.insert(
                 "",
@@ -7881,7 +8211,7 @@ class TraderApp(tk.Tk):
         price = self._selected_current_price()
         price_text = f"{price:,.0f}원" if price > 0 else "현재가 미조회"
         self.kb_manual_summary_var.set(
-            f"KB HTS 수동매매 · 종목 {snapshot.symbol} {snapshot.symbol_name or '종목명 미조회'} · "
+            f"KB HTS 수동거래 · 종목 {snapshot.symbol} {snapshot.symbol_name or '종목명 미조회'} · "
             f"현재가 {price_text} · 계좌번호/계좌비밀번호 미사용 · {self.kb_hts_status_var.get()}"
         )
         self.trade_ready_var.set(self._format_trade_ready(snapshot))

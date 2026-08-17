@@ -8,11 +8,13 @@ an order without a user-enabled checkbox and a final confirmation dialog.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -26,6 +28,8 @@ KB_OPENAPI_GUIDE = "https://openapi.kbsec.com/guide_b2c"
 KB_OPENAPI_DOCS = "https://openapi.kbsec.com/apidoc_b2c"
 KB_OPENAPI_LIVE_URL = "https://developer.kbsec.com:32484"
 KB_OPENAPI_TIMEOUT_SECONDS = 10.0
+KB_TOKEN_FILE_FORMAT = "kb-openapi-access-token"
+KB_TOKEN_FILE_VERSION = 1
 
 
 class KbOpenApiError(RuntimeError):
@@ -100,6 +104,7 @@ class KbOpenApiClient:
         self._requester = requester or self._default_requester
         self._clock = clock
         self._token = ""
+        self._token_type = "Bearer"
         self._token_expires_at = 0.0
         self._app_key = ""
         self._last_quote: KbQuote | None = None
@@ -113,6 +118,14 @@ class KbOpenApiClient:
     @property
     def last_quote(self) -> KbQuote | None:
         return self._last_quote
+
+    @property
+    def token_expires_at(self) -> float:
+        return self._token_expires_at
+
+    @property
+    def token_seconds_remaining(self) -> int:
+        return max(0, int(self._token_expires_at - self._clock()))
 
     def connect(self, app_key: str, app_secret: str) -> str:
         app_key = str(app_key or "").strip()
@@ -141,12 +154,87 @@ class KbOpenApiClient:
             raise KbOpenApiError("KB Open API가 access_token을 반환하지 않았습니다.")
         expires_in = max(60.0, _number(body.get("expires_in") or body.get("expiresIn") or 1800))
         self._token = token
+        self._token_type = str(body.get("token_type") or body.get("tokenType") or "Bearer").strip() or "Bearer"
         self._token_expires_at = self._clock() + expires_in - 30.0
         self._app_key = app_key
         return "KB Open API 토큰 연결 완료"
 
+    def save_token_file(self, path: str | Path) -> Path:
+        """Save the active bearer token without persisting the app secret."""
+
+        if not self.is_connected:
+            raise KbOpenApiError("저장할 KB Access Token이 없거나 이미 만료되었습니다.")
+        target = Path(path).expanduser()
+        if not target.name:
+            raise KbOpenApiError("토큰 파일 저장 경로를 확인해 주세요.")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        expires_at = datetime.fromtimestamp(self._token_expires_at, tz=timezone.utc)
+        payload = {
+            "format": KB_TOKEN_FILE_FORMAT,
+            "version": KB_TOKEN_FILE_VERSION,
+            "access_token": self._token,
+            "token_type": self._token_type,
+            "expires_at": expires_at.isoformat(),
+            "expires_at_epoch": self._token_expires_at,
+            "base_url": self.base_url,
+        }
+        temporary = target.with_name(f".{target.name}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(temporary, target)
+            try:
+                os.chmod(target, 0o600)
+            except OSError:
+                pass
+        except OSError as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise KbOpenApiError("KB 토큰 파일을 저장할 수 없습니다.") from exc
+        return target
+
+    def load_token_file(self, path: str | Path) -> str:
+        """Load a locally saved bearer token after validating its expiry."""
+
+        source = Path(path).expanduser()
+        try:
+            payload = json.loads(source.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise KbOpenApiError("KB 토큰 파일을 읽을 수 없습니다.") from exc
+        if not isinstance(payload, dict) or payload.get("format") != KB_TOKEN_FILE_FORMAT:
+            raise KbOpenApiError("이 프로그램에서 저장한 KB 토큰 파일이 아닙니다.")
+        token = str(payload.get("access_token") or "").strip()
+        token_type = str(payload.get("token_type") or "Bearer").strip() or "Bearer"
+        try:
+            expires_at = float(payload.get("expires_at_epoch") or 0)
+        except (TypeError, ValueError):
+            expires_at = 0.0
+        if not expires_at:
+            try:
+                expires_at = datetime.fromisoformat(
+                    str(payload.get("expires_at") or "").replace("Z", "+00:00")
+                ).timestamp()
+            except (TypeError, ValueError):
+                expires_at = 0.0
+        if not token:
+            raise KbOpenApiError("토큰 파일에 Access Token이 없습니다.")
+        if token_type.lower() != "bearer" or any(character.isspace() for character in token):
+            raise KbOpenApiError("KB 토큰 파일의 인증 형식이 올바르지 않습니다.")
+        if expires_at <= self._clock():
+            raise KbOpenApiError("KB Access Token이 만료되었습니다. App Key로 다시 발급해 주세요.")
+        self.disconnect()
+        self._token = token
+        self._token_type = "Bearer"
+        self._token_expires_at = expires_at
+        return "KB 토큰 파일 로그인 완료"
+
     def disconnect(self) -> None:
         self._token = ""
+        self._token_type = "Bearer"
         self._token_expires_at = 0.0
         self._app_key = ""
         self._last_quote = None
@@ -263,7 +351,7 @@ class KbOpenApiClient:
             "Accept": "application/json",
         }
         if authorized:
-            headers["Authorization"] = f"Bearer {self._token}"
+            headers["Authorization"] = f"{self._token_type} {self._token}"
         response = self._requester(
             method,
             f"{self.base_url}{path}",
