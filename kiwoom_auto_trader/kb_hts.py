@@ -22,6 +22,18 @@ KB_HTS_TITLE_HINTS = ("h-able", "hable", "kb증권", "kb securities")
 KB_HTS_PROCESS_HINTS = ("h-able", "hable", "kbsec", "kb증권")
 
 
+def _hidden_subprocess_kwargs() -> dict:
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 @dataclass(frozen=True)
 class KbHtsStatus:
     """The best available local status of the KB HTS desktop application."""
@@ -49,6 +61,7 @@ def _tasklist_process_names() -> tuple[str, ...]:
             errors="replace",
             check=False,
             timeout=2,
+            **_hidden_subprocess_kwargs(),
         )
     except (OSError, subprocess.SubprocessError):
         return ()
@@ -129,7 +142,7 @@ def launch_kb_hts(executable_path: str = "") -> tuple[bool, str]:
     if not path.is_file():
         return False, f"KB HTS 실행 파일을 찾을 수 없습니다: {path}"
     try:
-        subprocess.Popen([str(path)], cwd=str(path.parent))
+        subprocess.Popen([str(path)], cwd=str(path.parent), **_hidden_subprocess_kwargs())
     except OSError as exc:
         return False, f"KB HTS 실행 실패: {exc}"
     return True, f"KB HTS 실행 요청 완료: {path.name}"
