@@ -1078,8 +1078,10 @@ class KbTokenLoginDialog(tk.Toplevel):
 
         self.app_key_var = tk.StringVar(value="")
         self.app_secret_var = tk.StringVar(value="")
-        self.status_var = tk.StringVar(value="토큰 미연결")
+        self.status_var = tk.StringVar(value="OFF 연결 안됨")
         self.expiry_var = tk.StringVar(value="만료 시각: -")
+        self.progress_var = tk.StringVar(value="1. App Key / App Secret을 준비해 주세요.")
+        self._status_color = UI_RED
 
         body = ttk.Frame(self, padding=20)
         body.pack(fill="both", expand=True)
@@ -1115,11 +1117,6 @@ class KbTokenLoginDialog(tk.Toplevel):
         ).pack(side="left")
         ttk.Button(
             issue_row,
-            text="토큰 파일 불러오기",
-            command=self._load_token_file,
-        ).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            issue_row,
             text="App Key 파일 선택",
             command=lambda: self._choose_key_text_file("App Key", self.app_key_var),
         ).pack(side="left", padx=(8, 0))
@@ -1128,39 +1125,39 @@ class KbTokenLoginDialog(tk.Toplevel):
             text="App Secret 파일 선택",
             command=lambda: self._choose_key_text_file("App Secret", self.app_secret_var),
         ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            issue_row,
+            text="기본 키 2개 불러오기",
+            command=self._load_default_key_files,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            issue_row,
+            text="연결 점검",
+            command=self._diagnose_connection,
+        ).pack(side="left", padx=(8, 0))
+
         key_row = ttk.Frame(body)
         key_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(
             key_row,
-            text="기본 키 2개 불러오기",
-            command=self._load_default_key_files,
-        ).pack(side="left")
-        ttk.Button(
-            key_row,
-            text="키 폴더 열기",
-            command=self._open_default_key_folder,
-        ).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            key_row,
-            text="키 저장 메뉴얼 열기",
-            command=self._open_key_manual,
-        ).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            key_row,
             text="내 컴퓨터에 토큰 파일 저장",
             command=self._save_token_file,
-        ).pack(side="left", padx=(8, 0))
+        ).pack(side="left")
 
         status_box = ttk.LabelFrame(body, text="연결 상태", padding=12)
         status_box.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(18, 0))
         status_box.columnconfigure(0, weight=1)
-        ttk.Label(
+        self.status_label = ttk.Label(
             status_box,
             textvariable=self.status_var,
             font=(UI_DISPLAY_FONT, 11, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+        )
+        self.status_label.grid(row=0, column=0, sticky="w")
         ttk.Label(status_box, textvariable=self.expiry_var, foreground=UI_MUTED).grid(
             row=1, column=0, sticky="w", pady=(6, 0)
+        )
+        ttk.Label(status_box, textvariable=self.progress_var, foreground=UI_MUTED).grid(
+            row=2, column=0, sticky="w", pady=(6, 0)
         )
 
         ttk.Label(
@@ -1178,6 +1175,16 @@ class KbTokenLoginDialog(tk.Toplevel):
             text="KB 토큰 발급 안내",
             command=lambda: webbrowser.open(f"{KB_OPENAPI_GUIDE}#page1-2"),
         ).pack(side="left")
+        ttk.Button(
+            footer,
+            text="키 폴더 열기",
+            command=self._open_default_key_folder,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            footer,
+            text="키 저장 메뉴얼 열기",
+            command=self._open_key_manual,
+        ).pack(side="left", padx=(8, 0))
         ttk.Button(footer, text="닫기", command=self.destroy).pack(side="right")
 
         self._refresh_status()
@@ -1187,27 +1194,79 @@ class KbTokenLoginDialog(tk.Toplevel):
         self.grab_set()
 
     def _refresh_status(self, message: str = "") -> None:
+        ready = bool(self.app_key_var.get().strip() and self.app_secret_var.get().strip())
         if self.client.is_connected:
             expires = datetime.fromtimestamp(self.client.token_expires_at).strftime("%Y-%m-%d %H:%M:%S")
-            self.status_var.set(message or "KB Access Token 연결됨")
+            self.status_var.set("ON 연결됨")
             self.expiry_var.set(f"만료 시각: {expires} · 남은 시간 {self.client.token_seconds_remaining:,}초")
+            self._status_color = UI_GREEN
+            self.progress_var.set("4. 토큰 발급이 완료되어 연결되었습니다.")
         else:
-            self.status_var.set(message or "토큰 미연결")
+            self.status_var.set("OFF 연결 안됨")
             self.expiry_var.set("만료 시각: -")
+            self._status_color = UI_RED
+            if ready:
+                self.progress_var.set("2. 키 입력이 완료되었습니다. 토큰 발급 버튼을 누르세요.")
+            else:
+                self.progress_var.set("1. App Key / App Secret을 준비해 주세요.")
+        try:
+            self.status_label.configure(foreground=self._status_color)
+        except tk.TclError:
+            pass
 
     def _notify_connected(self, message: str) -> None:
         self._refresh_status(message)
         self.on_connected(message)
 
+    @staticmethod
+    def _short_error_code(message: str) -> str:
+        for token in ("E021", "E022", "E023", "E024", "E025", "E026"):
+            if token in message:
+                return token
+        return ""
+
     def _issue_token(self) -> None:
+        self.progress_var.set("3. KB 토큰 발급 요청 중입니다.")
+        app_key = self.app_key_var.get().strip()
+        app_secret = self.app_secret_var.get().strip()
+        if not app_key or not app_secret:
+            self.progress_var.set("1. App Key와 App Secret을 먼저 채워 주세요.")
+            self._refresh_status("키 입력 필요")
+            messagebox.showwarning(
+                "KB 토큰 발급",
+                "App Key와 App Secret을 모두 입력한 뒤 다시 시도해 주세요.",
+                parent=self,
+            )
+            return
         try:
-            message = self.client.connect(self.app_key_var.get(), self.app_secret_var.get())
+            message = self.client.connect(app_key, app_secret)
         except KbOpenApiError as exc:
-            self._refresh_status("토큰 발급 실패")
-            messagebox.showerror("KB 토큰 발급 실패", str(exc), parent=self)
+            error_text = str(exc)
+            code = self._short_error_code(error_text)
+            self.progress_var.set(
+                f"3. KB 토큰 발급 요청에서 실패했습니다.{f' ({code})' if code else ''}"
+            )
+            self._refresh_status("OFF 연결 안됨")
+            if "HTTP 오류 500" in error_text:
+                error_text = (
+                    "KB Open API 서버가 500을 반환했습니다.\n\n"
+                    "확인 순서:\n"
+                    "1) App Key와 App Secret이 KB 홈페이지 신청현황의 값과 정확히 일치하는지\n"
+                    "2) Open API 서비스 사용신청이 완료되었는지\n"
+                    "3) 사용 계좌와 계좌 권한이 연결되어 있는지\n"
+                    "4) 등록한 IP가 현재 PC IP와 일치하는지\n"
+                    "5) 서비스가 해지 상태가 아닌지\n\n"
+                    "공식 가이드의 토큰 발급 항목을 다시 확인해 주세요."
+                )
+            messagebox.showerror("KB 토큰 발급 실패", error_text, parent=self)
             return
         self.app_secret_var.set("")
+        self.progress_var.set("4. 토큰 발급이 완료되었습니다.")
         self._notify_connected(message)
+        try:
+            self.status_label.configure(foreground=UI_GREEN)
+        except tk.TclError:
+            pass
 
     def _choose_key_text_file(self, label: str, target_var: tk.StringVar) -> None:
         initial_dir = _preferred_kb_key_dir()
@@ -1229,6 +1288,7 @@ class KbTokenLoginDialog(tk.Toplevel):
             return
         target_var.set(value)
         self._refresh_status(f"{label} 파일 입력 완료")
+        self.progress_var.set(f"2. {label} 파일을 불러왔습니다.")
 
     def _load_default_key_files(self, show_message: bool = True) -> None:
         key_dir = _preferred_kb_key_dir()
@@ -1258,12 +1318,40 @@ class KbTokenLoginDialog(tk.Toplevel):
         self.app_key_var.set(app_key)
         self.app_secret_var.set(app_secret)
         self._refresh_status("기본 키 파일 입력 완료")
+        self.progress_var.set("2. App Key와 App Secret 파일을 모두 불러왔습니다.")
         if show_message:
             messagebox.showinfo(
                 "KB 기본 키 파일",
                 f"기본 키 2개를 입력했습니다.\n\n{key_dir}",
                 parent=self,
             )
+
+    def _diagnose_connection(self) -> None:
+        app_key = self.app_key_var.get().strip()
+        app_secret = self.app_secret_var.get().strip()
+        if not app_key or not app_secret:
+            self.progress_var.set("1. 키 파일이 아직 비어 있습니다.")
+            self._refresh_status("OFF 연결 안됨")
+            messagebox.showwarning(
+                "KB 연결 점검",
+                "App Key와 App Secret을 먼저 채워 주세요.",
+                parent=self,
+            )
+            return
+        self.progress_var.set("2. 키 입력 확인 완료. 토큰 발급을 시험합니다.")
+        try:
+            message = self.client.connect(app_key, app_secret)
+        except KbOpenApiError as exc:
+            self._refresh_status("OFF 연결 안됨")
+            code = self._short_error_code(str(exc))
+            self.progress_var.set(
+                f"3. 토큰 발급 요청에서 실패했습니다.{f' ({code})' if code else ''}"
+            )
+            messagebox.showerror("KB 연결 점검", str(exc), parent=self)
+            return
+        self.app_secret_var.set("")
+        self.progress_var.set("4. 토큰 발급 성공. 연결 상태를 초록색으로 표시합니다.")
+        self._notify_connected(message)
 
     def _open_default_key_folder(self) -> None:
         key_dir = _preferred_kb_key_dir()
@@ -1287,7 +1375,7 @@ class KbTokenLoginDialog(tk.Toplevel):
         try:
             message = self.client.load_token_file(path)
         except KbOpenApiError as exc:
-            self._refresh_status("토큰 파일 로그인 실패")
+            self._refresh_status("OFF 연결 안됨")
             messagebox.showerror("KB 토큰 파일 오류", str(exc), parent=self)
             return
         self._notify_connected(message)

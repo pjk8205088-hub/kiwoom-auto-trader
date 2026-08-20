@@ -79,13 +79,27 @@ def _integer(value: Any) -> int:
 def _local_network_identity() -> tuple[str, str]:
     """Return the identifiers required by KB's dataHeader envelope."""
 
-    try:
-        ip_address = socket.gethostbyname(socket.gethostname())
-    except OSError:
-        ip_address = ""
+    ip_address = ""
+    for public_ip_url in (
+        "https://api.ipify.org?format=text",
+        "https://ifconfig.me/ip",
+    ):
+        try:
+            with urlopen(public_ip_url, timeout=3.0) as response:
+                candidate = response.read().decode("utf-8", errors="ignore").strip()
+        except Exception:
+            candidate = ""
+        if candidate:
+            ip_address = candidate
+            break
+    if not ip_address:
+        try:
+            ip_address = socket.gethostbyname(socket.gethostname())
+        except OSError:
+            ip_address = ""
     try:
         node = uuid.getnode()
-        mac_address = ":".join(f"{(node >> shift) & 0xFF:02x}" for shift in range(40, -1, -8))
+        mac_address = "-".join(f"{(node >> shift) & 0xFF:02X}" for shift in range(40, -1, -8))
     except (OSError, ValueError):
         mac_address = ""
     return ip_address, mac_address
@@ -108,7 +122,8 @@ class KbOpenApiClient:
         self._token_expires_at = 0.0
         self._app_key = ""
         self._last_quote: KbQuote | None = None
-        self._ip_address, self._mac_address = _local_network_identity()
+        self._ip_address: str | None = None
+        self._mac_address: str | None = None
         self.last_order_no = ""
 
     @property
@@ -321,13 +336,14 @@ class KbOpenApiClient:
         return order_no
 
     def _api_post(self, api_id: str, data_body: dict[str, Any]) -> dict[str, Any]:
+        ip_address, mac_address = self._network_identity()
         response = self._request(
             "POST",
             f"/api/v1/{api_id}",
             {
                 "dataHeader": {
-                    "ipAddr": self._ip_address,
-                    "macAddr": self._mac_address,
+                    "ipAddr": ip_address,
+                    "macAddr": mac_address,
                 },
                 "dataBody": data_body,
             },
@@ -336,6 +352,11 @@ class KbOpenApiClient:
         envelope = response.body
         data_body_response = envelope.get("dataBody")
         return data_body_response if isinstance(data_body_response, dict) else {}
+
+    def _network_identity(self) -> tuple[str, str]:
+        if not self._ip_address or not self._mac_address:
+            self._ip_address, self._mac_address = _local_network_identity()
+        return self._ip_address or "", self._mac_address or ""
 
     def _request(
         self,
@@ -352,14 +373,26 @@ class KbOpenApiClient:
         }
         if authorized:
             headers["Authorization"] = f"{self._token_type} {self._token}"
-        response = self._requester(
-            method,
-            f"{self.base_url}{path}",
-            headers,
-            body,
-            KB_OPENAPI_TIMEOUT_SECONDS,
-        )
+        try:
+            response = self._requester(
+                method,
+                f"{self.base_url}{path}",
+                headers,
+                body,
+                KB_OPENAPI_TIMEOUT_SECONDS,
+            )
+        except HTTPError as exc:
+            response = RestResponse(
+                exc.code,
+                dict(exc.headers.items()) if exc.headers is not None else {},
+                self._decode_error_body(exc),
+            )
+        except URLError as exc:
+            raise KbOpenApiError(f"KB Open API 서버에 연결할 수 없습니다: {exc.reason}") from exc
         if response.status_code >= 400:
+            error_message = self._extract_error_message(response.body)
+            if error_message:
+                raise KbOpenApiError(f"KB Open API HTTP 오류 {response.status_code} ({error_message})")
             raise KbOpenApiError(f"KB Open API HTTP 오류 {response.status_code}")
         response_body = response.body if isinstance(response.body, dict) else {}
         header = response_body.get("dataHeader")
@@ -374,6 +407,48 @@ class KbOpenApiClient:
                 ).strip()
                 raise KbOpenApiError(f"KB Open API 오류 {result_code}: {message}")
         return RestResponse(response.status_code, response.headers, response_body)
+
+    @staticmethod
+    def _decode_error_body(error: HTTPError) -> dict[str, Any] | str:
+        try:
+            raw = error.read()
+        except Exception:
+            return {}
+        for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+            try:
+                text = raw.decode(encoding)
+                break
+            except Exception:
+                text = ""
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text.strip()
+        return parsed if isinstance(parsed, dict) else {}
+
+    @staticmethod
+    def _extract_error_message(body: Any) -> str:
+        if not isinstance(body, dict):
+            return str(body or "").strip()
+        header = body.get("dataHeader")
+        if isinstance(header, dict):
+            code = str(header.get("processCode") or header.get("resultCode") or "").strip()
+            message = str(
+                header.get("processMessage")
+                or header.get("resultMessage")
+                or body.get("message")
+                or ""
+            ).strip()
+            if code and message:
+                return f"{code}: {message}"
+            if code:
+                return code
+            if message:
+                return message
+        message = str(body.get("message") or "").strip()
+        return message
 
     @staticmethod
     def _default_requester(
@@ -391,10 +466,31 @@ class KbOpenApiClient:
         )
         try:
             with urlopen(request, timeout=timeout) as response:
-                raw = response.read().decode("utf-8-sig")
-                parsed = json.loads(raw) if raw else {}
+                parsed = KbOpenApiClient._decode_json_bytes(response.read())
                 return RestResponse(response.status, dict(response.headers.items()), parsed)
         except HTTPError as exc:
-            raise KbOpenApiError(f"KB Open API HTTP 오류 {exc.code}") from exc
+            return RestResponse(
+                exc.code,
+                dict(exc.headers.items()) if exc.headers is not None else {},
+                KbOpenApiClient._decode_json_bytes(exc.read()),
+            )
         except URLError as exc:
             raise KbOpenApiError("KB Open API 서버에 연결할 수 없습니다.") from exc
+
+    @staticmethod
+    def _decode_json_bytes(raw: bytes) -> dict[str, Any] | str:
+        if not raw:
+            return {}
+        for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
+            try:
+                text = raw.decode(encoding)
+                break
+            except Exception:
+                text = ""
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return text.strip()
+        return parsed if isinstance(parsed, dict) else {}
