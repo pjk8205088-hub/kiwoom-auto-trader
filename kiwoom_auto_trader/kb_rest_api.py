@@ -19,6 +19,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from .models import BalanceSummary, Holding
 from .rest_api import RestResponse
 from .symbols import normalize_symbol
 
@@ -48,6 +49,35 @@ class KbQuote:
     raw: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class KbOrderableCash:
+    symbol: str
+    deposit: float
+    orderable_cash: float
+    orderable_substitute: float
+    orderable_total: float
+    max_orderable_amount: float
+    withdrawable_cash: float
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class KbOrderExecution:
+    order_no: str
+    symbol: str
+    name: str
+    side: str
+    ordered_quantity: int
+    executed_quantity: int
+    unfilled_quantity: int
+    order_price: float
+    executed_price: float
+    order_time: str
+    status: str
+    message: str
+    raw: dict[str, Any]
+
+
 KbRequester = Callable[
     [str, str, dict[str, str], dict[str, Any], float],
     RestResponse,
@@ -74,6 +104,21 @@ def _signed_number(value: Any, direction: Any) -> float:
 
 def _integer(value: Any) -> int:
     return int(abs(_number(value)))
+
+
+def _first_number(body: dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = body.get(key)
+        if value not in (None, ""):
+            return _number(value)
+    return 0.0
+
+
+def _split_account(account: str) -> tuple[str, str]:
+    digits = "".join(character for character in str(account or "") if character.isdigit())
+    if len(digits) > 2:
+        return digits[:-2], digits[-2:]
+    return digits, ""
 
 
 def _local_network_identity() -> tuple[str, str]:
@@ -152,24 +197,46 @@ class KbOpenApiClient:
             "POST",
             "/oauth2/token",
             {
-                "grant_type": "client_credentials",
                 "appKey": app_key,
                 "appSecret": app_secret,
+                "grantType": "client_credentials",
+                "dataHeader": {
+                    "ipAddr": "",
+                    "macAddr": "",
+                },
+                "dataBody": {
+                    "appKey": app_key,
+                    "appSecret": app_secret,
+                    "grantType": "client_credentials",
+                },
             },
             authorized=False,
         )
-        body = response.body
+        body = response.body if isinstance(response.body, dict) else {}
+        data_body = body.get("dataBody") if isinstance(body.get("dataBody"), dict) else {}
         token = str(
-            body.get("access_token")
+            data_body.get("access_token")
+            or data_body.get("accessToken")
+            or data_body.get("token")
+            or body.get("access_token")
             or body.get("accessToken")
             or body.get("token")
             or ""
         ).strip()
         if not token:
             raise KbOpenApiError("KB Open API가 access_token을 반환하지 않았습니다.")
-        expires_in = max(60.0, _number(body.get("expires_in") or body.get("expiresIn") or 1800))
+        expires_in = max(
+            60.0,
+            _number(
+                data_body.get("expires_in")
+                or data_body.get("expiresIn")
+                or body.get("expires_in")
+                or body.get("expiresIn")
+                or 1800
+            ),
+        )
         self._token = token
-        self._token_type = str(body.get("token_type") or body.get("tokenType") or "Bearer").strip() or "Bearer"
+        self._token_type = "bearer"
         self._token_expires_at = self._clock() + expires_in - 30.0
         self._app_key = app_key
         return "KB Open API 토큰 연결 완료"
@@ -192,6 +259,7 @@ class KbOpenApiClient:
             "expires_at": expires_at.isoformat(),
             "expires_at_epoch": self._token_expires_at,
             "base_url": self.base_url,
+            "appKey": self._app_key,
         }
         temporary = target.with_name(f".{target.name}.tmp")
         try:
@@ -223,7 +291,7 @@ class KbOpenApiClient:
         if not isinstance(payload, dict) or payload.get("format") != KB_TOKEN_FILE_FORMAT:
             raise KbOpenApiError("이 프로그램에서 저장한 KB 토큰 파일이 아닙니다.")
         token = str(payload.get("access_token") or "").strip()
-        token_type = str(payload.get("token_type") or "Bearer").strip() or "Bearer"
+        token_type = str(payload.get("token_type") or "bearer").strip() or "bearer"
         try:
             expires_at = float(payload.get("expires_at_epoch") or 0)
         except (TypeError, ValueError):
@@ -243,8 +311,9 @@ class KbOpenApiClient:
             raise KbOpenApiError("KB Access Token이 만료되었습니다. App Key로 다시 발급해 주세요.")
         self.disconnect()
         self._token = token
-        self._token_type = "Bearer"
+        self._token_type = "bearer"
         self._token_expires_at = expires_at
+        self._app_key = str(payload.get("appKey") or payload.get("app_key") or "").strip()
         return "KB 토큰 파일 로그인 완료"
 
     def disconnect(self) -> None:
@@ -279,6 +348,30 @@ class KbOpenApiClient:
         self._last_quote = quote
         return quote
 
+    def request_buy_orderable_cash(self, symbol: str) -> KbOrderableCash:
+        """Return the official domestic buy-orderable cash for a symbol."""
+
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KbOpenApiError("6자리 종목번호를 입력해 주세요.")
+        body = self._api_post(
+            "ssqm1802",
+            {
+                "is_no": symbol,
+                "bnd_mktio_ccd": "1",
+            },
+        )
+        return KbOrderableCash(
+            symbol=symbol,
+            deposit=_first_number(body, "tfnd"),
+            orderable_cash=_first_number(body, "ordr_psbl_csh"),
+            orderable_substitute=_first_number(body, "ordr_psbl_sbt"),
+            orderable_total=_first_number(body, "ordr_psbl_tl_amt", "pcnt100_ordr_psbl_amt"),
+            max_orderable_amount=_first_number(body, "mx_ordr_psbl_amt", "pcnt100_ordr_psbl_amt"),
+            withdrawable_cash=_first_number(body, "do_psbl_csh"),
+            raw=dict(body),
+        )
+
     def place_cash_order(
         self,
         account: str,
@@ -305,27 +398,25 @@ class KbOpenApiClient:
             raise KbOpenApiError("계좌 비밀번호는 4~8자리 숫자여야 합니다.")
 
         is_buy = normalized_side == "BUY"
+        _, account_suffix = _split_account(account)
         request_body = {
-            "gds_no1": "01" if is_buy else "",
-            "ordr_uprc": str(int(price)),
-            "gnl_ac_no1": account,
-            "ordr_jb_clsf": "2" if is_buy else "1",
-            "ordr_mng_no": "",
-            "ln_dt": "",
-            "acct_cd": "",
-            "crct_clsf": "",
-            "hts_pwd": str(account_password or "").strip(),
-            "gtc_ccd": "",
-            "spclz_ordr_ccd": "",
-            "is_cd": symbol,
-            "s_clsf": "" if is_buy else "2",
-            "orgn_ordr_no": "",
-            "sor_ordr_ccd": "N" if is_buy else "",
-            "stpd_prc": "",
-            "ordr_ccd": "00",
             "mkt_tm_clsf": "1",
+            "ordr_jb_clsf": "2" if is_buy else "1",
+            "s_clsf": "1",
+            "is_cd": symbol,
             "ordr_q": str(int(quantity)),
+            "ordr_uprc": str(int(price)),
+            "ordr_ccd": "00",
             "crdt_typ_cd": "00",
+            "ln_dt": "",
+            "crct_clsf": "",
+            "orgn_ordr_no": "",
+            "gtc_ccd": "",
+            "ordr_mng_no": "",
+            "spclz_ordr_ccd": "",
+            "acct_cd": account_suffix,
+            "sor_ordr_ccd": "S",
+            "stpd_prc": "",
         }
         body = self._api_post("ssam1802" if is_buy else "ssam1801", request_body)
         order_no = str(body.get("ordr_no") or "").strip()
@@ -334,6 +425,195 @@ class KbOpenApiClient:
             raise KbOpenApiError(message)
         self.last_order_no = order_no
         return order_no
+
+    def request_balance(self, account: str = "") -> BalanceSummary:
+        account_digits = "".join(character for character in str(account or "") if character.isdigit())
+        body = self._api_post(
+            "spqm2226",
+            {
+                "std_crncy_f": "2",
+                "exch_r_aplc_f": "2",
+                "fee_clsf": "1",
+                "srt_clsf": "1",
+                "rsrv_ordr_f": "",
+                "tl_asts_exch_val_amt": "",
+                "tl_tfnd_exch_val_amt": "",
+                "tl_scrts_exch_val_amt": "",
+                "tl_krw_val_amt": "",
+                "tl_krw_val_pl_amt": "",
+                "cn_f": "",
+                "nxt_key": "",
+            },
+        )
+        holdings = self._parse_balance_holdings(body)
+        deposit = _first_number(body, "krw_tfnd", "tfnd", "tl_tfnd_exch_val_amt")
+        orderable_amount = _first_number(body, "ordr_psbl_amt_p2", "rus_psbl_ra_p3", "krw_o_amt_psbl_amt")
+        withdrawable_amount = _first_number(body, "o_amt_psbl_amt_p2", "krw_o_amt_psbl_amt", "tfnd")
+        total_evaluation = _first_number(body, "tl_krw_val_amt", "tl_scrts_exch_val_amt", "asts_val_amt")
+        estimated_assets = _first_number(body, "tl_asts_exch_val_amt", "asts_val_amt", "tl_krw_val_amt", "krw_tfnd", "tfnd")
+        total_profit_loss = _first_number(body, "tl_krw_val_pl_amt", "krw_exch_val_pl")
+        total_purchase = sum(holding.purchase_amount for holding in holdings)
+        total_profit_rate = (total_profit_loss / total_purchase * 100.0) if total_purchase else 0.0
+        return BalanceSummary(
+            account=account_digits,
+            deposit=deposit,
+            orderable_amount=orderable_amount or deposit,
+            withdrawable_amount=withdrawable_amount or deposit,
+            d2_estimated_deposit=_first_number(body, "tfnd", "krw_tfnd"),
+            total_purchase=total_purchase,
+            total_evaluation=total_evaluation,
+            total_profit_loss=total_profit_loss,
+            total_profit_rate=total_profit_rate,
+            estimated_assets=estimated_assets or deposit + total_evaluation,
+            holdings=tuple(holdings),
+            message=str(body.get("o_msg") or "KB 잔고 조회 완료").strip(),
+        )
+
+    def request_order_executions(
+        self,
+        symbol: str = "",
+        order_no: str = "",
+        date_text: str = "",
+        status: str = "0",
+    ) -> tuple[KbOrderExecution, ...]:
+        """Return KB account order/execution rows using SSQM2341.
+
+        status: 0 all, 1 executed, 2 unfilled.
+        """
+
+        symbol = normalize_symbol(symbol)
+        clean_order_no = str(order_no or "").strip()
+        clean_status = str(status or "0").strip()
+        if clean_status not in {"0", "1", "2"}:
+            clean_status = "0"
+        clean_date = "".join(character for character in str(date_text or "") if character.isdigit())
+        if len(clean_date) != 8:
+            clean_date = datetime.now().strftime("%Y%m%d")
+        body = self._api_post(
+            "ssqm2341",
+            {
+                "inq_clsf": "1",
+                "ccls_clsf": clean_status,
+                "ordr_dt": clean_date,
+                "is_cd": symbol,
+                "ordr_no": clean_order_no,
+                "mthr_ordr_no": "",
+                "orgn_ordr_no": "",
+                "s_ccls_amt": "",
+                "b_ccls_amt": "",
+                "s_ccls_q": "",
+                "b_ccls_q": "",
+                "ac_nm": "",
+                "is_nm": "",
+                "cn_clsf": "1",
+                "nxt_key": "",
+            },
+        )
+        return tuple(self._parse_order_execution_rows(body))
+
+    @staticmethod
+    def _parse_balance_holdings(body: dict[str, Any]) -> list[Holding]:
+        rows: list[dict[str, Any]] = []
+        for value in body.values():
+            if isinstance(value, list):
+                rows.extend(item for item in value if isinstance(item, dict))
+        if not rows and body.get("is_cd"):
+            rows.append(body)
+
+        holdings: list[Holding] = []
+        for row in rows:
+            symbol = normalize_symbol(row.get("is_cd"))
+            if not symbol:
+                continue
+            quantity = _integer(
+                row.get("frgn_hld_q_p6")
+                or row.get("hld_q")
+                or row.get("ordr_psbl_q")
+            )
+            sellable_quantity = _integer(
+                row.get("frgn_ordr_psbl_q_p6")
+                or row.get("frgn_ordr_psbl_q1_p6")
+                or row.get("ordr_psbl_q")
+            )
+            current_price = _number(row.get("now_prc_p4") or row.get("now_prc"))
+            average_price = _number(row.get("byng_avr_prc_p4") or row.get("avr_prc"))
+            profit_loss = _number(row.get("krw_exch_val_pl") or row.get("evltv_prft"))
+            purchase_amount = _number(row.get("byng_amt"))
+            holdings.append(
+                Holding(
+                    symbol=symbol,
+                    name=str(row.get("is_nm") or "").strip(),
+                    quantity=quantity,
+                    average_price=average_price,
+                    current_price=current_price,
+                    profit_loss=profit_loss,
+                    profit_rate=_number(row.get("yld")),
+                    sellable_quantity=sellable_quantity or quantity,
+                    purchase_amount=purchase_amount,
+                )
+            )
+        return holdings
+
+    @staticmethod
+    def _parse_order_execution_rows(body: dict[str, Any]) -> list[KbOrderExecution]:
+        rows: list[dict[str, Any]] = []
+        for value in body.values():
+            if isinstance(value, list):
+                rows.extend(item for item in value if isinstance(item, dict))
+        if not rows and any(key in body for key in ("ordr_no", "is_cd", "stnd_is_no")):
+            rows.append(body)
+
+        executions: list[KbOrderExecution] = []
+        for row in rows:
+            order_no = str(row.get("ordr_no") or "").strip()
+            symbol = normalize_symbol(row.get("is_cd") or row.get("stnd_is_no"))
+            if not order_no and not symbol:
+                continue
+            ordered_quantity = _integer(row.get("ordr_q"))
+            executed_quantity = _integer(row.get("tl_ccls_q") or row.get("ccls_q"))
+            unfilled_quantity = _integer(row.get("nccls_q"))
+            side_name = str(
+                row.get("trd_dl_ccd_nm")
+                or row.get("ordr_jb_clsf_nm")
+                or row.get("ordr_ccd")
+                or ""
+            ).strip()
+            if "매도" in side_name or str(row.get("ordr_jb_clsf") or "").strip() == "1":
+                side = "매도"
+            elif "매수" in side_name or str(row.get("ordr_jb_clsf") or "").strip() == "2":
+                side = "매수"
+            else:
+                side = side_name or "-"
+            if executed_quantity > 0 and unfilled_quantity <= 0:
+                status = "체결"
+            elif executed_quantity > 0 and unfilled_quantity > 0:
+                status = "부분체결"
+            elif unfilled_quantity > 0:
+                status = "미체결"
+            else:
+                status = "주문"
+            message = str(row.get("rfsl_rsn_nm") or row.get("o_msg") or "").strip()
+            order_time = str(row.get("ccls_ntc_tm") or row.get("ordr_tm") or "").strip()
+            if len(order_time) == 6 and order_time.isdigit():
+                order_time = f"{order_time[:2]}:{order_time[2:4]}:{order_time[4:]}"
+            executions.append(
+                KbOrderExecution(
+                    order_no=order_no,
+                    symbol=symbol,
+                    name=str(row.get("hngl_shrt_nm") or row.get("is_nm") or "").strip(),
+                    side=side,
+                    ordered_quantity=ordered_quantity,
+                    executed_quantity=executed_quantity,
+                    unfilled_quantity=unfilled_quantity,
+                    order_price=_number(row.get("ordr_uprc") or row.get("ordr_uprc2")),
+                    executed_price=_number(row.get("ccls_uprc") or row.get("ccls_uprc2")),
+                    order_time=order_time,
+                    status=status,
+                    message=message,
+                    raw=dict(row),
+                )
+            )
+        return executions
 
     def _api_post(self, api_id: str, data_body: dict[str, Any]) -> dict[str, Any]:
         ip_address, mac_address = self._network_identity()
@@ -367,11 +647,14 @@ class KbOpenApiClient:
     ) -> RestResponse:
         if authorized and not self.is_connected:
             raise KbOpenApiError("KB Open API가 연결되지 않았거나 토큰이 만료되었습니다.")
+        if authorized and not self._app_key:
+            raise KbOpenApiError("KB App Key가 없습니다. 토큰 로그인 창에서 키 2개로 다시 연결해 주세요.")
         headers = {
-            "Content-Type": "application/json;charset=UTF-8",
+            "Content-Type": "application/json",
             "Accept": "application/json",
         }
         if authorized:
+            headers["appKey"] = self._app_key
             headers["Authorization"] = f"{self._token_type} {self._token}"
         try:
             response = self._requester(
@@ -461,7 +744,7 @@ class KbOpenApiClient:
         request = Request(
             url,
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-            headers=headers,
+            headers={**headers, "Content-Type": headers.get("Content-Type", "application/json")},
             method=method,
         )
         try:

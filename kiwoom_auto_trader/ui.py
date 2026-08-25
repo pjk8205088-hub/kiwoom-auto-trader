@@ -12,6 +12,7 @@ import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
 from time import monotonic
+from urllib.request import urlopen
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 from .app_security import (
@@ -94,6 +95,8 @@ KB_DEFAULT_APP_SECRET_FILE = KB_DEFAULT_KEY_DIR / "app ssss.txt"
 KB_ALTERNATE_KEY_DIRS = (
     KB_DEFAULT_KEY_DIR,
     Path.home() / "Desktop" / "KB증권",
+    Path.home() / "Desktop",
+    Path.home() / "Downloads",
 )
 KB_KEY_MANUAL_PDF = Path.home() / "Documents" / "KawaiiSecurities" / "KB_OpenAPI_키_토큰_저장_메뉴얼.pdf"
 
@@ -624,12 +627,23 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         self.heading_var.set("키움 REST API 실전투자 연결")
         self.connect_button_var.set("실전투자 연결")
         self.help_var.set(
-            "실전투자 AppKey와 SecretKey를 사용하세요. 키움 계좌·IP 등록 페이지에 "
-            "사용 계좌와 현재 공인 IP가 등록되어 있어야 합니다. 연결 후 프로그램이 "
-            "토큰과 등록 계좌를 다시 확인하고 계좌·잔고·시세를 조회합니다. "
-            "모의투자 연결 없이 실전투자로 바로 설정할 수 있습니다. 실제 주문은 화면의 "
-            "수동 주문 버튼을 누르고 최종 확인한 경우에만 전송됩니다."
+            "실전투자 AppKey와 SecretKey를 넣어 주세요. "
+            "KB 계좌·IP 등록이 되어 있어야 연결됩니다. "
+            "연결되면 토큰·계좌·잔고·시세를 확인합니다. "
+            "실제 주문은 수동 주문 버튼과 최종 확인 후에만 전송됩니다."
         )
+
+    def _refresh_public_ip(self) -> None:
+        for url in ("https://api.ipify.org?format=text", "https://ifconfig.me/ip"):
+            try:
+                with urlopen(url, timeout=3.0) as response:
+                    ip_address = response.read().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                ip_address = ""
+            if ip_address:
+                self.public_ip_var.set(f"현재 공인 IP: {ip_address}")
+                return
+        self.public_ip_var.set("현재 공인 IP: 확인 실패")
 
     def _choose_key_file(self, target: tk.StringVar, key_name: str) -> None:
         path = filedialog.askopenfilename(
@@ -650,9 +664,9 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         self._load_key_files_from_downloads(show_missing_warning=True)
 
     def _load_key_files_from_downloads(self, show_missing_warning: bool) -> None:
-        downloads = Path.home() / "Downloads"
+        candidates = self._kb_key_search_directories()
         try:
-            key_pair = self._read_latest_key_pair(downloads)
+            key_pair = self._read_latest_key_pair(candidates)
         except (OSError, ValueError) as exc:
             self.key_status_var.set("키 파일 자동 불러오기에 실패했습니다. 파일을 다시 확인해 주세요.")
             if show_missing_warning:
@@ -668,28 +682,99 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         if show_missing_warning:
             messagebox.showwarning(
                 "키 파일 없음",
-                "다운로드 폴더에서 계좌번호_appkey.txt와 SecretKey 파일을 찾지 못했습니다.",
+                "App Key / App Secret 파일을 찾지 못했습니다.\n\n"
+                "예시 파일명:\n"
+                " - app_key.txt\n"
+                " - App Secret.txt\n"
+                " - ap.txt\n"
+                " - app ssss.txt\n"
+                " - 계좌번호_appkey.txt\n"
+                " - 계좌번호_secretkey.txt",
                 parent=self,
             )
 
     @classmethod
-    def _read_latest_key_pair(cls, downloads: Path) -> tuple[str, str] | None:
-        app_key_files = sorted(
-            downloads.glob("*_appkey.txt"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
+    def _read_latest_key_pair(cls, search_dirs: Path | tuple[Path, ...]) -> tuple[str, str] | None:
+        if isinstance(search_dirs, Path):
+            search_dirs = (search_dirs,)
+        app_key_names = (
+            "app_key.txt",
+            "appkey.txt",
+            "ap.txt",
         )
-        for app_key_path in app_key_files:
-            prefix = app_key_path.stem[: -len("_appkey")]
-            candidates = (
-                downloads / f"{prefix}_secretkey.txt",
-                downloads / f"{prefix}_appsecret.txt",
-            )
-            secret_key_path = next((path for path in candidates if path.exists()), None)
-            if secret_key_path is None:
+        secret_key_names = (
+            "app_secret.txt",
+            "appsecret.txt",
+            "app secret.txt",
+            "app ssss.txt",
+        )
+        exact_pairs = (
+            ("app_key.txt", "App Secret.txt"),
+            ("ap.txt", "app ssss.txt"),
+        )
+        for directory in search_dirs:
+            if not directory.exists():
                 continue
-            return cls._read_key_file(app_key_path), cls._read_key_file(secret_key_path)
+            for app_key_name, secret_key_name in exact_pairs:
+                app_key_path = directory / app_key_name
+                secret_key_path = directory / secret_key_name
+                if app_key_path.exists() and secret_key_path.exists():
+                    return cls._read_key_file(app_key_path), cls._read_key_file(secret_key_path)
+            recursive_txt_files = sorted(
+                (
+                    path
+                    for path in directory.rglob("*.txt")
+                    if path.is_file()
+                ),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            if recursive_txt_files:
+                file_map = {path.name.casefold(): path for path in recursive_txt_files}
+                for app_key_name in app_key_names:
+                    app_key_path = file_map.get(app_key_name.casefold())
+                    if app_key_path is None:
+                        continue
+                    for secret_key_name in secret_key_names:
+                        secret_key_path = file_map.get(secret_key_name.casefold())
+                        if secret_key_path is not None:
+                            return cls._read_key_file(app_key_path), cls._read_key_file(secret_key_path)
+            for app_key_name in app_key_names:
+                app_key_path = directory / app_key_name
+                if not app_key_path.exists():
+                    continue
+                for secret_key_name in secret_key_names:
+                    secret_key_path = directory / secret_key_name
+                    if secret_key_path.exists():
+                        return cls._read_key_file(app_key_path), cls._read_key_file(secret_key_path)
+            app_key_files = sorted(
+                directory.glob("*appkey*.txt"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+            for app_key_path in app_key_files:
+                prefix = app_key_path.stem.replace("_appkey", "").replace("appkey", "")
+                candidates = (
+                    directory / f"{prefix}_secretkey.txt",
+                    directory / f"{prefix}_appsecret.txt",
+                )
+                secret_key_path = next((path for path in candidates if path.exists()), None)
+                if secret_key_path is None:
+                    continue
+                return cls._read_key_file(app_key_path), cls._read_key_file(secret_key_path)
         return None
+
+    @staticmethod
+    def _kb_key_search_directories() -> tuple[Path, ...]:
+        downloads = Path.home() / "Downloads"
+        desktop = Path.home() / "Desktop"
+        kb_folder = desktop / "KB중권"
+        extra_download_dirs = tuple(
+            candidate for candidate in downloads.iterdir() if candidate.is_dir()
+        ) if downloads.exists() else ()
+        return tuple(
+            dict.fromkeys((*KB_ALTERNATE_KEY_DIRS, downloads, desktop, kb_folder, *extra_download_dirs))
+        )
 
     @staticmethod
     def _read_key_file(path: Path) -> str:
@@ -1081,6 +1166,7 @@ class KbTokenLoginDialog(tk.Toplevel):
         self.status_var = tk.StringVar(value="OFF 연결 안됨")
         self.expiry_var = tk.StringVar(value="만료 시각: -")
         self.progress_var = tk.StringVar(value="1. App Key / App Secret을 준비해 주세요.")
+        self.public_ip_var = tk.StringVar(value="현재 공인 IP: 확인 중...")
         self._status_color = UI_RED
 
         body = ttk.Frame(self, padding=20)
@@ -1099,37 +1185,30 @@ class KbTokenLoginDialog(tk.Toplevel):
             justify="left",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
-        ttk.Label(body, text="App Key").grid(row=2, column=0, sticky="w")
+        ttk.Label(body, text="현재 공인 IP").grid(row=2, column=0, sticky="w", pady=(0, 8))
+        ttk.Entry(body, textvariable=self.public_ip_var, width=42, state="readonly").grid(
+            row=2, column=1, sticky="ew", padx=(12, 0), pady=(0, 8)
+        )
+        ttk.Button(body, text="IP 새로고침", command=self._refresh_public_ip).grid(
+            row=2, column=2, padx=(8, 0), pady=(0, 8)
+        )
+
+        ttk.Label(body, text="App Key").grid(row=3, column=0, sticky="w")
         app_key_entry = ttk.Entry(body, textvariable=self.app_key_var, width=46)
-        app_key_entry.grid(row=2, column=1, sticky="ew", padx=(12, 0))
-        ttk.Label(body, text="App Secret").grid(row=3, column=0, sticky="w", pady=(12, 0))
+        app_key_entry.grid(row=3, column=1, sticky="ew", padx=(12, 0))
+        ttk.Label(body, text="App Secret").grid(row=4, column=0, sticky="w", pady=(12, 0))
         ttk.Entry(body, textvariable=self.app_secret_var, show="*", width=46).grid(
-            row=3, column=1, sticky="ew", padx=(12, 0), pady=(12, 0)
+            row=4, column=1, sticky="ew", padx=(12, 0), pady=(12, 0)
         )
 
         issue_row = ttk.Frame(body)
-        issue_row.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        issue_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(18, 0))
         ttk.Button(
             issue_row,
-            text="토큰 발급·연결",
+            text="키움과 같이 REST API 연결",
             command=self._issue_token,
             style="Blue.TButton",
         ).pack(side="left")
-        ttk.Button(
-            issue_row,
-            text="App Key 파일 선택",
-            command=lambda: self._choose_key_text_file("App Key", self.app_key_var),
-        ).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            issue_row,
-            text="App Secret 파일 선택",
-            command=lambda: self._choose_key_text_file("App Secret", self.app_secret_var),
-        ).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            issue_row,
-            text="기본 키 2개 불러오기",
-            command=self._load_default_key_files,
-        ).pack(side="left", padx=(8, 0))
         ttk.Button(
             issue_row,
             text="연결 점검",
@@ -1137,15 +1216,45 @@ class KbTokenLoginDialog(tk.Toplevel):
         ).pack(side="left", padx=(8, 0))
 
         key_row = ttk.Frame(body)
-        key_row.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        key_row.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            key_row,
+            text="App Key 파일 선택",
+            command=lambda: self._choose_key_text_file("App Key", self.app_key_var),
+        ).pack(side="left")
+        ttk.Button(
+            key_row,
+            text="App Secret 파일 선택",
+            command=lambda: self._choose_key_text_file("App Secret", self.app_secret_var),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            key_row,
+            text="App Key 지우기",
+            command=self._clear_app_key,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            key_row,
+            text="키 파일 2개 연결",
+            command=self._connect_default_key_files,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            key_row,
+            text="토큰 발급·연결",
+            command=self._issue_token,
+        ).pack(side="left", padx=(16, 0))
+        ttk.Button(
+            key_row,
+            text="토큰 재발급",
+            command=self._issue_token,
+        ).pack(side="left", padx=(8, 0))
         ttk.Button(
             key_row,
             text="내 컴퓨터에 토큰 파일 저장",
             command=self._save_token_file,
-        ).pack(side="left")
+        ).pack(side="left", padx=(8, 0))
 
         status_box = ttk.LabelFrame(body, text="연결 상태", padding=12)
-        status_box.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        status_box.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(18, 0))
         status_box.columnconfigure(0, weight=1)
         self.status_label = ttk.Label(
             status_box,
@@ -1166,10 +1275,10 @@ class KbTokenLoginDialog(tk.Toplevel):
             foreground=UI_MUTED,
             wraplength=510,
             justify="left",
-        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(14, 0))
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(14, 0))
 
         footer = ttk.Frame(body)
-        footer.grid(row=8, column=0, columnspan=2, sticky="ew", pady=(18, 0))
+        footer.grid(row=9, column=0, columnspan=2, sticky="ew", pady=(18, 0))
         ttk.Button(
             footer,
             text="KB 토큰 발급 안내",
@@ -1189,6 +1298,7 @@ class KbTokenLoginDialog(tk.Toplevel):
 
         self._refresh_status()
         self._load_default_key_files(show_message=False)
+        self._refresh_public_ip()
         app_key_entry.focus_set()
         _show_centered_dialog(self)
         self.grab_set()
@@ -1200,7 +1310,7 @@ class KbTokenLoginDialog(tk.Toplevel):
             self.status_var.set("ON 연결됨")
             self.expiry_var.set(f"만료 시각: {expires} · 남은 시간 {self.client.token_seconds_remaining:,}초")
             self._status_color = UI_GREEN
-            self.progress_var.set("4. 토큰 발급이 완료되어 연결되었습니다.")
+            self.progress_var.set("4. 토큰 발행 완료. 계좌 연결/잔고 확인 후 주문 가능합니다.")
         else:
             self.status_var.set("OFF 연결 안됨")
             self.expiry_var.set("만료 시각: -")
@@ -1225,6 +1335,27 @@ class KbTokenLoginDialog(tk.Toplevel):
                 return token
         return ""
 
+    @staticmethod
+    def _should_retry_swapped(message: str) -> bool:
+        lowered = message.lower()
+        return (
+            "E021" in message
+            or "앱정보" in message
+            or "app info" in lowered
+            or "appkey" in lowered and "appsecret" in lowered
+        )
+
+    def _connect_with_retry(self, app_key: str, app_secret: str) -> tuple[str, bool]:
+        try:
+            return self.client.connect(app_key, app_secret), False
+        except KbOpenApiError as exc:
+            if not self._should_retry_swapped(str(exc)):
+                raise
+            swapped = self.client.connect(app_secret, app_key)
+            self.app_key_var.set(app_secret)
+            self.app_secret_var.set(app_key)
+            return swapped, True
+
     def _issue_token(self) -> None:
         self.progress_var.set("3. KB 토큰 발급 요청 중입니다.")
         app_key = self.app_key_var.get().strip()
@@ -1239,7 +1370,7 @@ class KbTokenLoginDialog(tk.Toplevel):
             )
             return
         try:
-            message = self.client.connect(app_key, app_secret)
+            message, swapped = self._connect_with_retry(app_key, app_secret)
         except KbOpenApiError as exc:
             error_text = str(exc)
             code = self._short_error_code(error_text)
@@ -1257,11 +1388,19 @@ class KbTokenLoginDialog(tk.Toplevel):
                     "4) 등록한 IP가 현재 PC IP와 일치하는지\n"
                     "5) 서비스가 해지 상태가 아닌지\n\n"
                     "공식 가이드의 토큰 발급 항목을 다시 확인해 주세요."
-                )
+            )
             messagebox.showerror("KB 토큰 발급 실패", error_text, parent=self)
             return
-        self.app_secret_var.set("")
-        self.progress_var.set("4. 토큰 발급이 완료되었습니다.")
+        if swapped:
+            self.app_key_var.set("")
+            self.app_secret_var.set("")
+        else:
+            self.app_secret_var.set("")
+        self.progress_var.set(
+            "4. 토큰 발급이 완료되었습니다. (App Key/App Secret 순서를 자동 보정했습니다.)"
+            if swapped
+            else "4. 토큰 발급이 완료되었습니다."
+        )
         self._notify_connected(message)
         try:
             self.status_label.configure(foreground=UI_GREEN)
@@ -1290,31 +1429,32 @@ class KbTokenLoginDialog(tk.Toplevel):
         self._refresh_status(f"{label} 파일 입력 완료")
         self.progress_var.set(f"2. {label} 파일을 불러왔습니다.")
 
+    def _clear_app_key(self) -> None:
+        self.app_key_var.set("")
+        self.app_secret_var.set("")
+        self.client.disconnect()
+        self._refresh_status("App Key 제거")
+        self.progress_var.set("1. App Key가 비워졌습니다. 연결이 해제되었습니다.")
+
     def _load_default_key_files(self, show_message: bool = True) -> None:
         key_dir = _preferred_kb_key_dir()
-        app_key_file = key_dir / KB_DEFAULT_APP_KEY_FILE.name
-        app_secret_file = key_dir / KB_DEFAULT_APP_SECRET_FILE.name
-        if not app_key_file.exists() or not app_secret_file.exists():
+        candidates = self._kb_key_search_directories()
+        key_pair = self._read_latest_key_pair(candidates)
+        if key_pair is None:
             if show_message:
                 messagebox.showwarning(
                     "KB 기본 키 파일",
                     "기본 키 파일을 찾을 수 없습니다.\n\n"
-                    f"필요 파일:\n{app_key_file}\n{app_secret_file}\n\n"
-                    "파일명이 다르면 App Key 파일 선택, App Secret 파일 선택 버튼을 사용해 주세요.",
+                    "찾는 위치:\n"
+                    f"- {key_dir}\n"
+                    f"- {Path.home() / 'Downloads'}\n"
+                    f"- {Path.home() / 'Desktop'}\n\n"
+                    "파일명이 다르면 App Key 파일 선택, App Secret 파일 선택 버튼을 사용해 주세요.\n"
+                    "예: app_key.txt / App Secret.txt / ap.txt / app ssss.txt",
                     parent=self,
                 )
             return
-        try:
-            app_key = app_key_file.read_text(encoding="utf-8-sig").strip()
-            app_secret = app_secret_file.read_text(encoding="utf-8-sig").strip()
-        except OSError as exc:
-            if show_message:
-                messagebox.showerror("KB 기본 키 파일", f"키 파일을 읽지 못했습니다.\n\n{exc}", parent=self)
-            return
-        if not app_key or not app_secret:
-            if show_message:
-                messagebox.showwarning("KB 기본 키 파일", "App Key 또는 App Secret 파일이 비어 있습니다.", parent=self)
-            return
+        app_key, app_secret = key_pair
         self.app_key_var.set(app_key)
         self.app_secret_var.set(app_secret)
         self._refresh_status("기본 키 파일 입력 완료")
@@ -1322,9 +1462,16 @@ class KbTokenLoginDialog(tk.Toplevel):
         if show_message:
             messagebox.showinfo(
                 "KB 기본 키 파일",
-                f"기본 키 2개를 입력했습니다.\n\n{key_dir}",
+                "기본 키 2개를 자동으로 불러왔습니다.\n\n"
+                f"검색 위치: {key_dir}\n"
+                f"현재 공인 IP: {self.public_ip_var.get().replace('현재 공인 IP: ', '')}",
                 parent=self,
             )
+
+    def _connect_default_key_files(self) -> None:
+        self._load_default_key_files(show_message=True)
+        if self.app_key_var.get().strip() and self.app_secret_var.get().strip():
+            self._issue_token()
 
     def _diagnose_connection(self) -> None:
         app_key = self.app_key_var.get().strip()
@@ -1340,7 +1487,7 @@ class KbTokenLoginDialog(tk.Toplevel):
             return
         self.progress_var.set("2. 키 입력 확인 완료. 토큰 발급을 시험합니다.")
         try:
-            message = self.client.connect(app_key, app_secret)
+            message, swapped = self._connect_with_retry(app_key, app_secret)
         except KbOpenApiError as exc:
             self._refresh_status("OFF 연결 안됨")
             code = self._short_error_code(str(exc))
@@ -1349,9 +1496,29 @@ class KbTokenLoginDialog(tk.Toplevel):
             )
             messagebox.showerror("KB 연결 점검", str(exc), parent=self)
             return
-        self.app_secret_var.set("")
-        self.progress_var.set("4. 토큰 발급 성공. 연결 상태를 초록색으로 표시합니다.")
+        if swapped:
+            self.app_key_var.set("")
+            self.app_secret_var.set("")
+        else:
+            self.app_secret_var.set("")
+        self.progress_var.set(
+            "4. 토큰 발급 성공. App Key/App Secret 순서를 자동 보정했습니다."
+            if swapped
+            else "4. 토큰 발급 성공. 연결 상태를 초록색으로 표시합니다."
+        )
         self._notify_connected(message)
+
+    def _refresh_public_ip(self) -> None:
+        for url in ("https://api.ipify.org?format=text", "https://ifconfig.me/ip"):
+            try:
+                with urlopen(url, timeout=3.0) as response:
+                    ip_address = response.read().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                ip_address = ""
+            if ip_address:
+                self.public_ip_var.set(f"현재 공인 IP: {ip_address}")
+                return
+        self.public_ip_var.set("현재 공인 IP: 확인 실패")
 
     def _open_default_key_folder(self) -> None:
         key_dir = _preferred_kb_key_dir()
@@ -1425,8 +1592,8 @@ class KbManualTradeWindow(tk.Toplevel):
         super().__init__(parent)
         self.parent_app = parent
         self.title("KB 수동거래")
-        self.geometry("820x780")
-        self.minsize(740, 700)
+        self.geometry("1220x780")
+        self.minsize(980, 700)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self._close)
 
@@ -1461,8 +1628,20 @@ class KbManualTradeWindow(tk.Toplevel):
             value=parent.service.storage.get_app_setting("kb.openapi.expiry_date", "2027/08/17")
         )
         self.kb_order_enabled_var = tk.BooleanVar(value=False)
+        self.kb_trade_ready_var = tk.StringVar(value="")
         self._kb_quote_symbol = ""
         self._kb_quote_at = 0.0
+        self.kb_balance_summary_var = tk.StringVar(value="계좌 잔고: 미조회")
+        self.kb_balance_detail_var = tk.StringVar(
+            value="KB API 연결 후 '잔고 새로고침'을 누르면 예수금과 보유 종목이 표시됩니다."
+        )
+        self.kb_account_probe_var = tk.StringVar(value="확인된 계좌: -")
+        self.kb_balance_holdings_var = tk.StringVar(value="보유 종목: -")
+        self.kb_balance_updated_var = tk.StringVar(value="마지막 갱신: -")
+        self.kb_execution_status_var = tk.StringVar(value="체결 정보: 주문 전송 전")
+        self.prepared_card_vars: list[dict[str, tk.StringVar]] = []
+        self.kb_execution_tree: ttk.Treeview | None = None
+        self._local_kb_execution_rows: list[dict[str, str]] = []
         self.detail_var = tk.StringVar(value="KB HTS 실행 여부를 확인해 주세요.")
         self.handoff_var = tk.StringVar(
             value="종목을 세팅하고 현재가를 불러온 뒤 HTS 전달을 누르세요."
@@ -1471,6 +1650,8 @@ class KbManualTradeWindow(tk.Toplevel):
         body = ttk.Frame(self, padding=16)
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=0)
+        body.rowconfigure(7, weight=1)
 
         header = ttk.Frame(body)
         header.grid(row=0, column=0, sticky="ew", pady=(0, 12))
@@ -1512,6 +1693,8 @@ class KbManualTradeWindow(tk.Toplevel):
             foreground=UI_MUTED,
         ).pack(side="left", padx=(12, 0))
 
+        self._build_execution_panel(body)
+
         application_box = ttk.LabelFrame(body, text="KB Open API 신청계좌 정보", padding=10)
         application_box.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         for column in range(6):
@@ -1526,7 +1709,13 @@ class KbManualTradeWindow(tk.Toplevel):
             textvariable=self.kb_account_password_var,
             show="*",
             width=14,
-        ).grid(row=0, column=3, sticky="w", padx=(8, 16))
+        ).grid(row=0, column=3, sticky="w", padx=(8, 8))
+        ttk.Button(
+            application_box,
+            text="계좌연결",
+            command=self._connect_kb_account,
+            style="Success.TButton",
+        ).grid(row=0, column=4, sticky="w", padx=(0, 16))
         ttk.Button(
             application_box,
             text="신청계좌 저장",
@@ -1572,9 +1761,22 @@ class KbManualTradeWindow(tk.Toplevel):
         ttk.Button(api_box, text="연결 해제", command=self._disconnect_kb_api).grid(
             row=0, column=2, sticky="w", padx=(8, 0)
         )
-        ttk.Label(api_box, textvariable=self.kb_api_status_var, foreground=UI_MUTED).grid(
-            row=0, column=3, sticky="w", padx=(8, 0)
+        self.kb_api_status_label = tk.Label(
+            api_box,
+            textvariable=self.kb_api_status_var,
+            bg=UI_SURFACE,
+            fg=UI_MUTED,
+            font=(UI_DISPLAY_FONT, 10, "bold"),
         )
+        self.kb_api_status_label.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.kb_trade_ready_label = tk.Label(
+            api_box,
+            textvariable=self.kb_trade_ready_var,
+            bg=UI_SURFACE,
+            fg=UI_GREEN,
+            font=(UI_DISPLAY_FONT, 10, "bold"),
+        )
+        self.kb_trade_ready_label.grid(row=0, column=4, sticky="w", padx=(10, 0))
         ttk.Button(
             api_box,
             text="KB Open API 안내",
@@ -1601,8 +1803,47 @@ class KbManualTradeWindow(tk.Toplevel):
             foreground=UI_MUTED,
         ).grid(row=2, column=0, columnspan=7, sticky="w", pady=(8, 0))
 
+        balance_box = ttk.LabelFrame(body, text="계좌 잔고", padding=10)
+        balance_box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        balance_box.columnconfigure(0, weight=1)
+        balance_box.columnconfigure(1, weight=0)
+        ttk.Label(
+            balance_box,
+            textvariable=self.kb_balance_summary_var,
+            font=(UI_DISPLAY_FONT, 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            balance_box,
+            text="잔고 새로고침",
+            command=lambda: self._refresh_balance_display(force=True),
+        ).grid(row=0, column=1, sticky="e")
+        ttk.Label(
+            balance_box,
+            textvariable=self.kb_balance_detail_var,
+            foreground=UI_MUTED,
+            wraplength=700,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            balance_box,
+            textvariable=self.kb_account_probe_var,
+            foreground=UI_MUTED,
+            wraplength=700,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(
+            balance_box,
+            textvariable=self.kb_balance_holdings_var,
+            foreground=UI_TEXT,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(
+            balance_box,
+            textvariable=self.kb_balance_updated_var,
+            foreground=UI_MUTED,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
         symbol_box = ttk.LabelFrame(body, text="종목·현재가 연동", padding=12)
-        symbol_box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        symbol_box.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         symbol_box.columnconfigure(1, weight=1)
         ttk.Label(symbol_box, text="종목번호(6자리)").grid(row=0, column=0, sticky="w")
         symbol_entry = ttk.Entry(symbol_box, textvariable=self.symbol_var, width=14)
@@ -1627,7 +1868,7 @@ class KbManualTradeWindow(tk.Toplevel):
         symbol_entry.bind("<Return>", lambda _event: self._set_symbol())
 
         order_box = ttk.LabelFrame(body, text="수동 주문 입력", padding=12)
-        order_box.grid(row=5, column=0, sticky="ew", pady=(0, 10))
+        order_box.grid(row=6, column=0, sticky="ew", pady=(0, 10))
         order_box.columnconfigure(1, weight=1)
         ttk.Label(order_box, text="주문 구분").grid(row=0, column=0, sticky="w")
         side_buttons = ttk.Frame(order_box)
@@ -1646,6 +1887,13 @@ class KbManualTradeWindow(tk.Toplevel):
             style="Blue.TButton",
         )
         self.sell_side_button.pack(side="left", padx=(6, 0))
+        self.decide_order_button = ttk.Button(
+            side_buttons,
+            text="결정",
+            command=self._submit_selected_api_order,
+            style="Success.TButton",
+        )
+        self.decide_order_button.pack(side="left", padx=(6, 0))
         ttk.Label(order_box, text="수량").grid(row=1, column=0, sticky="w", pady=(10, 0))
         quantity_row = ttk.Frame(order_box)
         quantity_row.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
@@ -1663,8 +1911,85 @@ class KbManualTradeWindow(tk.Toplevel):
             row=2, column=1, sticky="w", padx=(10, 0), pady=(10, 0)
         )
 
+        prepared_box = ttk.LabelFrame(body, text="준비 종목 4칸", padding=10)
+        prepared_box.grid(row=7, column=0, sticky="ew", pady=(0, 10))
+        for column in range(2):
+            prepared_box.columnconfigure(column, weight=1)
+        for row in range(2):
+            prepared_box.rowconfigure(row, weight=1)
+
+        prepared_specs = (
+            ("매수 준비", UI_PINK),
+            ("매도 준비", UI_BLUE),
+            ("계좌 상태", UI_GREEN),
+            ("API 상태", UI_ORANGE),
+        )
+        for index, (title, accent) in enumerate(prepared_specs):
+            card = tk.Frame(
+                prepared_box,
+                bg=UI_SURFACE,
+                bd=1,
+                relief="solid",
+                highlightthickness=1,
+                highlightbackground=accent,
+            )
+            card.grid(row=index // 2, column=index % 2, sticky="nsew", padx=4, pady=4)
+            card.columnconfigure(0, weight=1)
+            title_var = tk.StringVar(value=title)
+            symbol_var = tk.StringVar(value="종목: -")
+            name_var = tk.StringVar(value="회사명: -")
+            price_var = tk.StringVar(value="현재가: -")
+            status_var = tk.StringVar(value="상태: -")
+            self.prepared_card_vars.append(
+                {
+                    "title": title_var,
+                    "symbol": symbol_var,
+                    "name": name_var,
+                    "price": price_var,
+                    "status": status_var,
+                }
+            )
+            tk.Label(
+                card,
+                textvariable=title_var,
+                bg=UI_SURFACE,
+                fg=accent,
+                font=(UI_DISPLAY_FONT, 10, "bold"),
+                anchor="w",
+            ).grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 2))
+            tk.Label(
+                card,
+                textvariable=symbol_var,
+                bg=UI_SURFACE,
+                fg=UI_TEXT,
+                font=(UI_DISPLAY_FONT, 10, "bold"),
+                anchor="w",
+            ).grid(row=1, column=0, sticky="ew", padx=10)
+            tk.Label(
+                card,
+                textvariable=name_var,
+                bg=UI_SURFACE,
+                fg=UI_MUTED,
+                anchor="w",
+            ).grid(row=2, column=0, sticky="ew", padx=10)
+            tk.Label(
+                card,
+                textvariable=price_var,
+                bg=UI_SURFACE,
+                fg=UI_TEXT,
+                anchor="w",
+            ).grid(row=3, column=0, sticky="ew", padx=10)
+            tk.Label(
+                card,
+                textvariable=status_var,
+                bg=UI_SURFACE,
+                fg=accent,
+                font=(UI_DISPLAY_FONT, 9, "bold"),
+                anchor="w",
+            ).grid(row=4, column=0, sticky="ew", padx=10, pady=(0, 8))
+
         handoff_box = ttk.LabelFrame(body, text="HTS 전달", padding=12)
-        handoff_box.grid(row=6, column=0, sticky="ew", pady=(0, 10))
+        handoff_box.grid(row=8, column=0, sticky="ew", pady=(0, 10))
         handoff_box.columnconfigure(0, weight=1)
         ttk.Label(
             handoff_box,
@@ -1705,11 +2030,171 @@ class KbManualTradeWindow(tk.Toplevel):
             body,
             text="신청계좌와 주문 비밀번호는 KB API 주문 전송에만 사용합니다. 비밀번호는 저장하지 않습니다.",
             foreground=UI_GREEN,
-        ).grid(row=7, column=0, sticky="w", pady=(4, 0))
+        ).grid(row=9, column=0, sticky="w", pady=(4, 0))
         self._set_side("BUY")
         self._refresh_market()
+        self._refresh_balance_display(force=True)
+        self._refresh_prepared_cards()
         self._refresh_status()
         _show_centered_dialog(self)
+
+    def _build_execution_panel(self, body: ttk.Frame) -> None:
+        execution_box = ttk.LabelFrame(body, text="체결·주문 리스트", padding=10)
+        execution_box.grid(row=2, column=1, rowspan=8, sticky="nsew", padx=(12, 0))
+        execution_box.columnconfigure(0, weight=1)
+        execution_box.rowconfigure(2, weight=1)
+
+        ttk.Label(
+            execution_box,
+            textvariable=self.kb_execution_status_var,
+            foreground=UI_MUTED,
+            wraplength=330,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+
+        button_row = ttk.Frame(execution_box)
+        button_row.grid(row=1, column=0, sticky="ew", pady=(8, 8))
+        ttk.Button(
+            button_row,
+            text="체결 새로고침",
+            command=self._refresh_execution_list,
+            style="Blue.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            button_row,
+            text="리스트 지우기",
+            command=self._clear_execution_list,
+        ).pack(side="left", padx=(6, 0))
+
+        columns = ("time", "side", "symbol", "qty", "price", "status", "order_no")
+        tree_frame = ttk.Frame(execution_box)
+        tree_frame.grid(row=2, column=0, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+        tree = ttk.Treeview(
+            tree_frame,
+            columns=columns,
+            show="headings",
+            height=18,
+            selectmode="browse",
+        )
+        headings = {
+            "time": "시간",
+            "side": "구분",
+            "symbol": "종목",
+            "qty": "수량",
+            "price": "가격",
+            "status": "상태",
+            "order_no": "주문번호",
+        }
+        widths = {
+            "time": 72,
+            "side": 48,
+            "symbol": 74,
+            "qty": 48,
+            "price": 72,
+            "status": 70,
+            "order_no": 86,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], minwidth=42, anchor="center", stretch=False)
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.kb_execution_tree = tree
+
+        ttk.Label(
+            execution_box,
+            text="주문 전송 직후 자동 기록되고, 새로고침 시 KB SSQM2341 체결조회로 갱신합니다.",
+            foreground=UI_MUTED,
+            wraplength=330,
+            justify="left",
+        ).grid(row=3, column=0, sticky="ew", pady=(8, 0))
+
+    def _append_execution_row(
+        self,
+        side: str,
+        symbol: str,
+        name: str,
+        quantity: int,
+        price: float,
+        status: str,
+        order_no: str = "",
+    ) -> None:
+        row = {
+            "time": datetime.now().strftime("%H:%M:%S"),
+            "side": side,
+            "symbol": normalize_kb_symbol(symbol),
+            "name": name or "-",
+            "qty": f"{int(quantity):,}주",
+            "price": f"{float(price):,.0f}원" if float(price or 0) > 0 else "-",
+            "status": status,
+            "order_no": order_no or "-",
+        }
+        self._local_kb_execution_rows.insert(0, row)
+        self._local_kb_execution_rows = self._local_kb_execution_rows[:100]
+        self._render_execution_rows(self._local_kb_execution_rows)
+        self.kb_execution_status_var.set(
+            f"체결 정보: {row['time']} {row['symbol']} {side} {status}"
+        )
+
+    def _render_execution_rows(self, rows: list[dict[str, str]]) -> None:
+        tree = self.kb_execution_tree
+        if tree is None:
+            return
+        tree.delete(*tree.get_children())
+        for row in rows:
+            values = (
+                row.get("time", "-"),
+                row.get("side", "-"),
+                row.get("symbol", "-"),
+                row.get("qty", "-"),
+                row.get("price", "-"),
+                row.get("status", "-"),
+                row.get("order_no", "-"),
+            )
+            tree.insert("", "end", values=values)
+
+    def _clear_execution_list(self) -> None:
+        self._local_kb_execution_rows.clear()
+        self._render_execution_rows([])
+        self.kb_execution_status_var.set("체결 정보: 리스트를 비웠습니다.")
+
+    def _refresh_execution_list(self) -> None:
+        if not self.parent_app.kb_api.is_connected:
+            self.parent_app._show_warning("KB 체결조회", "먼저 KB API 연결을 완료해 주세요.", parent=self)
+            return
+        symbol = normalize_kb_symbol(self.symbol_var.get())
+        try:
+            executions = self.parent_app.kb_api.request_order_executions(symbol=symbol)
+        except KbOpenApiError as exc:
+            self.parent_app._show_warning("KB 체결조회 실패", str(exc), parent=self)
+            return
+        rows: list[dict[str, str]] = []
+        for execution in executions:
+            quantity = execution.executed_quantity or execution.ordered_quantity
+            price = execution.executed_price or execution.order_price
+            rows.append(
+                {
+                    "time": execution.order_time or "-",
+                    "side": execution.side or "-",
+                    "symbol": execution.symbol or "-",
+                    "name": execution.name or "-",
+                    "qty": f"{quantity:,}주" if quantity else "-",
+                    "price": f"{price:,.0f}원" if price else "-",
+                    "status": execution.status,
+                    "order_no": execution.order_no or "-",
+                }
+            )
+        if rows:
+            self._local_kb_execution_rows = rows[:100]
+            self._render_execution_rows(self._local_kb_execution_rows)
+            self.kb_execution_status_var.set(f"체결 정보: KB에서 {len(rows)}건 조회")
+        else:
+            self._render_execution_rows(self._local_kb_execution_rows)
+            self.kb_execution_status_var.set("체결 정보: KB 조회 결과 없음")
 
     def _close(self) -> None:
         self.parent_app._kb_manual_window = None
@@ -1731,10 +2216,56 @@ class KbManualTradeWindow(tk.Toplevel):
             f"KB 신청계좌 저장 완료 · {account} · 만료일 {self.kb_expiry_date_var.get().strip() or '-'}"
         )
 
+    def _connect_kb_account(self) -> None:
+        account = "".join(character for character in self.kb_account_var.get() if character.isdigit())
+        password = self.kb_account_password_var.get().strip()
+        if not account:
+            self.parent_app._show_warning("KB 계좌연결", "KB 신청계좌 번호를 입력해 주세요.", parent=self)
+            return
+        if not password.isdigit() or not 4 <= len(password) <= 8:
+            self.parent_app._show_warning(
+                "KB 계좌연결",
+                "계좌 비밀번호는 4~8자리 숫자로 입력해 주세요.",
+                parent=self,
+            )
+            return
+        if not self.parent_app.kb_api.is_connected:
+            self._update_kb_api_state(False, False)
+            self.parent_app._show_warning("KB 계좌연결", "먼저 KB 토큰 로그인을 완료해 주세요.", parent=self)
+            return
+        try:
+            balance, account_probe_text = self._request_best_kb_balance(account)
+        except KbOpenApiError as exc:
+            self.parent_app.service.balance_summary = None
+            self._update_kb_api_state(self.parent_app.kb_api.is_connected, False)
+            self.kb_balance_summary_var.set("계좌 잔고: 조회 실패")
+            self.kb_balance_detail_var.set(f"KB 계좌 연결 실패: {exc}")
+            self.kb_account_probe_var.set("확인된 계좌: 조회 실패")
+            self.kb_balance_holdings_var.set("보유 종목: -")
+            self.kb_balance_updated_var.set(f"마지막 시도: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self.parent_app._show_warning("KB 계좌연결 실패", str(exc), parent=self)
+            self._refresh_prepared_cards()
+            return
+        self.parent_app.service.balance_summary = balance
+        self.kb_account_probe_var.set(f"확인된 계좌: {account_probe_text}")
+        self._refresh_balance_display(force=False)
+        self.handoff_var.set(f"KB 계좌 연결 완료 · {self._format_kb_account(account)}")
+        messagebox.showinfo(
+            "KB 계좌연결 완료",
+            f"계좌가 연결되었습니다.\n\n"
+            f"계좌: {self._format_kb_account(account)}\n"
+            f"예수금: {balance.deposit:,.0f}원\n"
+            f"주문가능: {balance.orderable_amount:,.0f}원",
+            parent=self,
+        )
+
     def _set_side(self, side: str) -> None:
         self.side_var.set("SELL" if str(side).upper() == "SELL" else "BUY")
         self.buy_side_button.configure(style="Accent.TButton" if self.side_var.get() == "BUY" else "TButton")
         self.sell_side_button.configure(style="Blue.TButton" if self.side_var.get() == "SELL" else "TButton")
+        if hasattr(self, "decide_order_button"):
+            label = "매도 결정" if self.side_var.get() == "SELL" else "매수 결정"
+            self.decide_order_button.configure(text=label)
 
     def _change_quantity(self, delta: int) -> None:
         try:
@@ -1743,13 +2274,19 @@ class KbManualTradeWindow(tk.Toplevel):
             quantity = 0
         self.quantity_var.set(str(max(1, quantity + int(delta))))
 
+    def _submit_selected_api_order(self) -> None:
+        self._submit_api_order(self.side_var.get())
+
     def _connect_kb_api(self) -> None:
         KbTokenLoginDialog(self, self.parent_app.kb_api, self._on_kb_token_connected)
 
     def _on_kb_token_connected(self, message: str) -> None:
-        self.kb_api_status_var.set("KB API ON")
         self.handoff_var.set(message)
+        self._update_kb_api_state(True, False)
+        self.kb_api_status_var.set("KB API ON · 토큰 연결됨")
+        self._refresh_balance_display(force=True)
         self._refresh_market()
+        self._refresh_prepared_cards()
 
     def _load_kb_token_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -1762,15 +2299,22 @@ class KbManualTradeWindow(tk.Toplevel):
         try:
             message = self.parent_app.kb_api.load_token_file(path)
         except KbOpenApiError as exc:
-            self.kb_api_status_var.set("KB API OFF")
+            self._update_kb_api_state(False, False)
             self.parent_app._show_warning("KB 토큰 파일 로그인", str(exc), parent=self)
             return
         self._on_kb_token_connected(message)
 
     def _disconnect_kb_api(self) -> None:
         self.parent_app.kb_api.disconnect()
-        self.kb_api_status_var.set("KB API OFF")
+        self.parent_app.service.balance_summary = None
+        self._update_kb_api_state(False, False)
         self.handoff_var.set("KB Open API 연결을 해제했습니다.")
+        self.kb_balance_summary_var.set("계좌 잔고: 미연결")
+        self.kb_balance_detail_var.set("KB API 연결 후 '잔고 새로고침'을 눌러 주세요.")
+        self.kb_account_probe_var.set("확인된 계좌: -")
+        self.kb_balance_holdings_var.set("보유 종목: -")
+        self.kb_balance_updated_var.set("마지막 갱신: -")
+        self._refresh_prepared_cards()
 
     def _refresh_kb_api_quote(self, force: bool = False) -> bool:
         if not self.parent_app.kb_api.is_connected:
@@ -1807,6 +2351,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self.parent_app.symbol_var.set(quote.symbol)
         self.parent_app.symbol_name_var.set(quote.name or "종목명 미조회")
         self.kb_api_status_var.set("KB API ON")
+        self._refresh_prepared_cards()
         return True
 
     def _submit_api_order(self, side: str) -> None:
@@ -1842,6 +2387,65 @@ class KbManualTradeWindow(tk.Toplevel):
                 parent=self,
             )
             return
+        try:
+            balance, account_probe_text = self._request_best_kb_balance(account)
+            self.parent_app.service.balance_summary = balance
+            self.kb_account_probe_var.set(f"확인된 계좌: {account_probe_text}")
+        except KbOpenApiError as exc:
+            self.parent_app.service.balance_summary = None
+            self._refresh_balance_display(force=False)
+            self.parent_app._show_warning(
+                "KB API 계좌 확인",
+                f"주문 전 계좌 잔고를 확인하지 못했습니다.\n{exc}",
+                parent=self,
+            )
+            return
+        estimated_amount = float(quantity) * float(price)
+        if side == "BUY":
+            try:
+                orderable = self.parent_app.kb_api.request_buy_orderable_cash(symbol)
+                if orderable.orderable_total > 0 or orderable.max_orderable_amount > 0:
+                    balance_orderable = max(
+                        balance.orderable_amount,
+                        orderable.orderable_total,
+                        orderable.max_orderable_amount,
+                    )
+                else:
+                    balance_orderable = balance.orderable_amount
+            except KbOpenApiError:
+                balance_orderable = balance.orderable_amount
+            if estimated_amount > balance_orderable:
+                self._update_kb_api_state(True, False)
+                self.kb_trade_ready_var.set("주문가능금액 부족")
+                try:
+                    self.kb_trade_ready_label.configure(fg=UI_RED)
+                except tk.TclError:
+                    pass
+                self.parent_app._show_warning(
+                    "KB API 매수 가능금액",
+                    f"매수 예상금액 {estimated_amount:,.0f}원이 주문가능금액 {balance_orderable:,.0f}원을 초과합니다.",
+                    parent=self,
+                )
+                return
+        else:
+            holding_quantity = 0
+            for holding in balance.holdings:
+                if normalize_kb_symbol(holding.symbol) == symbol:
+                    holding_quantity = max(holding_quantity, int(holding.sellable_quantity or holding.quantity))
+            if balance.holdings and holding_quantity < quantity:
+                self._update_kb_api_state(True, False)
+                self.kb_trade_ready_var.set("매도가능수량 부족")
+                try:
+                    self.kb_trade_ready_label.configure(fg=UI_RED)
+                except tk.TclError:
+                    pass
+                self.parent_app._show_warning(
+                    "KB API 매도 가능수량",
+                    f"{symbol} 매도 가능수량 {holding_quantity}주가 주문수량 {quantity}주보다 적습니다.",
+                    parent=self,
+                )
+                return
+        self._refresh_balance_display(force=False)
         side_label = "매수" if side == "BUY" else "매도"
         confirmed = messagebox.askyesno(
             "KB 실계좌 수동 주문 확인",
@@ -1865,8 +2469,24 @@ class KbManualTradeWindow(tk.Toplevel):
             self.handoff_var.set(f"KB {side_label} 주문 실패: {exc}")
             self.parent_app._show_warning("KB API 주문 실패", str(exc), parent=self)
             return
-        self.handoff_var.set(f"KB {side_label} 주문 접수 완료 · 주문번호 {order_no}")
-        messagebox.showinfo("KB API 주문 접수", f"{side_label} 주문이 접수되었습니다.\n주문번호: {order_no}", parent=self)
+        self.handoff_var.set(f"KB {side_label} 주문 전송 완료 · 주문번호 {order_no}")
+        self._append_execution_row(
+            side=side_label,
+            symbol=symbol,
+            name=self.name_var.get(),
+            quantity=quantity,
+            price=price,
+            status="주문 전송",
+            order_no=order_no,
+        )
+        self._refresh_balance_display(force=True)
+        self._refresh_prepared_cards()
+        messagebox.showinfo(
+            "KB API 주문 전송 완료",
+            f"{side_label} 주문 전송이 완료되었습니다.\n주문번호: {order_no}\n\n"
+            "오른쪽 체결·주문 리스트에서 조회할 수 있습니다.",
+            parent=self,
+        )
 
     def _refresh_status(self, show_message: bool = False) -> KbHtsStatus:
         status = self.parent_app._check_kb_hts_status(show_message=False)
@@ -1878,6 +2498,77 @@ class KbManualTradeWindow(tk.Toplevel):
         if show_message:
             self.parent_app._show_kb_status_message(status, parent=self)
         return status
+
+    def _update_kb_api_state(self, connected: bool, trade_ready: bool) -> None:
+        if connected:
+            self.kb_api_status_var.set("KB API ON · 토큰 연결됨")
+            try:
+                self.kb_api_status_label.configure(fg=UI_GREEN)
+            except tk.TclError:
+                pass
+        else:
+            self.kb_api_status_var.set("KB API OFF")
+            self.kb_trade_ready_var.set("")
+            try:
+                self.kb_api_status_label.configure(fg=UI_MUTED)
+            except tk.TclError:
+                pass
+            return
+
+        if trade_ready:
+            self.kb_trade_ready_var.set("매수매도 가능합니다")
+            try:
+                self.kb_trade_ready_label.configure(fg=UI_GREEN)
+            except tk.TclError:
+                pass
+        else:
+            self.kb_trade_ready_var.set("잔고 확인 필요")
+            try:
+                self.kb_trade_ready_label.configure(fg=UI_ORANGE)
+            except tk.TclError:
+                pass
+        self._refresh_prepared_cards()
+
+    @staticmethod
+    def _format_kb_account(account_digits: str) -> str:
+        digits = "".join(character for character in str(account_digits or "") if character.isdigit())
+        if len(digits) == 11:
+            return f"{digits[:3]}-{digits[3:6]}-{digits[6:9]}-{digits[9:]}"
+        if len(digits) == 9:
+            return f"{digits[:3]}-{digits[3:6]}-{digits[6:9]}"
+        return digits
+
+    def _kb_account_candidates(self) -> list[str]:
+        digits = "".join(character for character in self.kb_account_var.get() if character.isdigit())
+        if len(digits) >= 11:
+            base = digits[:-2]
+        elif len(digits) == 9:
+            base = digits
+        else:
+            return [digits] if digits else []
+        seen: set[str] = set()
+        candidates: list[str] = []
+        for suffix in (digits[-2:] if len(digits) >= 11 else "", "01", "02"):
+            if not suffix:
+                continue
+            candidate = f"{base}{suffix}"
+            if candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+        return candidates
+
+    def _request_best_kb_balance(self, account: str) -> tuple[BalanceSummary, str]:
+        account_digits = "".join(character for character in str(account or "") if character.isdigit())
+        if not account_digits:
+            raise KbOpenApiError("KB 신청계좌를 입력해 주세요.")
+        balance = self.parent_app.kb_api.request_balance(account_digits)
+        display_account = self._format_kb_account(account_digits)
+        self.kb_account_var.set(display_account)
+        checked = (
+            f"{display_account} 예수금 {balance.deposit:,.0f}원 "
+            f"주문가능 {balance.orderable_amount:,.0f}원"
+        )
+        return balance, checked
 
     def _refresh_market(self) -> None:
         app = self.parent_app
@@ -1893,6 +2584,125 @@ class KbManualTradeWindow(tk.Toplevel):
         self.price_var.set(f"{price:,.0f}원" if price > 0 else "현재가 미조회")
         if not self.order_price_var.get().strip() and price > 0:
             self.order_price_var.set(f"{price:,.0f}")
+        self._refresh_prepared_cards()
+
+    def _refresh_balance_display(self, force: bool = False) -> None:
+        app = self.parent_app
+        account = "".join(character for character in self.kb_account_var.get() if character.isdigit())
+        if force and account and app.kb_api.is_connected:
+            try:
+                balance, account_probe_text = self._request_best_kb_balance(account)
+                app.service.balance_summary = balance
+                self.kb_account_probe_var.set(f"확인된 계좌: {account_probe_text}")
+            except KbOpenApiError as exc:
+                app.service.balance_summary = None
+                self._update_kb_api_state(app.kb_api.is_connected, False)
+                self.kb_balance_summary_var.set("계좌 잔고: 조회 실패")
+                self.kb_balance_detail_var.set(f"KB 잔고 조회 실패: {exc}")
+                self.kb_account_probe_var.set("확인된 계좌: 조회 실패")
+                self.kb_balance_holdings_var.set("보유 종목: -")
+                self.kb_balance_updated_var.set(f"마지막 시도: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                self._refresh_prepared_cards()
+                return
+        elif force and account:
+            app.service.balance_summary = None
+            self._update_kb_api_state(False, False)
+            self.kb_balance_summary_var.set("계좌 잔고: KB API 미연결")
+            self.kb_balance_detail_var.set("KB 토큰 로그인 후 잔고 새로고침을 눌러 주세요.")
+            self.kb_account_probe_var.set("확인된 계좌: -")
+            self.kb_balance_holdings_var.set("보유 종목: -")
+            self.kb_balance_updated_var.set(f"마지막 시도: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            self._refresh_prepared_cards()
+            return
+        balance = app.service.balance_summary
+        if balance is None:
+            self._update_kb_api_state(self.parent_app.kb_api.is_connected, False)
+            self.kb_balance_summary_var.set("계좌 잔고: 미조회")
+            self.kb_balance_detail_var.set(
+                "잔고를 불러오지 못했습니다. KB API 연결 또는 계좌 연결 상태를 확인한 뒤 다시 새로고침해 주세요."
+            )
+            self.kb_account_probe_var.set("확인된 계좌: -")
+            self.kb_balance_holdings_var.set("보유 종목: -")
+            self.kb_balance_updated_var.set("마지막 갱신: -")
+            return
+        trade_ready = self.parent_app.kb_api.is_connected and balance.orderable_amount > 0
+        self._update_kb_api_state(self.parent_app.kb_api.is_connected, trade_ready)
+        if self.parent_app.kb_api.is_connected and not trade_ready:
+            self.kb_trade_ready_var.set("주문가능금액 없음")
+            try:
+                self.kb_trade_ready_label.configure(fg=UI_RED)
+            except tk.TclError:
+                pass
+        self.kb_balance_summary_var.set(
+            f"예수금 {balance.deposit:,.0f}원 · 주문가능 {balance.orderable_amount:,.0f}원 · "
+            f"평가금액 {balance.total_evaluation:,.0f}원 · 추정자산 {balance.estimated_assets:,.0f}원"
+        )
+        self.kb_balance_detail_var.set(
+            f"평가손익 {balance.total_profit_loss:,.0f}원 · 수익률 {balance.total_profit_rate:.2f}% · "
+            f"D+2 추정예수금 {balance.d2_estimated_deposit:,.0f}원"
+        )
+        self.kb_balance_holdings_var.set(f"보유 종목: {len(balance.holdings)}종목")
+        self.kb_balance_updated_var.set(f"마지막 갱신: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._refresh_prepared_cards()
+
+    def _refresh_prepared_cards(self) -> None:
+        """Refresh the four preview cards shown under the main controls."""
+        if not self.prepared_card_vars:
+            return
+
+        symbol = normalize_kb_symbol(self.symbol_var.get() or self.parent_app.symbol_var.get())
+        name = (self.name_var.get() or self.parent_app.symbol_name_var.get()).strip() or "-"
+        try:
+            price_value = float(str(self.price_var.get() or "0").replace(",", "").replace("원", ""))
+        except ValueError:
+            price_value = 0.0
+        price_text = f"{price_value:,.0f}원" if price_value > 0 else "현재가 미조회"
+
+        balance = self.parent_app.service.balance_summary
+        if balance is None:
+            account_summary = "계좌: 미조회"
+            account_detail = "잔고 확인 필요"
+        else:
+            account_summary = f"예수금 {balance.deposit:,.0f}원 · 주문가능 {balance.orderable_amount:,.0f}원"
+            account_detail = f"보유 {len(balance.holdings)}종목 · 평가 {balance.total_evaluation:,.0f}원"
+
+        api_connected = self.parent_app.kb_api.is_connected
+        api_text = self.kb_api_status_var.get().strip() or "KB API OFF"
+        trade_text = self.kb_trade_ready_var.get().strip() or ("매수매도 가능합니다" if api_connected else "연결 필요")
+
+        payloads = (
+            {
+                "symbol": f"종목: {symbol or '-'}",
+                "name": f"회사명: {name}",
+                "price": f"현재가: {price_text}",
+                "status": "매수 준비" if api_connected else "매수 대기",
+            },
+            {
+                "symbol": f"종목: {symbol or '-'}",
+                "name": f"회사명: {name}",
+                "price": f"현재가: {price_text}",
+                "status": "매도 준비" if api_connected else "매도 대기",
+            },
+            {
+                "symbol": "계좌 상태",
+                "name": f"요약: {account_summary}",
+                "price": f"상세: {account_detail}",
+                "status": "잔고 확인 완료" if balance is not None else "잔고 확인 필요",
+            },
+            {
+                "symbol": "API 상태",
+                "name": f"상태: {api_text}",
+                "price": f"주문: {trade_text}",
+                "status": "토큰 연결 완료" if api_connected else "연결 안됨",
+            },
+        )
+
+        for index, payload in enumerate(payloads):
+            card_vars = self.prepared_card_vars[index]
+            card_vars["symbol"].set(payload["symbol"])
+            card_vars["name"].set(payload["name"])
+            card_vars["price"].set(payload["price"])
+            card_vars["status"].set(payload["status"])
 
     def _set_symbol(self) -> None:
         symbol = normalize_kb_symbol(self.symbol_var.get())
@@ -1909,6 +2719,7 @@ class KbManualTradeWindow(tk.Toplevel):
             if app.service.account_info.connected:
                 app._request_current_price()
         self._refresh_market()
+        self._refresh_prepared_cards()
 
     def _choose_hts_executable(self) -> None:
         path = filedialog.askopenfilename(
@@ -2286,6 +3097,15 @@ class TraderApp(tk.Tk):
                     "active": ("#FFF2F5", UI_RED),
                     "pressed": ("#FCE8EC", UI_RED),
                     "disabled": ("#F7F7F7", "#E5E5E5"),
+                },
+            ),
+            "Success.TButton": (
+                "Rounded.Button.success",
+                {
+                    "normal": (UI_GREEN, UI_GREEN),
+                    "active": ("#1A9B4C", "#1A9B4C"),
+                    "pressed": ("#0F6D31", "#0F6D31"),
+                    "disabled": ("#CFE8D8", "#CFE8D8"),
                 },
             ),
         }
@@ -3494,11 +4314,6 @@ class TraderApp(tk.Tk):
             column=8,
             padx=(0, 8),
         )
-        ttk.Button(
-            header,
-            text="KB HTS 안내",
-            command=lambda: webbrowser.open("https://www.kbsec.com/go.able?linkcd=s060100080002"),
-        ).grid(row=1, column=9)
         status_strip = ttk.Frame(header, style="Header.TFrame")
         status_strip.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(7, 0))
         status_strip.columnconfigure(0, weight=1)
