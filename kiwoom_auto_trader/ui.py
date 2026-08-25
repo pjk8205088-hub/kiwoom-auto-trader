@@ -1642,6 +1642,8 @@ class KbManualTradeWindow(tk.Toplevel):
         self.prepared_card_vars: list[dict[str, tk.StringVar]] = []
         self.kb_execution_tree: ttk.Treeview | None = None
         self._local_kb_execution_rows: list[dict[str, str]] = []
+        self._kb_account_info_window: tk.Toplevel | None = None
+        self._kb_last_balance_error = ""
         self.detail_var = tk.StringVar(value="KB HTS 실행 여부를 확인해 주세요.")
         self.handoff_var = tk.StringVar(
             value="종목을 세팅하고 현재가를 불러온 뒤 HTS 전달을 누르세요."
@@ -2197,6 +2199,9 @@ class KbManualTradeWindow(tk.Toplevel):
             self.kb_execution_status_var.set("체결 정보: KB 조회 결과 없음")
 
     def _close(self) -> None:
+        if self._kb_account_info_window is not None and self._kb_account_info_window.winfo_exists():
+            self._kb_account_info_window.destroy()
+        self._kb_account_info_window = None
         self.parent_app._kb_manual_window = None
         self.destroy()
 
@@ -2237,6 +2242,7 @@ class KbManualTradeWindow(tk.Toplevel):
             balance, account_probe_text = self._request_best_kb_balance(account)
         except KbOpenApiError as exc:
             self.parent_app.service.balance_summary = None
+            self._kb_last_balance_error = str(exc)
             self._update_kb_api_state(self.parent_app.kb_api.is_connected, False)
             self.kb_balance_summary_var.set("계좌 잔고: 조회 실패")
             self.kb_balance_detail_var.set(f"KB 계좌 연결 실패: {exc}")
@@ -2247,6 +2253,7 @@ class KbManualTradeWindow(tk.Toplevel):
             self._refresh_prepared_cards()
             return
         self.parent_app.service.balance_summary = balance
+        self._kb_last_balance_error = ""
         self.kb_account_probe_var.set(f"확인된 계좌: {account_probe_text}")
         self._refresh_balance_display(force=False)
         self.handoff_var.set(f"KB 계좌 연결 완료 · {self._format_kb_account(account)}")
@@ -2258,6 +2265,7 @@ class KbManualTradeWindow(tk.Toplevel):
             f"주문가능: {balance.orderable_amount:,.0f}원",
             parent=self,
         )
+        self._show_kb_account_info_window(refresh=True)
 
     def _set_side(self, side: str) -> None:
         self.side_var.set("SELL" if str(side).upper() == "SELL" else "BUY")
@@ -2287,6 +2295,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self._refresh_balance_display(force=True)
         self._refresh_market()
         self._refresh_prepared_cards()
+        self._show_kb_account_info_window(refresh=True)
 
     def _load_kb_token_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -2307,6 +2316,7 @@ class KbManualTradeWindow(tk.Toplevel):
     def _disconnect_kb_api(self) -> None:
         self.parent_app.kb_api.disconnect()
         self.parent_app.service.balance_summary = None
+        self._kb_last_balance_error = ""
         self._update_kb_api_state(False, False)
         self.handoff_var.set("KB Open API 연결을 해제했습니다.")
         self.kb_balance_summary_var.set("계좌 잔고: 미연결")
@@ -2315,6 +2325,9 @@ class KbManualTradeWindow(tk.Toplevel):
         self.kb_balance_holdings_var.set("보유 종목: -")
         self.kb_balance_updated_var.set("마지막 갱신: -")
         self._refresh_prepared_cards()
+        if self._kb_account_info_window is not None and self._kb_account_info_window.winfo_exists():
+            self._kb_account_info_window.destroy()
+        self._kb_account_info_window = None
 
     def _refresh_kb_api_quote(self, force: bool = False) -> bool:
         if not self.parent_app.kb_api.is_connected:
@@ -2499,6 +2512,78 @@ class KbManualTradeWindow(tk.Toplevel):
             self.parent_app._show_kb_status_message(status, parent=self)
         return status
 
+    def _show_kb_account_info_window(self, refresh: bool = False) -> None:
+        if self._kb_account_info_window is not None and self._kb_account_info_window.winfo_exists():
+            if not refresh:
+                self._kb_account_info_window.lift()
+                return
+            self._kb_account_info_window.destroy()
+
+        connected = self.parent_app.kb_api.is_connected
+        balance = self.parent_app.service.balance_summary
+        account_digits = "".join(character for character in self.kb_account_var.get() if character.isdigit())
+        account_label = self._format_kb_account(account_digits) if account_digits else "확인 필요"
+        token_status = "접근토큰 발급 성공" if connected else "토큰 연결 필요"
+        info_received = "완료" if balance is not None else "잔고 확인 필요"
+        if self._kb_last_balance_error:
+            info_received = f"잔고 조회 실패: {self._kb_last_balance_error}"
+
+        window = tk.Toplevel(self)
+        self._kb_account_info_window = window
+        window.title("KB 계좌정보")
+        window.geometry("680x590")
+        window.resizable(False, False)
+        window.configure(background=UI_BACKGROUND)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", window.destroy)
+
+        body = ttk.Frame(window, padding=18)
+        body.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(body, text="계좌정보", font=(UI_DISPLAY_FONT, 15, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 14)
+        )
+        rows = [
+            ("연결 상태", "ON KB REST API 연결됨" if connected else "OFF 연결 안됨"),
+            ("연결 방식", "KB REST API"),
+            ("로그인 이벤트", token_status),
+            ("정보 수신", info_received),
+            ("접속 서버", "실거래"),
+            ("고객명", self.kb_customer_name_var.get().strip() or "확인 필요"),
+            ("사용자 ID", "KB REST API 토큰 인증" if connected else "확인 필요"),
+            ("API 확인 계좌", account_label),
+            ("계좌 수", "1개 (KB 신청계좌 1개)" if account_digits else "확인 필요"),
+            ("정보 활용", "계좌 / 현재가 / 잔고 / 주문가능금액 / 수동주문 / 체결조회"),
+        ]
+        if balance is not None:
+            rows.extend(
+                [
+                    ("예수금", f"{balance.deposit:,.0f}원"),
+                    ("주문가능금액", f"{balance.orderable_amount:,.0f}원"),
+                    ("출금가능금액", f"{balance.withdrawable_amount:,.0f}원"),
+                    ("D+2 추정예수금", f"{balance.d2_estimated_deposit:,.0f}원"),
+                    ("보유 종목", f"{len(balance.holdings)}종목"),
+                    ("추정예탁자산", f"{balance.estimated_assets:,.0f}원"),
+                ]
+            )
+        else:
+            rows.append(("계좌 금액", "계좌연결 또는 잔고 새로고침을 눌러 주세요."))
+
+        for row_index, (label, value) in enumerate(rows, start=1):
+            ttk.Label(body, text=label, width=14).grid(row=row_index, column=0, sticky="w", pady=3)
+            ttk.Label(body, text=value, width=48, wraplength=460).grid(
+                row=row_index, column=1, sticky="w", pady=3
+            )
+
+        action_row = len(rows) + 1
+        button_row = ttk.Frame(body)
+        button_row.grid(row=action_row, column=0, columnspan=2, sticky="e", pady=(14, 0))
+        ttk.Button(
+            button_row,
+            text="잔고 새로고침",
+            command=lambda: (self._refresh_balance_display(force=True), self._show_kb_account_info_window(refresh=True)),
+        ).pack(side="left", padx=(0, 8))
+        ttk.Button(button_row, text="닫기", command=window.destroy).pack(side="left")
+
     def _update_kb_api_state(self, connected: bool, trade_ready: bool) -> None:
         if connected:
             self.kb_api_status_var.set("KB API ON · 토큰 연결됨")
@@ -2596,6 +2681,7 @@ class KbManualTradeWindow(tk.Toplevel):
                 self.kb_account_probe_var.set(f"확인된 계좌: {account_probe_text}")
             except KbOpenApiError as exc:
                 app.service.balance_summary = None
+                self._kb_last_balance_error = str(exc)
                 self._update_kb_api_state(app.kb_api.is_connected, False)
                 self.kb_balance_summary_var.set("계좌 잔고: 조회 실패")
                 self.kb_balance_detail_var.set(f"KB 잔고 조회 실패: {exc}")
@@ -2604,6 +2690,7 @@ class KbManualTradeWindow(tk.Toplevel):
                 self.kb_balance_updated_var.set(f"마지막 시도: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 self._refresh_prepared_cards()
                 return
+            self._kb_last_balance_error = ""
         elif force and account:
             app.service.balance_summary = None
             self._update_kb_api_state(False, False)
