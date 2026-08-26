@@ -11,7 +11,7 @@ import tkinter as tk
 import webbrowser
 from datetime import datetime, timedelta
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from urllib.request import urlopen
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
@@ -2367,6 +2367,83 @@ class KbManualTradeWindow(tk.Toplevel):
         self._refresh_prepared_cards()
         return True
 
+    def _execution_priority_price(self, side: str, symbol: str, entered_price: float) -> tuple[float, str]:
+        """Adjust a limit order toward the opposite best quote before sending."""
+
+        try:
+            current_price = float(str(self.price_var.get() or "0").replace(",", "").replace("원", ""))
+        except ValueError:
+            current_price = 0.0
+        best_ask = 0.0
+        best_bid = 0.0
+        try:
+            book = self.parent_app.kb_api.request_order_book(symbol)
+            best_ask = book.best_ask
+            best_bid = book.best_bid
+        except KbOpenApiError as exc:
+            self.handoff_var.set(f"KB 호가 조회 실패: {exc}")
+
+        if side == "BUY":
+            target_price = best_ask or current_price
+            if target_price > 0 and entered_price < target_price:
+                return target_price, (
+                    f"입력가 {entered_price:,.0f}원 -> "
+                    f"매도1호가/현재가 {target_price:,.0f}원으로 보정"
+                )
+            if target_price > 0:
+                return entered_price, f"매수 체결우선 조건 확인: 기준 {target_price:,.0f}원"
+        else:
+            target_price = best_bid or current_price
+            if target_price > 0 and entered_price > target_price:
+                return target_price, (
+                    f"입력가 {entered_price:,.0f}원 -> "
+                    f"매수1호가/현재가 {target_price:,.0f}원으로 보정"
+                )
+            if target_price > 0:
+                return entered_price, f"매도 체결우선 조건 확인: 기준 {target_price:,.0f}원"
+        return entered_price, "호가 조회 전송: 입력가 그대로 사용"
+
+    def _lookup_order_execution_notice(
+        self,
+        symbol: str,
+        order_no: str,
+        side_label: str,
+        attempts: int = 4,
+    ) -> tuple[str, str]:
+        execution_status = "주문 전송"
+        execution_notice = "주문은 접수됐고 체결조회 반영을 기다리는 중입니다."
+        for attempt in range(max(1, attempts)):
+            if attempt:
+                self.update_idletasks()
+                sleep(0.35)
+            try:
+                executions = self.parent_app.kb_api.request_order_executions(
+                    symbol=symbol,
+                    order_no=order_no,
+                    status="0",
+                )
+            except KbOpenApiError as exc:
+                execution_notice = f"체결조회 대기: {exc}"
+                continue
+            matched_execution = next(
+                (execution for execution in executions if execution.order_no == order_no),
+                executions[0] if executions else None,
+            )
+            if matched_execution is None:
+                continue
+            execution_status = matched_execution.status or execution_status
+            if "체결" in execution_status:
+                if execution_status == "부분체결":
+                    execution_notice = f"{side_label} 부분체결되었습니다."
+                else:
+                    execution_notice = f"{side_label} 체결되었습니다."
+                break
+            if "미체결" in execution_status:
+                execution_notice = "주문은 접수됐고 아직 미체결 상태입니다."
+            else:
+                execution_notice = f"KB 체결조회 상태: {execution_status}"
+        return execution_status, execution_notice
+
     def _submit_api_order(self, side: str) -> None:
         if not self.kb_order_enabled_var.get():
             self.parent_app._show_warning(
@@ -2400,6 +2477,8 @@ class KbManualTradeWindow(tk.Toplevel):
                 parent=self,
             )
             return
+        price, price_adjust_note = self._execution_priority_price(side, symbol, price)
+        self.order_price_var.set(f"{price:,.0f}")
         try:
             balance, account_probe_text = self._request_best_kb_balance(account)
             self.parent_app.service.balance_summary = balance
@@ -2445,7 +2524,7 @@ class KbManualTradeWindow(tk.Toplevel):
             for holding in balance.holdings:
                 if normalize_kb_symbol(holding.symbol) == symbol:
                     holding_quantity = max(holding_quantity, int(holding.sellable_quantity or holding.quantity))
-            if balance.holdings and holding_quantity < quantity:
+            if holding_quantity < quantity:
                 self._update_kb_api_state(True, False)
                 self.kb_trade_ready_var.set("매도가능수량 부족")
                 try:
@@ -2464,6 +2543,7 @@ class KbManualTradeWindow(tk.Toplevel):
             "KB 실계좌 수동 주문 확인",
             f"KB Open API로 {side_label} 주문을 전송합니다.\n\n"
             f"종목: {symbol}\n수량: {quantity}주\n가격: {price:,.0f}원\n\n"
+            f"{price_adjust_note}\n\n"
             "이 주문은 KB 실계좌에 전송될 수 있습니다. 계속하시겠습니까?",
             parent=self,
         )
@@ -2482,22 +2562,31 @@ class KbManualTradeWindow(tk.Toplevel):
             self.handoff_var.set(f"KB {side_label} 주문 실패: {exc}")
             self.parent_app._show_warning("KB API 주문 실패", str(exc), parent=self)
             return
-        self.handoff_var.set(f"KB {side_label} 주문 전송 완료 · 주문번호 {order_no}")
+        execution_status, execution_notice = self._lookup_order_execution_notice(
+            symbol=symbol,
+            order_no=order_no,
+            side_label=side_label,
+        )
+
+        self.handoff_var.set(
+            f"KB {side_label} 주문 전송 완료 · 주문번호 {order_no} · {price_adjust_note}"
+        )
         self._append_execution_row(
             side=side_label,
             symbol=symbol,
             name=self.name_var.get(),
             quantity=quantity,
             price=price,
-            status="주문 전송",
+            status=execution_status,
             order_no=order_no,
         )
         self._refresh_balance_display(force=True)
+        self._refresh_execution_list()
         self._refresh_prepared_cards()
         messagebox.showinfo(
             "KB API 주문 전송 완료",
-            f"{side_label} 주문 전송이 완료되었습니다.\n주문번호: {order_no}\n\n"
-            "오른쪽 체결·주문 리스트에서 조회할 수 있습니다.",
+            f"{side_label} 주문 전송이 완료되었습니다.\n주문번호: {order_no}\n{execution_notice}\n\n"
+            f"{price_adjust_note}",
             parent=self,
         )
 

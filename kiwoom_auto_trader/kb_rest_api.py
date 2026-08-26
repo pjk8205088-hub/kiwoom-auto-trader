@@ -19,7 +19,7 @@ from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from .models import BalanceSummary, Holding
+from .models import BalanceSummary, Holding, OrderBookLevel, OrderBookSnapshot
 from .rest_api import RestResponse
 from .symbols import normalize_symbol
 
@@ -112,6 +112,38 @@ def _first_number(body: dict[str, Any], *keys: str) -> float:
         if value not in (None, ""):
             return _number(value)
     return 0.0
+
+
+def _first_text(body: Any, *keys: str) -> str:
+    """Return the first non-empty text value from a nested KB response."""
+
+    if isinstance(body, dict):
+        for key in keys:
+            value = body.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        for value in body.values():
+            nested = _first_text(value, *keys)
+            if nested:
+                return nested
+    elif isinstance(body, list):
+        for item in body:
+            nested = _first_text(item, *keys)
+            if nested:
+                return nested
+    return ""
+
+
+def _valid_order_no(value: Any) -> str:
+    order_no = "".join(character for character in str(value or "").strip() if character.isdigit())
+    if not order_no or set(order_no) == {"0"}:
+        return ""
+    return order_no
+
+
+def _is_krx_route_retryable(message: str) -> bool:
+    text = str(message or "")
+    return any(fragment in text for fragment in ("NXT", "KRX", "거래할 수 없는 종목", "거래할 수 없는"))
 
 
 def _split_account(account: str) -> tuple[str, str]:
@@ -348,6 +380,62 @@ class KbOpenApiClient:
         self._last_quote = quote
         return quote
 
+    def request_order_book(self, symbol: str) -> OrderBookSnapshot:
+        """Return KB's regular-session order book using IVU10070."""
+
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KbOpenApiError("6자리 종목번호를 입력해 주세요.")
+        body = self._api_post(
+            "ivu10070",
+            {
+                "is_cd": symbol,
+                "ovtm_mkt_clsf": "0",
+            },
+        )
+        levels: list[OrderBookLevel] = []
+        for level in range(1, 11):
+            ask_price = _first_number(
+                body,
+                f"s{level}_aprc",
+                f"s_askprc{level}_p4",
+                f"s_askprc{level}",
+                f"ask_price{level}",
+            )
+            bid_price = _first_number(
+                body,
+                f"b{level}_aprc",
+                f"b_askprc{level}_p4",
+                f"b_askprc{level}",
+                f"bid_price{level}",
+            )
+            ask_quantity = _integer(
+                body.get(f"s_pstn_s{level}_aprc_q")
+                or body.get(f"s_askprc_q{level}")
+                or body.get(f"s{level}_aprc_q")
+            )
+            bid_quantity = _integer(
+                body.get(f"b_pstn_b{level}_aprc_q")
+                or body.get(f"b_askprc_q{level}")
+                or body.get(f"b{level}_aprc_q")
+            )
+            if ask_price > 0 or bid_price > 0:
+                levels.append(
+                    OrderBookLevel(
+                        level=level,
+                        ask_price=ask_price,
+                        ask_quantity=ask_quantity,
+                        bid_price=bid_price,
+                        bid_quantity=bid_quantity,
+                    )
+                )
+        return OrderBookSnapshot(
+            symbol=symbol,
+            levels=tuple(levels),
+            timestamp=str(body.get("askprc_rcp_tm") or datetime.now().strftime("%H%M%S")),
+            source="KB IVU10070",
+        )
+
     def request_buy_orderable_cash(self, symbol: str) -> KbOrderableCash:
         """Return the official domestic buy-orderable cash for a symbol."""
 
@@ -399,7 +487,7 @@ class KbOpenApiClient:
 
         is_buy = normalized_side == "BUY"
         _, account_suffix = _split_account(account)
-        request_body = {
+        request_body_base = {
             "mkt_tm_clsf": "1",
             "ordr_jb_clsf": "2" if is_buy else "1",
             "s_clsf": "1",
@@ -415,44 +503,98 @@ class KbOpenApiClient:
             "ordr_mng_no": "",
             "spclz_ordr_ccd": "",
             "acct_cd": account_suffix,
-            "sor_ordr_ccd": "S",
             "stpd_prc": "",
         }
-        body = self._api_post("ssam1802" if is_buy else "ssam1801", request_body)
-        order_no = str(body.get("ordr_no") or "").strip()
-        if not order_no:
-            message = str(body.get("o_msg") or "KB Open API 주문번호가 수신되지 않았습니다.").strip()
-            raise KbOpenApiError(message)
-        self.last_order_no = order_no
-        return order_no
+        api_id = "ssam1802" if is_buy else "ssam1801"
+        last_route_error = ""
+        for route_code in ("K", "1"):
+            request_body = dict(request_body_base)
+            request_body["sor_ordr_ccd"] = route_code
+            try:
+                body = self._api_post(api_id, request_body)
+            except KbOpenApiError as exc:
+                last_route_error = str(exc)
+                if route_code == "K" and _is_krx_route_retryable(last_route_error):
+                    continue
+                raise
+            order_no = _valid_order_no(
+                _first_text(
+                    body,
+                    "ordr_no",
+                    "order_no",
+                    "ord_no",
+                    "ordNo",
+                    "odno",
+                    "ODNO",
+                )
+            )
+            message = _first_text(
+                body,
+                "o_msg",
+                "msg",
+                "message",
+                "resultMessage",
+                "processMessage",
+            )
+            if order_no:
+                self.last_order_no = order_no
+                return order_no
+            if route_code == "K" and _is_krx_route_retryable(message):
+                last_route_error = message
+                continue
+            raise KbOpenApiError(message or "KB Open API 주문번호가 수신되지 않았습니다.")
+        raise KbOpenApiError(last_route_error or "KB KRX 주문 전송에 실패했습니다.")
 
     def request_balance(self, account: str = "") -> BalanceSummary:
+        """Return the domestic account cash and holdings from SSQM2932.
+
+        SSQM2932 is the customer-account endpoint documented by KB for a
+        comprehensive brokerage account.  SPQM2226 is a different balance
+        evaluation service and does not provide the domestic account fields
+        needed by the manual order screen.
+        """
         account_digits = "".join(character for character in str(account or "") if character.isdigit())
         body = self._api_post(
-            "spqm2226",
+            "ssqm2932",
             {
-                "std_crncy_f": "2",
-                "exch_r_aplc_f": "2",
-                "fee_clsf": "1",
-                "srt_clsf": "1",
-                "rsrv_ordr_f": "",
-                "tl_asts_exch_val_amt": "",
-                "tl_tfnd_exch_val_amt": "",
-                "tl_scrts_exch_val_amt": "",
-                "tl_krw_val_amt": "",
-                "tl_krw_val_pl_amt": "",
-                "cn_f": "",
-                "nxt_key": "",
+                "inq_clsf": "1",
+                "scrts_ccd": "1",
+                "bnd_val_wy_cd": "1",
+                "excg_mktpr_ccd": "1",
             },
         )
         holdings = self._parse_balance_holdings(body)
-        deposit = _first_number(body, "krw_tfnd", "tfnd", "tl_tfnd_exch_val_amt")
-        orderable_amount = _first_number(body, "ordr_psbl_amt_p2", "rus_psbl_ra_p3", "krw_o_amt_psbl_amt")
-        withdrawable_amount = _first_number(body, "o_amt_psbl_amt_p2", "krw_o_amt_psbl_amt", "tfnd")
-        total_evaluation = _first_number(body, "tl_krw_val_amt", "tl_scrts_exch_val_amt", "asts_val_amt")
-        estimated_assets = _first_number(body, "tl_asts_exch_val_amt", "asts_val_amt", "tl_krw_val_amt", "krw_tfnd", "tfnd")
-        total_profit_loss = _first_number(body, "tl_krw_val_pl_amt", "krw_exch_val_pl")
+        deposit = _first_number(body, "tfnd", "krw_tfnd")
+        orderable_amount = _first_number(
+            body,
+            "ordr_psbl_csh",
+            "pcnt100_ordr_psbl_amt",
+            "ordr_psbl_amt_p2",
+        )
+        withdrawable_amount = _first_number(
+            body,
+            "o_amt_psbl_amt",
+            "o_amt_psbl_amt_p2",
+            "krw_o_amt_psbl_amt",
+        )
+        total_evaluation = _first_number(
+            body,
+            "val_amt_sum",
+            "tl_krw_val_amt",
+            "tl_scrts_exch_val_amt",
+            "asts_val_amt",
+        )
+        total_profit_loss = _first_number(
+            body,
+            "pl_amt_sum",
+            "tl_krw_val_pl_amt",
+            "krw_exch_val_pl",
+        )
         total_purchase = sum(holding.purchase_amount for holding in holdings)
+        if total_purchase <= 0:
+            total_purchase = sum(
+                holding.average_price * holding.quantity for holding in holdings
+            )
         total_profit_rate = (total_profit_loss / total_purchase * 100.0) if total_purchase else 0.0
         return BalanceSummary(
             account=account_digits,
@@ -464,7 +606,7 @@ class KbOpenApiClient:
             total_evaluation=total_evaluation,
             total_profit_loss=total_profit_loss,
             total_profit_rate=total_profit_rate,
-            estimated_assets=estimated_assets or deposit + total_evaluation,
+            estimated_assets=deposit + total_evaluation,
             holdings=tuple(holdings),
             message=str(body.get("o_msg") or "KB 잔고 조회 완료").strip(),
         )
@@ -527,18 +669,31 @@ class KbOpenApiClient:
                 continue
             quantity = _integer(
                 row.get("frgn_hld_q_p6")
+                or row.get("blnc_q")
+                or row.get("blnc_q_p6")
                 or row.get("hld_q")
                 or row.get("ordr_psbl_q")
             )
             sellable_quantity = _integer(
                 row.get("frgn_ordr_psbl_q_p6")
                 or row.get("frgn_ordr_psbl_q1_p6")
+                or row.get("ordr_psbl_q_p6")
                 or row.get("ordr_psbl_q")
             )
             current_price = _number(row.get("now_prc_p4") or row.get("now_prc"))
-            average_price = _number(row.get("byng_avr_prc_p4") or row.get("avr_prc"))
-            profit_loss = _number(row.get("krw_exch_val_pl") or row.get("evltv_prft"))
+            average_price = _number(
+                row.get("byng_avr_prc")
+                or row.get("byng_avr_prc_p4")
+                or row.get("avr_prc")
+            )
+            profit_loss = _number(
+                row.get("pl_amt")
+                or row.get("krw_exch_val_pl")
+                or row.get("evltv_prft")
+            )
             purchase_amount = _number(row.get("byng_amt"))
+            if purchase_amount <= 0 and average_price > 0 and quantity > 0:
+                purchase_amount = average_price * quantity
             holdings.append(
                 Holding(
                     symbol=symbol,
