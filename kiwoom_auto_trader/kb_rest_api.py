@@ -141,6 +141,14 @@ def _valid_order_no(value: Any) -> str:
     return order_no
 
 
+def same_order_no(left: str, right: str) -> bool:
+    left_digits = _valid_order_no(left)
+    right_digits = _valid_order_no(right)
+    if not left_digits or not right_digits:
+        return False
+    return left_digits.lstrip("0") == right_digits.lstrip("0")
+
+
 def _is_krx_route_retryable(message: str) -> bool:
     text = str(message or "")
     return any(fragment in text for fragment in ("NXT", "KRX", "거래할 수 없는 종목", "거래할 수 없는"))
@@ -473,10 +481,12 @@ class KbOpenApiClient:
         quantity: int,
         price: float,
         account_password: str = "",
+        order_type_code: str = "00",
     ) -> str:
         account = "".join(character for character in str(account or "") if character.isdigit())
         symbol = normalize_symbol(symbol)
         normalized_side = str(side or "").upper()
+        normalized_order_type_code = str(order_type_code or "00").upper().strip()
         if not account:
             raise KbOpenApiError("KB 주문 계좌번호를 입력해 주세요.")
         if not symbol:
@@ -489,6 +499,25 @@ class KbOpenApiClient:
             raise KbOpenApiError("주문 가격은 0보다 커야 합니다.")
         if not str(account_password or "").isdigit() or not 4 <= len(str(account_password)) <= 8:
             raise KbOpenApiError("계좌 비밀번호는 4~8자리 숫자여야 합니다.")
+        if normalized_order_type_code not in {
+            "00",
+            "03",
+            "05",
+            "12",
+            "13",
+            "F0",
+            "F3",
+            "F5",
+            "I0",
+            "I3",
+            "I5",
+            "99",
+            "M3",
+            "MF",
+            "MI",
+            "S0",
+        }:
+            raise KbOpenApiError("지원하지 않는 KB 주문구분코드입니다.")
 
         is_buy = normalized_side == "BUY"
         _, account_suffix = _split_account(account)
@@ -498,7 +527,7 @@ class KbOpenApiClient:
             "is_cd": symbol,
             "ordr_q": str(int(quantity)),
             "ordr_uprc": str(int(price)),
-            "ordr_ccd": "00",
+            "ordr_ccd": normalized_order_type_code,
             "crdt_typ_cd": "00",
             "ln_dt": "",
             "crct_clsf": "",
@@ -519,6 +548,8 @@ class KbOpenApiClient:
         for market_time_class, route_code in (("1", "K"), ("1", "1"), ("2", "K"), ("2", "1")):
             request_body = dict(request_body_base)
             request_body["mkt_tm_clsf"] = market_time_class
+            if market_time_class != "1":
+                request_body["ordr_ccd"] = "99"
             request_body["sor_ordr_ccd"] = route_code
             try:
                 body = self._api_post(api_id, request_body)
@@ -742,13 +773,29 @@ class KbOpenApiClient:
 
         executions: list[KbOrderExecution] = []
         for row in rows:
-            order_no = str(row.get("ordr_no") or "").strip()
-            symbol = normalize_symbol(row.get("is_cd") or row.get("stnd_is_no"))
+            order_no = str(
+                row.get("ordr_no")
+                or row.get("ord_no")
+                or row.get("ordNo")
+                or row.get("odno")
+                or row.get("ODNO")
+                or ""
+            ).strip()
+            symbol = normalize_symbol(row.get("is_cd") or row.get("stnd_is_no") or row.get("shrt_cd"))
             if not order_no and not symbol:
                 continue
-            ordered_quantity = _integer(row.get("ordr_q"))
-            executed_quantity = _integer(row.get("tl_ccls_q") or row.get("ccls_q"))
-            unfilled_quantity = _integer(row.get("nccls_q"))
+            ordered_quantity = _integer(row.get("ordr_q") or row.get("ord_qty"))
+            executed_quantity = _integer(
+                row.get("tl_ccls_q")
+                or row.get("tot_ccls_q")
+                or row.get("tot_ccld_qty")
+                or row.get("ccls_q")
+                or row.get("ccld_qty")
+                or row.get("exec_qty")
+            )
+            unfilled_quantity = _integer(row.get("nccls_q") or row.get("rmn_qty") or row.get("ordr_rmn_q"))
+            if ordered_quantity > 0 and executed_quantity > 0 and unfilled_quantity <= 0:
+                unfilled_quantity = max(ordered_quantity - executed_quantity, 0)
             side_name = str(
                 row.get("trd_dl_ccd_nm")
                 or row.get("ordr_jb_clsf_nm")
@@ -761,7 +808,20 @@ class KbOpenApiClient:
                 side = "매수"
             else:
                 side = side_name or "-"
-            if executed_quantity > 0 and unfilled_quantity <= 0:
+            status_text = str(
+                row.get("ccls_clsf_nm")
+                or row.get("ccls_stat_nm")
+                or row.get("ordr_sttus_nm")
+                or row.get("ccls_yn")
+                or ""
+            ).strip()
+            if "미체결" in status_text:
+                status = "미체결"
+            elif "부분" in status_text:
+                status = "부분체결"
+            elif "체결" in status_text:
+                status = "체결"
+            elif executed_quantity > 0 and unfilled_quantity <= 0:
                 status = "체결"
             elif executed_quantity > 0 and unfilled_quantity > 0:
                 status = "부분체결"

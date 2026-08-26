@@ -72,6 +72,34 @@ class KbOpenApiClientTests(unittest.TestCase):
         self.assertEqual(data["sor_ordr_ccd"], "K")
         self.assertEqual(data["ordr_q"], "2")
 
+    def test_order_type_code_can_use_ioc_limit_for_marketable_orders(self) -> None:
+        calls = []
+
+        def requester(method, url, headers, body, timeout):
+            calls.append((url, body))
+            if url.endswith("/oauth2/token"):
+                return RestResponse(200, {}, {"access_token": "kb-token", "expires_in": 1800})
+            return RestResponse(
+                200,
+                {},
+                {"dataHeader": {"resultCode": "200"}, "dataBody": {"ordr_no": "0040027932"}},
+            )
+
+        client = KbOpenApiClient(requester=requester, clock=lambda: 1000.0)
+        client.connect("app", "secret")
+        order_no = client.place_cash_order(
+            "39400537301",
+            "101730",
+            "BUY",
+            1,
+            4315,
+            "1234",
+            order_type_code="I0",
+        )
+
+        self.assertEqual(order_no, "0040027932")
+        self.assertEqual(calls[-1][1]["dataBody"]["ordr_ccd"], "I0")
+
     def test_order_retries_numeric_krx_route_when_kb_reports_nxt_route_error(self) -> None:
         calls = []
 
@@ -341,6 +369,45 @@ class KbOpenApiClientTests(unittest.TestCase):
         self.assertEqual(executions[0].side, "매수")
         self.assertEqual(executions[0].status, "체결")
         self.assertEqual(executions[0].order_time, "09:30:15")
+
+    def test_order_execution_parser_accepts_common_execution_aliases(self) -> None:
+        def requester(method, url, headers, body, timeout):
+            if url.endswith("/oauth2/token"):
+                return RestResponse(200, {}, {"access_token": "kb-token", "expires_in": 1800})
+            return RestResponse(
+                200,
+                {},
+                {
+                    "dataHeader": {"resultCode": "200"},
+                    "dataBody": {
+                        "grid1": [
+                            {
+                                "ordNo": "40027932",
+                                "shrt_cd": "101730",
+                                "is_nm": "위메이드맥스",
+                                "ordr_jb_clsf": "2",
+                                "ord_qty": "1",
+                                "exec_qty": "1",
+                                "rmn_qty": "0",
+                                "ordr_uprc2": "4315",
+                                "ccls_uprc2": "4310",
+                                "ordr_tm": "084309",
+                                "ccls_stat_nm": "체결",
+                            }
+                        ],
+                    },
+                },
+            )
+
+        client = KbOpenApiClient(requester=requester, clock=lambda: 1000.0)
+        client.connect("app", "secret")
+        executions = client.request_order_executions(symbol="101730", order_no="0040027932")
+
+        self.assertEqual(len(executions), 1)
+        self.assertEqual(executions[0].order_no, "40027932")
+        self.assertEqual(executions[0].status, "체결")
+        self.assertEqual(executions[0].executed_quantity, 1)
+        self.assertEqual(executions[0].executed_price, 4310)
 
     def test_api_error_is_reported(self) -> None:
         def requester(method, url, headers, body, timeout):

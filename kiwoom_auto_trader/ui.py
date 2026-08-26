@@ -39,6 +39,7 @@ from .kb_rest_api import (
     KB_OPENAPI_GUIDE,
     KbOpenApiClient,
     KbOpenApiError,
+    same_order_no,
 )
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
@@ -2367,7 +2368,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self._refresh_prepared_cards()
         return True
 
-    def _execution_priority_price(self, side: str, symbol: str, entered_price: float) -> tuple[float, str]:
+    def _execution_priority_price(self, side: str, symbol: str, entered_price: float) -> tuple[float, str, str]:
         """Adjust a limit order toward the opposite best quote before sending."""
 
         try:
@@ -2388,27 +2389,33 @@ class KbManualTradeWindow(tk.Toplevel):
             if target_price > 0 and entered_price < target_price:
                 return target_price, (
                     f"입력가 {entered_price:,.0f}원 -> "
-                    f"매도1호가/현재가 {target_price:,.0f}원으로 보정"
-                )
-            if target_price > 0:
-                return entered_price, f"매수 체결우선 조건 확인: 기준 {target_price:,.0f}원"
+                    f"매도1호가/현재가 {target_price:,.0f}원으로 보정 · 체결우선 지정가(IOC)"
+                ), "I0"
+            if target_price > 0 and entered_price >= target_price:
+                return entered_price, (
+                    f"매수 조건 충족: 입력가 {entered_price:,.0f}원이 "
+                    f"매도1호가/현재가 {target_price:,.0f}원 이상 · 체결우선 지정가(IOC)"
+                ), "I0"
         else:
             target_price = best_bid or current_price
             if target_price > 0 and entered_price > target_price:
                 return target_price, (
                     f"입력가 {entered_price:,.0f}원 -> "
-                    f"매수1호가/현재가 {target_price:,.0f}원으로 보정"
-                )
-            if target_price > 0:
-                return entered_price, f"매도 체결우선 조건 확인: 기준 {target_price:,.0f}원"
-        return entered_price, "호가 조회 전송: 입력가 그대로 사용"
+                    f"매수1호가/현재가 {target_price:,.0f}원으로 보정 · 체결우선 지정가(IOC)"
+                ), "I0"
+            if target_price > 0 and entered_price <= target_price:
+                return entered_price, (
+                    f"매도 조건 충족: 입력가 {entered_price:,.0f}원이 "
+                    f"매수1호가/현재가 {target_price:,.0f}원 이하 · 체결우선 지정가(IOC)"
+                ), "I0"
+        return entered_price, "일반 지정가 전송: 입력가 그대로 사용", "00"
 
     def _lookup_order_execution_notice(
         self,
         symbol: str,
         order_no: str,
         side_label: str,
-        attempts: int = 4,
+        attempts: int = 10,
     ) -> tuple[str, str]:
         execution_status = "주문 전송"
         execution_notice = "주문은 접수됐고 체결조회 반영을 기다리는 중입니다."
@@ -2426,7 +2433,7 @@ class KbManualTradeWindow(tk.Toplevel):
                 execution_notice = f"체결조회 대기: {exc}"
                 continue
             matched_execution = next(
-                (execution for execution in executions if execution.order_no == order_no),
+                (execution for execution in executions if same_order_no(execution.order_no, order_no)),
                 executions[0] if executions else None,
             )
             if matched_execution is None:
@@ -2477,7 +2484,7 @@ class KbManualTradeWindow(tk.Toplevel):
                 parent=self,
             )
             return
-        price, price_adjust_note = self._execution_priority_price(side, symbol, price)
+        price, price_adjust_note, order_type_code = self._execution_priority_price(side, symbol, price)
         self.order_price_var.set(f"{price:,.0f}")
         try:
             balance, account_probe_text = self._request_best_kb_balance(account)
@@ -2544,6 +2551,7 @@ class KbManualTradeWindow(tk.Toplevel):
             f"KB Open API로 {side_label} 주문을 전송합니다.\n\n"
             f"종목: {symbol}\n수량: {quantity}주\n가격: {price:,.0f}원\n\n"
             f"{price_adjust_note}\n"
+            f"주문구분: {order_type_code}\n"
             "전송 방식: 정규장 KRX 주문 우선, KB가 장개시전으로 응답하면 장개시전 주문으로 자동 재시도\n\n"
             "이 주문은 KB 실계좌에 전송될 수 있습니다. 계속하시겠습니까?",
             parent=self,
@@ -2558,6 +2566,7 @@ class KbManualTradeWindow(tk.Toplevel):
                 quantity=quantity,
                 price=price,
                 account_password=password,
+                order_type_code=order_type_code,
             )
         except KbOpenApiError as exc:
             self.handoff_var.set(f"KB {side_label} 주문 실패: {exc}")
