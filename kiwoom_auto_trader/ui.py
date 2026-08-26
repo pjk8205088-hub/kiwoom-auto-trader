@@ -2543,7 +2543,8 @@ class KbManualTradeWindow(tk.Toplevel):
             "KB 실계좌 수동 주문 확인",
             f"KB Open API로 {side_label} 주문을 전송합니다.\n\n"
             f"종목: {symbol}\n수량: {quantity}주\n가격: {price:,.0f}원\n\n"
-            f"{price_adjust_note}\n\n"
+            f"{price_adjust_note}\n"
+            "전송 방식: 정규장 KRX 주문 우선, KB가 장개시전으로 응답하면 장개시전 주문으로 자동 재시도\n\n"
             "이 주문은 KB 실계좌에 전송될 수 있습니다. 계속하시겠습니까?",
             parent=self,
         )

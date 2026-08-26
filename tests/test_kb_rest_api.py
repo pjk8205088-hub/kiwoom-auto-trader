@@ -104,6 +104,38 @@ class KbOpenApiClientTests(unittest.TestCase):
         self.assertEqual(calls[-2][1]["dataBody"]["sor_ordr_ccd"], "K")
         self.assertEqual(calls[-1][1]["dataBody"]["sor_ordr_ccd"], "1")
 
+    def test_order_retries_before_open_market_time_when_kb_reports_before_open(self) -> None:
+        calls = []
+
+        def requester(method, url, headers, body, timeout):
+            calls.append((url, body))
+            if url.endswith("/oauth2/token"):
+                return RestResponse(200, {}, {"access_token": "kb-token", "expires_in": 1800})
+            if body["dataBody"]["mkt_tm_clsf"] == "1":
+                return RestResponse(
+                    200,
+                    {},
+                    {
+                        "dataHeader": {
+                            "resultCode": "E021",
+                            "resultMessage": "고객님, 장개시전이므로 주문이 불가능합니다.",
+                        }
+                    },
+                )
+            return RestResponse(
+                200,
+                {},
+                {"dataHeader": {"resultCode": "200"}, "dataBody": {"ordr_no": "40240001"}},
+            )
+
+        client = KbOpenApiClient(requester=requester, clock=lambda: 1000.0)
+        client.connect("app", "secret")
+        order_no = client.place_cash_order("39400537301", "101730", "BUY", 1, 4305, "1234")
+
+        self.assertEqual(order_no, "40240001")
+        self.assertIn("1", [call[1]["dataBody"]["mkt_tm_clsf"] for call in calls[1:]])
+        self.assertEqual(calls[-1][1]["dataBody"]["mkt_tm_clsf"], "2")
+
     def test_order_number_can_be_read_from_nested_response_alias(self) -> None:
         def requester(method, url, headers, body, timeout):
             if url.endswith("/oauth2/token"):

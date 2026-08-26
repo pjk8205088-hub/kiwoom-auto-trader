@@ -146,6 +146,11 @@ def _is_krx_route_retryable(message: str) -> bool:
     return any(fragment in text for fragment in ("NXT", "KRX", "거래할 수 없는 종목", "거래할 수 없는"))
 
 
+def _is_before_open_retryable(message: str) -> bool:
+    text = str(message or "")
+    return any(fragment in text for fragment in ("장개시전", "개시전", "장 시작 전", "장시작전"))
+
+
 def _split_account(account: str) -> tuple[str, str]:
     digits = "".join(character for character in str(account or "") if character.isdigit())
     if len(digits) > 2:
@@ -488,7 +493,6 @@ class KbOpenApiClient:
         is_buy = normalized_side == "BUY"
         _, account_suffix = _split_account(account)
         request_body_base = {
-            "mkt_tm_clsf": "1",
             "ordr_jb_clsf": "2" if is_buy else "1",
             "s_clsf": "1",
             "is_cd": symbol,
@@ -506,15 +510,24 @@ class KbOpenApiClient:
             "stpd_prc": "",
         }
         api_id = "ssam1802" if is_buy else "ssam1801"
-        last_route_error = ""
-        for route_code in ("K", "1"):
+        last_order_error = ""
+        attempted_before_open = False
+        # KB docs define mkt_tm_clsf 1 as regular session and 2 as pre-open
+        # after-hours close.  Some accounts reject a regular order just before
+        # the official open with a server-side "장개시전" message, so retry that
+        # same request using the matching market-time class.
+        for market_time_class, route_code in (("1", "K"), ("1", "1"), ("2", "K"), ("2", "1")):
             request_body = dict(request_body_base)
+            request_body["mkt_tm_clsf"] = market_time_class
             request_body["sor_ordr_ccd"] = route_code
             try:
                 body = self._api_post(api_id, request_body)
             except KbOpenApiError as exc:
-                last_route_error = str(exc)
-                if route_code == "K" and _is_krx_route_retryable(last_route_error):
+                last_order_error = str(exc)
+                if route_code == "K" and _is_krx_route_retryable(last_order_error):
+                    continue
+                if market_time_class == "1" and _is_before_open_retryable(last_order_error):
+                    attempted_before_open = True
                     continue
                 raise
             order_no = _valid_order_no(
@@ -540,10 +553,19 @@ class KbOpenApiClient:
                 self.last_order_no = order_no
                 return order_no
             if route_code == "K" and _is_krx_route_retryable(message):
-                last_route_error = message
+                last_order_error = message
+                continue
+            if market_time_class == "1" and _is_before_open_retryable(message):
+                attempted_before_open = True
+                last_order_error = message
                 continue
             raise KbOpenApiError(message or "KB Open API 주문번호가 수신되지 않았습니다.")
-        raise KbOpenApiError(last_route_error or "KB KRX 주문 전송에 실패했습니다.")
+        if attempted_before_open:
+            raise KbOpenApiError(
+                "KB가 장개시전으로 판단해 정규장 주문을 거절했고, 장개시전 주문 재시도도 실패했습니다. "
+                "KB 서버 기준 주문 가능 시간과 계좌 주문 가능 상태를 확인해 주세요."
+            )
+        raise KbOpenApiError(last_order_error or "KB KRX 주문 전송에 실패했습니다.")
 
     def request_balance(self, account: str = "") -> BalanceSummary:
         """Return the domestic account cash and holdings from SSQM2932.
