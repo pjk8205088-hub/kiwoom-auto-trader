@@ -20,6 +20,7 @@ from kiwoom_auto_trader.models import (
 from kiwoom_auto_trader.service import ServiceSnapshot
 from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
+    KbManualTradeWindow,
     TraderApp,
     _account_access_confirmed,
     _account_password_input_allowed,
@@ -140,6 +141,19 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(_clamp_window_opacity_percent(100), 100)
         self.assertEqual(_clamp_window_opacity_percent(150), 100)
         self.assertEqual(_clamp_window_opacity_percent("invalid"), 100)
+
+    def test_kb_net_filled_quantities_ignore_unfilled_and_net_sells(self):
+        rows = [
+            {"side": "매수", "symbol": "288980", "qty": "1주", "status": "체결"},
+            {"side": "매수", "symbol": "288980", "qty": "2주", "status": "미체결"},
+            {"side": "매도", "symbol": "288980", "qty": "1주", "status": "체결"},
+            {"side": "BUY", "symbol": "012200", "qty": "3주", "status": "부분체결"},
+        ]
+
+        self.assertEqual(
+            KbManualTradeWindow._net_filled_quantities(rows),
+            {"012200": 3},
+        )
 
     def test_account_privacy_setting_masks_every_digit_except_last_two(self):
         masked_app = SimpleNamespace(account_mask_enabled=True)

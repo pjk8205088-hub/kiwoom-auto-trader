@@ -1642,8 +1642,11 @@ class KbManualTradeWindow(tk.Toplevel):
         self.kb_execution_status_var = tk.StringVar(value="체결 정보: 주문 전송 전")
         self.prepared_card_vars: list[dict[str, tk.StringVar]] = []
         self.kb_execution_tree: ttk.Treeview | None = None
+        self.kb_holdings_tree: ttk.Treeview | None = None
+        self.kb_holdings_status_var = tk.StringVar(value="보유주식: 잔고 조회 전")
         self._local_kb_execution_rows: list[dict[str, str]] = []
         self._kb_account_info_window: tk.Toplevel | None = None
+        self._kb_holdings_window: tk.Toplevel | None = None
         self._kb_last_balance_error = ""
         self.detail_var = tk.StringVar(value="KB HTS 실행 여부를 확인해 주세요.")
         self.handoff_var = tk.StringVar(
@@ -1815,11 +1818,19 @@ class KbManualTradeWindow(tk.Toplevel):
             textvariable=self.kb_balance_summary_var,
             font=(UI_DISPLAY_FONT, 10, "bold"),
         ).grid(row=0, column=0, sticky="w")
+        balance_buttons = ttk.Frame(balance_box)
+        balance_buttons.grid(row=0, column=1, sticky="e")
         ttk.Button(
-            balance_box,
+            balance_buttons,
+            text="보유주식 리스트",
+            command=self._open_kb_holdings_window,
+            style="Blue.TButton",
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            balance_buttons,
             text="잔고 새로고침",
             command=lambda: self._refresh_balance_display(force=True),
-        ).grid(row=0, column=1, sticky="e")
+        ).pack(side="left")
         ttk.Label(
             balance_box,
             textvariable=self.kb_balance_detail_var,
@@ -2142,6 +2153,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self.kb_execution_status_var.set(
             f"체결 정보: {row['time']} {row['symbol']} {side} {status}"
         )
+        self._refresh_kb_holdings_window()
 
     def _render_execution_rows(self, rows: list[dict[str, str]]) -> None:
         tree = self.kb_execution_tree
@@ -2164,6 +2176,44 @@ class KbManualTradeWindow(tk.Toplevel):
         self._local_kb_execution_rows.clear()
         self._render_execution_rows([])
         self.kb_execution_status_var.set("체결 정보: 리스트를 비웠습니다.")
+
+    @staticmethod
+    def _parse_kb_quantity(value: object) -> int:
+        text = str(value or "").strip().replace(",", "").replace("주", "")
+        digits = "".join(character for character in text if character.isdigit() or character == "-")
+        try:
+            return int(digits or 0)
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _parse_kb_price(value: object) -> float:
+        text = str(value or "").strip().replace(",", "").replace("원", "")
+        digits = "".join(character for character in text if character.isdigit() or character in ".-")
+        try:
+            return float(digits or 0)
+        except ValueError:
+            return 0.0
+
+    @staticmethod
+    def _net_filled_quantities(rows: list[dict[str, str]]) -> dict[str, int]:
+        quantities: dict[str, int] = {}
+        for row in rows:
+            status = str(row.get("status") or "")
+            if "체결" not in status or "미체결" in status:
+                continue
+            symbol = normalize_kb_symbol(row.get("symbol") or "")
+            if not symbol:
+                continue
+            quantity = KbManualTradeWindow._parse_kb_quantity(row.get("qty"))
+            if quantity <= 0:
+                continue
+            side = str(row.get("side") or "").upper()
+            if side in {"매수", "BUY"}:
+                quantities[symbol] = quantities.get(symbol, 0) + quantity
+            elif side in {"매도", "SELL"}:
+                quantities[symbol] = quantities.get(symbol, 0) - quantity
+        return {symbol: max(quantity, 0) for symbol, quantity in quantities.items() if quantity > 0}
 
     def _refresh_execution_list(self) -> None:
         if not self.parent_app.kb_api.is_connected:
@@ -2195,6 +2245,8 @@ class KbManualTradeWindow(tk.Toplevel):
             self._local_kb_execution_rows = rows[:100]
             self._render_execution_rows(self._local_kb_execution_rows)
             self.kb_execution_status_var.set(f"체결 정보: KB에서 {len(rows)}건 조회")
+            self._refresh_balance_display(force=True)
+            self._refresh_kb_holdings_window()
         else:
             self._render_execution_rows(self._local_kb_execution_rows)
             self.kb_execution_status_var.set("체결 정보: KB 조회 결과 없음")
@@ -2203,6 +2255,9 @@ class KbManualTradeWindow(tk.Toplevel):
         if self._kb_account_info_window is not None and self._kb_account_info_window.winfo_exists():
             self._kb_account_info_window.destroy()
         self._kb_account_info_window = None
+        if self._kb_holdings_window is not None and self._kb_holdings_window.winfo_exists():
+            self._kb_holdings_window.destroy()
+        self._kb_holdings_window = None
         self.parent_app._kb_manual_window = None
         self.destroy()
 
@@ -2257,6 +2312,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self._kb_last_balance_error = ""
         self.kb_account_probe_var.set(f"확인된 계좌: {account_probe_text}")
         self._refresh_balance_display(force=False)
+        self._refresh_kb_holdings_window()
         self.handoff_var.set(f"KB 계좌 연결 완료 · {self._format_kb_account(account)}")
         messagebox.showinfo(
             "KB 계좌연결 완료",
@@ -2527,10 +2583,7 @@ class KbManualTradeWindow(tk.Toplevel):
                 )
                 return
         else:
-            holding_quantity = 0
-            for holding in balance.holdings:
-                if normalize_kb_symbol(holding.symbol) == symbol:
-                    holding_quantity = max(holding_quantity, int(holding.sellable_quantity or holding.quantity))
+            holding_quantity = self._sellable_quantity_for_symbol(symbol, balance)
             if holding_quantity < quantity:
                 self._update_kb_api_state(True, False)
                 self.kb_trade_ready_var.set("매도가능수량 부족")
@@ -2540,7 +2593,8 @@ class KbManualTradeWindow(tk.Toplevel):
                     pass
                 self.parent_app._show_warning(
                     "KB API 매도 가능수량",
-                    f"{symbol} 매도 가능수량 {holding_quantity}주가 주문수량 {quantity}주보다 적습니다.",
+                    f"{symbol} 매도 가능수량 {holding_quantity}주가 주문수량 {quantity}주보다 적습니다.\n"
+                    "잔고가 늦게 반영되는 경우 '체결 새로고침' 또는 '보유주식 리스트'를 눌러 다시 확인해 주세요.",
                     parent=self,
                 )
                 return
@@ -2754,6 +2808,244 @@ class KbManualTradeWindow(tk.Toplevel):
         )
         return balance, checked
 
+    def _remote_filled_rows(self, symbol: str = "") -> list[dict[str, str]]:
+        if not self.parent_app.kb_api.is_connected:
+            return []
+        try:
+            executions = self.parent_app.kb_api.request_order_executions(
+                symbol=normalize_kb_symbol(symbol),
+                status="1",
+            )
+        except KbOpenApiError:
+            return []
+        rows: list[dict[str, str]] = []
+        for execution in executions:
+            quantity = execution.executed_quantity or execution.ordered_quantity
+            price = execution.executed_price or execution.order_price
+            rows.append(
+                {
+                    "time": execution.order_time or "-",
+                    "side": execution.side or "-",
+                    "symbol": execution.symbol or "-",
+                    "name": execution.name or "-",
+                    "qty": f"{quantity:,}주" if quantity else "-",
+                    "price": f"{price:,.0f}원" if price else "-",
+                    "status": execution.status,
+                    "order_no": execution.order_no or "-",
+                }
+            )
+        return rows
+
+    def _sellable_quantity_for_symbol(self, symbol: str, balance: BalanceSummary | None) -> int:
+        symbol = normalize_kb_symbol(symbol)
+        sellable_quantity = 0
+        if balance is not None:
+            for holding in balance.holdings:
+                if normalize_kb_symbol(holding.symbol) == symbol:
+                    sellable_quantity = max(
+                        sellable_quantity,
+                        int(holding.sellable_quantity or holding.quantity),
+                    )
+        local_quantity = self._net_filled_quantities(self._local_kb_execution_rows).get(symbol, 0)
+        remote_quantity = self._net_filled_quantities(self._remote_filled_rows(symbol)).get(symbol, 0)
+        return max(sellable_quantity, local_quantity, remote_quantity)
+
+    def _combined_holding_rows(self, balance: BalanceSummary | None = None) -> list[dict[str, object]]:
+        if balance is None:
+            balance = self.parent_app.service.balance_summary
+        rows_by_symbol: dict[str, dict[str, object]] = {}
+        if balance is not None:
+            for holding in balance.holdings:
+                symbol = normalize_kb_symbol(holding.symbol)
+                if not symbol:
+                    continue
+                quantity = int(holding.quantity or 0)
+                sellable_quantity = int(holding.sellable_quantity or holding.quantity or 0)
+                current_price = float(holding.current_price or 0)
+                rows_by_symbol[symbol] = {
+                    "symbol": symbol,
+                    "name": holding.name or "-",
+                    "quantity": quantity,
+                    "sellable": sellable_quantity,
+                    "average": float(holding.average_price or 0),
+                    "current": current_price,
+                    "evaluation": current_price * quantity,
+                    "profit": float(holding.profit_loss or 0),
+                    "source": "잔고",
+                }
+
+        filled_rows = self._remote_filled_rows("") + self._local_kb_execution_rows
+        filled_quantities = self._net_filled_quantities(filled_rows)
+        latest_fill: dict[str, dict[str, str]] = {}
+        for row in filled_rows:
+            symbol = normalize_kb_symbol(row.get("symbol") or "")
+            if symbol and symbol not in latest_fill:
+                latest_fill[symbol] = row
+
+        for symbol, quantity in filled_quantities.items():
+            existing = rows_by_symbol.get(symbol)
+            if existing and int(existing.get("sellable") or 0) >= quantity:
+                continue
+            fill = latest_fill.get(symbol, {})
+            current_price = self._parse_kb_price(fill.get("price"))
+            if symbol == normalize_kb_symbol(self.symbol_var.get()):
+                current_price = max(current_price, self._parse_kb_price(self.price_var.get()))
+            rows_by_symbol[symbol] = {
+                "symbol": symbol,
+                "name": fill.get("name") or (existing or {}).get("name") or "-",
+                "quantity": max(quantity, int((existing or {}).get("quantity") or 0)),
+                "sellable": max(quantity, int((existing or {}).get("sellable") or 0)),
+                "average": float((existing or {}).get("average") or current_price or 0),
+                "current": current_price or float((existing or {}).get("current") or 0),
+                "evaluation": (current_price or float((existing or {}).get("current") or 0)) * quantity,
+                "profit": float((existing or {}).get("profit") or 0),
+                "source": "체결조회 보강",
+            }
+
+        return sorted(
+            rows_by_symbol.values(),
+            key=lambda item: (str(item.get("name") or ""), str(item.get("symbol") or "")),
+        )
+
+    def _open_kb_holdings_window(self) -> None:
+        if self._kb_holdings_window is not None and self._kb_holdings_window.winfo_exists():
+            self._kb_holdings_window.lift()
+            self._refresh_kb_holdings_window()
+            return
+
+        window = tk.Toplevel(self)
+        self._kb_holdings_window = window
+        window.title("KB 보유주식 리스트")
+        window.geometry("760x430")
+        window.minsize(680, 360)
+        window.configure(background=UI_BACKGROUND)
+        window.transient(self)
+        window.protocol("WM_DELETE_WINDOW", lambda: (window.destroy(), setattr(self, "_kb_holdings_window", None)))
+
+        body = ttk.Frame(window, padding=12)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
+        ttk.Label(body, text="보유주식 리스트", font=(UI_DISPLAY_FONT, 14, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        button_row = ttk.Frame(body)
+        button_row.grid(row=1, column=0, sticky="ew", pady=(8, 8))
+        ttk.Button(
+            button_row,
+            text="보유 새로고침",
+            command=lambda: (self._refresh_balance_display(force=True), self._refresh_kb_holdings_window()),
+            style="Blue.TButton",
+        ).pack(side="left")
+        ttk.Button(
+            button_row,
+            text="선택 종목 매도 준비",
+            command=self._prepare_sell_from_selected_holding,
+            style="Success.TButton",
+        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            button_row,
+            textvariable=self.kb_holdings_status_var,
+            foreground=UI_MUTED,
+        ).pack(side="left", padx=(12, 0))
+
+        columns = ("symbol", "name", "quantity", "sellable", "average", "current", "evaluation", "profit", "source")
+        tree = ttk.Treeview(body, columns=columns, show="headings", height=12, selectmode="browse")
+        headings = {
+            "symbol": "종목번호",
+            "name": "종목명",
+            "quantity": "보유",
+            "sellable": "매도가능",
+            "average": "평균단가",
+            "current": "현재가",
+            "evaluation": "평가금액",
+            "profit": "평가손익",
+            "source": "기준",
+        }
+        widths = {
+            "symbol": 78,
+            "name": 140,
+            "quantity": 58,
+            "sellable": 72,
+            "average": 82,
+            "current": 82,
+            "evaluation": 94,
+            "profit": 86,
+            "source": 100,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(column, width=widths[column], minwidth=44, anchor="center", stretch=False)
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        tree.grid(row=2, column=0, sticky="nsew")
+        scrollbar.grid(row=2, column=1, sticky="ns")
+        tree.bind("<Double-1>", lambda _event: self._prepare_sell_from_selected_holding())
+        self.kb_holdings_tree = tree
+        self._refresh_kb_holdings_window()
+
+    def _refresh_kb_holdings_window(self) -> None:
+        tree = self.kb_holdings_tree
+        if tree is None:
+            return
+        rows = self._combined_holding_rows()
+        tree.delete(*tree.get_children())
+        for row in rows:
+            quantity = int(row.get("quantity") or 0)
+            sellable = int(row.get("sellable") or 0)
+            average = float(row.get("average") or 0)
+            current = float(row.get("current") or 0)
+            evaluation = float(row.get("evaluation") or current * quantity)
+            profit = float(row.get("profit") or 0)
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    row.get("symbol") or "-",
+                    row.get("name") or "-",
+                    f"{quantity:,}주",
+                    f"{sellable:,}주",
+                    f"{average:,.0f}원" if average else "-",
+                    f"{current:,.0f}원" if current else "-",
+                    f"{evaluation:,.0f}원" if evaluation else "-",
+                    f"{profit:,.0f}원" if profit else "-",
+                    row.get("source") or "-",
+                ),
+            )
+        self.kb_holdings_status_var.set(
+            f"보유주식: {len(rows)}종목 · 더블클릭하면 매도 준비"
+            if rows
+            else "보유주식: 조회 결과 없음"
+        )
+
+    def _prepare_sell_from_selected_holding(self) -> None:
+        tree = self.kb_holdings_tree
+        if tree is None:
+            return
+        selected = tree.selection()
+        if not selected:
+            self.parent_app._show_warning("KB 보유주식", "매도할 보유 종목을 선택해 주세요.", parent=self)
+            return
+        values = tree.item(selected[0], "values")
+        if not values:
+            return
+        symbol = normalize_kb_symbol(values[0])
+        name = str(values[1] or "-")
+        sellable = self._parse_kb_quantity(values[3])
+        current_price = self._parse_kb_price(values[5])
+        if not symbol or sellable <= 0:
+            self.parent_app._show_warning("KB 보유주식", "선택 종목의 매도 가능수량이 없습니다.", parent=self)
+            return
+        self.symbol_var.set(symbol)
+        self.name_var.set(name)
+        self.price_var.set(f"{current_price:,.0f}원" if current_price > 0 else "현재가 미조회")
+        if current_price > 0:
+            self.order_price_var.set(f"{current_price:,.0f}")
+        self.quantity_var.set(str(max(1, sellable)))
+        self._set_side("SELL")
+        self._refresh_prepared_cards()
+        self.handoff_var.set(f"매도 준비 완료 · {symbol} {name} · 매도가능 {sellable:,}주")
+
     def _refresh_market(self) -> None:
         app = self.parent_app
         symbol = normalize_kb_symbol(app.symbol_var.get())
@@ -2830,6 +3122,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self.kb_balance_holdings_var.set(f"보유 종목: {len(balance.holdings)}종목")
         self.kb_balance_updated_var.set(f"마지막 갱신: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self._refresh_prepared_cards()
+        self._refresh_kb_holdings_window()
 
     def _refresh_prepared_cards(self) -> None:
         """Refresh the four preview cards shown under the main controls."""
