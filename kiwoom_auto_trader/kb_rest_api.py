@@ -159,6 +159,21 @@ def _is_before_open_retryable(message: str) -> bool:
     return any(fragment in text for fragment in ("장개시전", "개시전", "장 시작 전", "장시작전"))
 
 
+def _is_sell_account_retryable(message: str) -> bool:
+    text = str(message or "")
+    return any(
+        fragment in text
+        for fragment in (
+            "계좌정보",
+            "계좌 정보",
+            "계좌를 찾",
+            "계좌번호",
+            "계정코드",
+            "계좌 확인",
+        )
+    )
+
+
 def _split_account(account: str) -> tuple[str, str]:
     digits = "".join(character for character in str(account or "") if character.isdigit())
     if len(digits) > 2:
@@ -538,6 +553,35 @@ class KbOpenApiClient:
             "acct_cd": account_suffix,
             "stpd_prc": "",
         }
+        request_body_variants = [request_body_base]
+        if not is_buy:
+            # SSAM1801 sell orders can reject account lookup depending on the
+            # account-code width and optional HTS fields.  Retry only after a
+            # no-order-number account lookup error, never after an accepted
+            # order, to avoid duplicate live orders.
+            sell_variants: list[dict[str, str]] = []
+
+            def add_sell_variant(**overrides: str) -> None:
+                candidate = dict(request_body_base)
+                candidate.update(overrides)
+                if candidate not in sell_variants:
+                    sell_variants.append(candidate)
+
+            add_sell_variant()
+            add_sell_variant(crdt_typ_cd="", crct_clsf="1", gtc_ccd="1", spclz_ordr_ccd="1")
+            padded_suffix = account_suffix.zfill(3) if account_suffix else ""
+            if padded_suffix and padded_suffix != account_suffix:
+                add_sell_variant(acct_cd=padded_suffix)
+                add_sell_variant(
+                    acct_cd=padded_suffix,
+                    crdt_typ_cd="",
+                    crct_clsf="1",
+                    gtc_ccd="1",
+                    spclz_ordr_ccd="1",
+                )
+            add_sell_variant(s_clsf="0")
+            add_sell_variant(s_clsf="", crdt_typ_cd="", crct_clsf="1", gtc_ccd="1", spclz_ordr_ccd="1")
+            request_body_variants = sell_variants
         api_id = "ssam1802" if is_buy else "ssam1801"
         last_order_error = ""
         attempted_before_open = False
@@ -545,56 +589,67 @@ class KbOpenApiClient:
         # after-hours close.  Some accounts reject a regular order just before
         # the official open with a server-side "장개시전" message, so retry that
         # same request using the matching market-time class.
-        for market_time_class, route_code in (("1", "K"), ("1", "1"), ("2", "K"), ("2", "1")):
-            request_body = dict(request_body_base)
-            request_body["mkt_tm_clsf"] = market_time_class
-            if market_time_class != "1":
-                request_body["ordr_ccd"] = "99"
-            request_body["sor_ordr_ccd"] = route_code
-            try:
-                body = self._api_post(api_id, request_body)
-            except KbOpenApiError as exc:
-                last_order_error = str(exc)
-                if route_code == "K" and _is_krx_route_retryable(last_order_error):
-                    continue
-                if market_time_class == "1" and _is_before_open_retryable(last_order_error):
-                    attempted_before_open = True
-                    continue
-                raise
-            order_no = _valid_order_no(
-                _first_text(
-                    body,
-                    "ordr_no",
-                    "order_no",
-                    "ord_no",
-                    "ordNo",
-                    "odno",
-                    "ODNO",
+        for request_body_variant in request_body_variants:
+            for market_time_class, route_code in (("1", "K"), ("1", "1"), ("2", "K"), ("2", "1")):
+                request_body = dict(request_body_variant)
+                request_body["mkt_tm_clsf"] = market_time_class
+                if market_time_class != "1":
+                    request_body["ordr_ccd"] = "99"
+                request_body["sor_ordr_ccd"] = route_code
+                try:
+                    body = self._api_post(api_id, request_body)
+                except KbOpenApiError as exc:
+                    last_order_error = str(exc)
+                    if route_code == "K" and _is_krx_route_retryable(last_order_error):
+                        continue
+                    if market_time_class == "1" and _is_before_open_retryable(last_order_error):
+                        attempted_before_open = True
+                        continue
+                    if not is_buy and _is_sell_account_retryable(last_order_error):
+                        break
+                    raise
+                order_no = _valid_order_no(
+                    _first_text(
+                        body,
+                        "ordr_no",
+                        "order_no",
+                        "ord_no",
+                        "ordNo",
+                        "odno",
+                        "ODNO",
+                    )
                 )
-            )
-            message = _first_text(
-                body,
-                "o_msg",
-                "msg",
-                "message",
-                "resultMessage",
-                "processMessage",
-            )
-            if order_no:
-                self.last_order_no = order_no
-                return order_no
-            if route_code == "K" and _is_krx_route_retryable(message):
-                last_order_error = message
-                continue
-            if market_time_class == "1" and _is_before_open_retryable(message):
-                attempted_before_open = True
-                last_order_error = message
-                continue
-            raise KbOpenApiError(message or "KB Open API 주문번호가 수신되지 않았습니다.")
+                message = _first_text(
+                    body,
+                    "o_msg",
+                    "msg",
+                    "message",
+                    "resultMessage",
+                    "processMessage",
+                )
+                if order_no:
+                    self.last_order_no = order_no
+                    return order_no
+                if route_code == "K" and _is_krx_route_retryable(message):
+                    last_order_error = message
+                    continue
+                if market_time_class == "1" and _is_before_open_retryable(message):
+                    attempted_before_open = True
+                    last_order_error = message
+                    continue
+                if not is_buy and _is_sell_account_retryable(message):
+                    last_order_error = message
+                    break
+                raise KbOpenApiError(message or "KB Open API 주문번호가 수신되지 않았습니다.")
         if attempted_before_open:
             raise KbOpenApiError(
                 "KB가 장개시전으로 판단해 정규장 주문을 거절했고, 장개시전 주문 재시도도 실패했습니다. "
                 "KB 서버 기준 주문 가능 시간과 계좌 주문 가능 상태를 확인해 주세요."
+            )
+        if not is_buy and _is_sell_account_retryable(last_order_error):
+            raise KbOpenApiError(
+                f"{last_order_error} 매도 계좌 확인에 실패했습니다. "
+                "KB HTS/모바일에서 해당 종목의 매도가능수량과 신청계좌 끝자리(01/02)를 확인해 주세요."
             )
         raise KbOpenApiError(last_order_error or "KB KRX 주문 전송에 실패했습니다.")
 

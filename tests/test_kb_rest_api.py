@@ -72,6 +72,38 @@ class KbOpenApiClientTests(unittest.TestCase):
         self.assertEqual(data["sor_ordr_ccd"], "K")
         self.assertEqual(data["ordr_q"], "2")
 
+    def test_sell_order_retries_account_code_width_when_kb_cannot_find_account(self) -> None:
+        calls = []
+
+        def requester(method, url, headers, body, timeout):
+            calls.append((url, body))
+            if url.endswith("/oauth2/token"):
+                return RestResponse(200, {}, {"access_token": "kb-token", "expires_in": 1800})
+            if body["dataBody"]["acct_cd"] != "001":
+                return RestResponse(
+                    200,
+                    {},
+                    {
+                        "dataHeader": {
+                            "resultCode": "E021",
+                            "resultMessage": "고객님, 계좌정보를 찾을 수 없습니다.",
+                        }
+                    },
+                )
+            return RestResponse(
+                200,
+                {},
+                {"dataHeader": {"resultCode": "200"}, "dataBody": {"ordr_no": "40030001"}},
+            )
+
+        client = KbOpenApiClient(requester=requester, clock=lambda: 1000.0)
+        client.connect("app", "secret")
+        order_no = client.place_cash_order("39400537301", "012200", "SELL", 1, 3830, "1234")
+
+        self.assertEqual(order_no, "40030001")
+        self.assertEqual(calls[-1][1]["dataBody"]["acct_cd"], "001")
+        self.assertTrue(calls[-1][0].endswith("/api/v1/ssam1801"))
+
     def test_order_type_code_can_use_ioc_limit_for_marketable_orders(self) -> None:
         calls = []
 
