@@ -22,6 +22,8 @@ from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
     KbManualTradeWindow,
     TraderApp,
+    _balance_trade_capability,
+    _balance_trade_capability_text,
     _account_access_confirmed,
     _account_password_input_allowed,
     _account_password_session_ready,
@@ -275,6 +277,25 @@ class UiHelperTests(unittest.TestCase):
 
         self.assertFalse(active)
         self.assertEqual(detail, "계양전기 주식 · 보유수량 0주로 감시 대상 없음")
+
+    def test_trade_capability_uses_cash_and_holdings_independently(self):
+        no_cash_with_sellable_holding = BalanceSummary(
+            account="12345678",
+            deposit=0,
+            orderable_amount=0,
+            holdings=(Holding("005930", "삼성전자", 2, 70_000, 72_000, 0, 2.8),),
+        )
+        cash_only = BalanceSummary(
+            account="12345678",
+            deposit=100_000,
+            orderable_amount=100_000,
+            holdings=(),
+        )
+
+        self.assertEqual(_balance_trade_capability(no_cash_with_sellable_holding), (False, True))
+        self.assertEqual(_balance_trade_capability(cash_only), (True, False))
+        self.assertEqual(_balance_trade_capability_text(no_cash_with_sellable_holding), "매도 가능합니다")
+        self.assertEqual(_balance_trade_capability_text(cash_only), "매수 가능합니다")
 
     def test_running_monitor_refreshes_rest_balance_without_log_spam(self):
         request_balance = MagicMock(return_value=BalanceSummary(account="12345678"))

@@ -460,6 +460,25 @@ def _holding_monitor_display(
     return False, f"{name} 주식 · 보유수량 0주로 감시 대상 없음"
 
 
+def _balance_trade_capability(balance_summary: BalanceSummary | None) -> tuple[bool, bool]:
+    if balance_summary is None:
+        return False, False
+    can_buy = balance_summary.orderable_amount > 0
+    can_sell = any(int(holding.sellable_quantity or holding.quantity or 0) > 0 for holding in balance_summary.holdings)
+    return can_buy, can_sell
+
+
+def _balance_trade_capability_text(balance_summary: BalanceSummary | None) -> str:
+    can_buy, can_sell = _balance_trade_capability(balance_summary)
+    if can_buy and can_sell:
+        return "매수매도 가능합니다"
+    if can_sell:
+        return "매도 가능합니다"
+    if can_buy:
+        return "매수 가능합니다"
+    return "주문 가능 여부 확인 필요"
+
+
 class KiwoomLoginDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, default_user_id: str = "") -> None:
         super().__init__(parent)
@@ -2708,6 +2727,7 @@ class KbManualTradeWindow(tk.Toplevel):
             ("정보 활용", "계좌 / 현재가 / 잔고 / 주문가능금액 / 수동주문 / 체결조회"),
         ]
         if balance is not None:
+            can_buy, can_sell = _balance_trade_capability(balance)
             rows.extend(
                 [
                     ("예수금", f"{balance.deposit:,.0f}원"),
@@ -2715,6 +2735,8 @@ class KbManualTradeWindow(tk.Toplevel):
                     ("출금가능금액", f"{balance.withdrawable_amount:,.0f}원"),
                     ("D+2 추정예수금", f"{balance.d2_estimated_deposit:,.0f}원"),
                     ("보유 종목", f"{len(balance.holdings)}종목"),
+                    ("매수 가능", "가능" if can_buy else "불가"),
+                    ("매도 가능", "가능" if can_sell else "불가"),
                     ("추정예탁자산", f"{balance.estimated_assets:,.0f}원"),
                 ]
             )
@@ -3103,12 +3125,19 @@ class KbManualTradeWindow(tk.Toplevel):
             self.kb_balance_holdings_var.set("보유 종목: -")
             self.kb_balance_updated_var.set("마지막 갱신: -")
             return
-        trade_ready = self.parent_app.kb_api.is_connected and balance.orderable_amount > 0
+        can_buy, can_sell = _balance_trade_capability(balance)
+        trade_ready = self.parent_app.kb_api.is_connected and (can_buy or can_sell)
         self._update_kb_api_state(self.parent_app.kb_api.is_connected, trade_ready)
         if self.parent_app.kb_api.is_connected and not trade_ready:
-            self.kb_trade_ready_var.set("주문가능금액 없음")
+            self.kb_trade_ready_var.set("주문 가능 여부 확인 필요")
             try:
                 self.kb_trade_ready_label.configure(fg=UI_RED)
+            except tk.TclError:
+                pass
+        elif self.parent_app.kb_api.is_connected:
+            self.kb_trade_ready_var.set(_balance_trade_capability_text(balance))
+            try:
+                self.kb_trade_ready_label.configure(fg=UI_GREEN)
             except tk.TclError:
                 pass
         self.kb_balance_summary_var.set(
@@ -10738,6 +10767,7 @@ class TraderApp(tk.Tk):
         ]
         if snapshot.balance_summary:
             balance = snapshot.balance_summary
+            can_buy, can_sell = _balance_trade_capability(balance)
             rows.extend(
                 [
                     ("예수금", f"{balance.deposit:,.0f}원"),
@@ -10745,6 +10775,8 @@ class TraderApp(tk.Tk):
                     ("출금가능금액", f"{balance.withdrawable_amount:,.0f}원"),
                     ("D+2 추정예수금", f"{balance.d2_estimated_deposit:,.0f}원"),
                     ("보유 종목", f"{len(balance.holdings)}종목"),
+                    ("매수 가능", "가능" if can_buy else "불가"),
+                    ("매도 가능", "가능" if can_sell else "불가"),
                     ("추정예탁자산", f"{balance.estimated_assets:,.0f}원"),
                 ]
             )
