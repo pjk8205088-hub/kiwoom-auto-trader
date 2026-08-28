@@ -100,6 +100,11 @@ KB_ALTERNATE_KEY_DIRS = (
     Path.home() / "Downloads",
 )
 KB_KEY_MANUAL_PDF = Path.home() / "Documents" / "KawaiiSecurities" / "KB_OpenAPI_키_토큰_저장_메뉴얼.pdf"
+KB_PLANNING_PDF_CANDIDATES = (
+    Path.home() / "Downloads" / "카와이증권_HTS_KB_수동매매_최종 기획서.pdf",
+    Path.home() / "Documents" / "KawaiiSecurities" / "카와이증권_HTS_KB_수동매매_최종 기획서.pdf",
+    Path.home() / "Desktop" / "카와이증권_HTS_KB_수동매매_최종 기획서.pdf",
+)
 
 
 def _preferred_kb_key_dir() -> Path:
@@ -644,17 +649,14 @@ class KiwoomRestLoginDialog(tk.Toplevel):
             self.heading_var.set("키움 REST API 모의투자 연결")
             self.connect_button_var.set("모의투자 연결")
             self.help_var.set(
-                "모의투자 AppKey와 SecretKey를 사용하세요. 연결 후 현재가, 3분봉, "
-                "실시간 시세, 잔고 및 모의주문을 사용할 수 있습니다."
+                "모의투자 키로 접속합니다. 연결 후 현재가, 차트, 잔고와 모의주문을 사용할 수 있습니다."
             )
             return
         self.heading_var.set("키움 REST API 실전투자 연결")
         self.connect_button_var.set("실전투자 연결")
         self.help_var.set(
-            "실전투자 AppKey와 SecretKey를 넣어 주세요. "
-            "KB 계좌·IP 등록이 되어 있어야 연결됩니다. "
-            "연결되면 토큰·계좌·잔고·시세를 확인합니다. "
-            "실제 주문은 수동 주문 버튼과 최종 확인 후에만 전송됩니다."
+            "실전투자 키를 넣어 주세요. KB 계좌·IP 등록이 되어 있어야 연결됩니다. "
+            "연결되면 토큰·계좌·잔고·시세를 확인합니다."
         )
 
     def _refresh_public_ip(self) -> None:
@@ -1554,6 +1556,18 @@ class KbTokenLoginDialog(tk.Toplevel):
             webbrowser.open(KB_KEY_MANUAL_PDF.resolve().as_uri())
             return
         webbrowser.open(KB_OPENAPI_GUIDE)
+
+    def _open_planning_pdf(self) -> None:
+        for candidate in KB_PLANNING_PDF_CANDIDATES:
+            if candidate.exists():
+                webbrowser.open(candidate.resolve().as_uri())
+                return
+        messagebox.showinfo(
+            "기획서 파일 없음",
+            "다운로드한 기획서 PDF를 찾지 못했습니다.\n"
+            "Downloads, Desktop, Documents/KawaiiSecurities 폴더를 확인해 주세요.",
+            parent=self,
+        )
 
     def _load_token_file(self) -> None:
         path = filedialog.askopenfilename(
@@ -3464,6 +3478,7 @@ class TraderApp(tk.Tk):
         self._tray_poll_after_id: str | None = None
         self._tray_icon = None
         self._force_exit = False
+        self._last_internet_check_at = 0.0
 
     def _authenticate_startup(self) -> bool:
         if os.environ.get("KAWAII_TRADER_TEST_MODE") == "1":
@@ -4534,6 +4549,75 @@ class TraderApp(tk.Tk):
             parent=self,
         )
 
+    def _open_planning_guide(self) -> None:
+        existing = getattr(self, "_planning_guide_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+
+        window = tk.Toplevel(self)
+        self._planning_guide_window = window
+        window.title("카와이 증권 기획서 안내")
+        window.geometry("620x640")
+        window.minsize(560, 560)
+        window.transient(self)
+        window.configure(background=UI_BACKGROUND)
+
+        body = ttk.Frame(window, padding=18)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        ttk.Label(
+            body,
+            text="카와이 증권 · KB 연동 안내",
+            font=(UI_DISPLAY_FONT, 16, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            body,
+            text="매수·매도 영역은 유지하고, PDF에서 요구한 나머지 안내·상태·조회 UI만 정리했습니다.",
+            foreground=UI_MUTED,
+            wraplength=560,
+            justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 12))
+
+        summary = ttk.LabelFrame(body, text="PDF 요약", padding=12)
+        summary.grid(row=2, column=0, sticky="ew")
+        for text in (
+            "0번 API 연동창: App Key / Secret, 계좌, IP, 연결 상태",
+            "보안: PIN, 계좌번호 마스킹, 잠금, 항상 위 고정",
+            "조회: 실시간 종목조회 순위, 섹터, 메모, 차트 보조선",
+            "표시: 거래대금·시가총액을 억 단위로 통일",
+            "안내: 인터넷 연결 상태와 PDF/가이드 연결을 상단에서 바로 확인",
+        ):
+            ttk.Label(summary, text=f"• {text}", wraplength=540, justify="left").pack(
+                anchor="w",
+                pady=1,
+            )
+
+        links = ttk.LabelFrame(body, text="바로 열기", padding=12)
+        links.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        ttk.Button(
+            links,
+            text="PDF 기획서",
+            command=self._open_planning_pdf,
+        ).pack(side="left")
+        ttk.Button(
+            links,
+            text="KB OpenAPI GitHub",
+            command=lambda: webbrowser.open("https://github.com/kbsecurities/kb-openapi"),
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            links,
+            text="Kiwoom GitHub",
+            command=lambda: webbrowser.open("https://github.com/breadum/kiwoom"),
+        ).pack(side="left", padx=(8, 0))
+
+        footer = ttk.Frame(body)
+        footer.grid(row=4, column=0, sticky="ew", pady=(16, 0))
+        ttk.Button(footer, text="닫기", command=window.destroy).pack(side="right")
+
+        _show_centered_dialog(window)
+        window.grab_set()
+
     def _enable_default_sector_assignment(self) -> None:
         self.service.storage.set_app_setting("sectors.default_assignment", True)
         self.service.storage.set_app_setting(
@@ -4808,23 +4892,49 @@ class TraderApp(tk.Tk):
             style="Neutral.Badge.TLabel",
         )
         self.connection_badge.grid(row=1, column=5, padx=(0, 8))
+        self.internet_state_var = tk.StringVar(value="인터넷 확인 중")
+        self.internet_light = tk.Canvas(
+            header,
+            width=18,
+            height=18,
+            bg=UI_SURFACE,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.internet_light.grid(row=1, column=6, padx=(0, 6))
+        self._internet_light_id = self.internet_light.create_oval(
+            2,
+            2,
+            16,
+            16,
+            fill="#B8B8B8",
+            outline=UI_MUTED,
+        )
+        self.internet_badge = ttk.Label(
+            header,
+            textvariable=self.internet_state_var,
+            font=(UI_DISPLAY_FONT, 10, "bold"),
+            padding=(12, 6),
+            style="Neutral.Badge.TLabel",
+        )
+        self.internet_badge.grid(row=1, column=7, padx=(0, 8))
         self.kb_hts_button = ttk.Button(
             header,
             textvariable=self.kb_hts_status_var,
             command=lambda: self._check_kb_hts_status(show_message=True),
             style="Danger.TButton",
         )
-        self.kb_hts_button.grid(row=1, column=6, padx=(0, 8))
+        self.kb_hts_button.grid(row=1, column=8, padx=(0, 8))
         self.kb_manual_button = ttk.Button(
             header,
             text="KB 수동거래",
             command=self._open_kb_manual_window,
             style="Blue.TButton",
         )
-        self.kb_manual_button.grid(row=1, column=7, padx=(0, 8))
+        self.kb_manual_button.grid(row=1, column=9, padx=(0, 8))
         ttk.Button(header, text="관심종목", command=self._open_watchlist_window).grid(
             row=1,
-            column=8,
+            column=10,
             padx=(0, 8),
         )
         status_strip = ttk.Frame(header, style="Header.TFrame")
@@ -4862,12 +4972,18 @@ class TraderApp(tk.Tk):
             command=self._open_application_settings,
         )
         self.settings_button.grid(row=0, column=4, padx=(5, 10))
+        ttk.Button(
+            status_strip,
+            text="?",
+            width=3,
+            command=self._open_planning_guide,
+        ).grid(row=0, column=5, padx=(0, 5))
         self.controls_toggle_button = ttk.Button(
             status_strip,
             text="설정 접기",
             command=self._toggle_controls_panel,
         )
-        self.controls_toggle_button.grid(row=0, column=5, padx=(0, 5))
+        self.controls_toggle_button.grid(row=0, column=6, padx=(0, 5))
         self.transfer_light = tk.Canvas(
             status_strip,
             width=16,
@@ -4876,7 +4992,7 @@ class TraderApp(tk.Tk):
             highlightthickness=0,
             bd=0,
         )
-        self.transfer_light.grid(row=0, column=6, padx=(10, 5))
+        self.transfer_light.grid(row=0, column=7, padx=(10, 5))
         self._transfer_light_id = self.transfer_light.create_oval(
             2,
             2,
@@ -4891,9 +5007,9 @@ class TraderApp(tk.Tk):
             padding=(9, 3),
             style="Neutral.Badge.TLabel",
         )
-        self.transfer_badge.grid(row=0, column=7, sticky="e", padx=(0, 8))
+        self.transfer_badge.grid(row=0, column=8, sticky="e", padx=(0, 8))
         quick_windows = ttk.Frame(status_strip, style="Header.TFrame")
-        quick_windows.grid(row=0, column=8, sticky="e")
+        quick_windows.grid(row=0, column=9, sticky="e")
         for label, command in (
             ("0", self._open_kb_manual_window),
             ("1", self._focus_realtime_rank_panel),
@@ -10009,6 +10125,7 @@ class TraderApp(tk.Tk):
             f"키움 일봉 DMI({self.service.strategy.settings.dmi_period}일)"
         )
         self._update_trade_buttons()
+        self._refresh_internet_status()
         holdings = list(snapshot.balance_summary.holdings) if snapshot.balance_summary else []
         self._replace_rows(self.holdings, self._format_holdings(holdings))
         self._replace_rows(
@@ -10704,6 +10821,38 @@ class TraderApp(tk.Tk):
             fill=fill,
             outline=outline,
         )
+
+    def _refresh_internet_status(self, force: bool = False) -> None:
+        now = monotonic()
+        if not force and now - self._last_internet_check_at < 60.0:
+            return
+        self._last_internet_check_at = now
+        online = False
+        for url in ("https://api.ipify.org?format=text", "https://ifconfig.me/ip"):
+            try:
+                with urlopen(url, timeout=2.5) as response:
+                    payload = response.read().decode("utf-8", errors="ignore").strip()
+            except Exception:
+                payload = ""
+            if payload:
+                online = True
+                break
+        if online:
+            self.internet_state_var.set("인터넷 ON")
+            self.internet_badge.configure(style="Success.Badge.TLabel")
+            self.internet_light.itemconfigure(
+                self._internet_light_id,
+                fill="#28B463",
+                outline=UI_GREEN,
+            )
+        else:
+            self.internet_state_var.set("인터넷 OFF")
+            self.internet_badge.configure(style="Neutral.Badge.TLabel")
+            self.internet_light.itemconfigure(
+                self._internet_light_id,
+                fill="#b0b0b0",
+                outline=UI_MUTED,
+            )
 
     def _account_connection_confirmed(self, account_info) -> bool:
         account = self._account_for_api()
