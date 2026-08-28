@@ -10407,6 +10407,7 @@ class TraderApp(tk.Tk):
             f"선택 계좌 {self._privacy_account_label(balance.account)} | "
             f"예수금 {balance.deposit:,.0f}원 | 주문가능 {balance.orderable_amount:,.0f}원 | "
             f"출금가능 {balance.withdrawable_amount:,.0f}원 | 보유 {len(balance.holdings)}종목 | "
+            f"{_balance_trade_capability_text(balance)} | "
             f"추정예탁자산 {balance.estimated_assets:,.0f}원 | "
             f"평가금액 {balance.total_evaluation:,.0f} | 평가손익 {balance.total_profit_loss:,.0f} | "
             f"당일 실현손익 {snapshot.daily_performance.realized_profit:+,.0f}원 | "

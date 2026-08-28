@@ -625,6 +625,42 @@ class UiHelperTests(unittest.TestCase):
         self.assertNotIn("내부 테스트", status)
         self.assertNotIn("1234-5678", status)
 
+    def test_account_summary_includes_buy_and_sell_capability_text(self):
+        snapshot = SimpleNamespace(
+            account_info=SimpleNamespace(
+                connected=True,
+                connection_method="REST API",
+                server_type="실거래",
+                accounts=["39400537301"],
+            ),
+            balance_summary=BalanceSummary(
+                account="39400537301",
+                deposit=0,
+                orderable_amount=0,
+                withdrawable_amount=0,
+                d2_estimated_deposit=0,
+                total_purchase=0,
+                total_evaluation=0,
+                total_profit_loss=0,
+                total_profit_rate=0.0,
+                estimated_assets=0,
+                holdings=(Holding("005930", "삼성전자", 1, 70_000, 72_000, 0, 2.0),),
+            ),
+            daily_performance=SimpleNamespace(realized_profit=0),
+        )
+        app = SimpleNamespace(
+            _account_for_api=lambda: "39400537301",
+            account_var=SimpleNamespace(get=lambda: "39400537301"),
+            account_mask_enabled=False,
+            _privacy_account_label=lambda account: account,
+            _account_connection_confirmed=lambda _info: True,
+        )
+
+        text = TraderApp._format_account_summary(app, snapshot)
+
+        self.assertIn("매도 가능합니다", text)
+        self.assertIn("계좌 창: REST API 연결됨(실거래)", text)
+
     def test_orders_api_candles_chronologically_for_the_main_chart(self):
         candles = [
             Candle(110, 90, 100, 98, timestamp="20260711120600"),
