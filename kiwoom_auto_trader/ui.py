@@ -3144,9 +3144,10 @@ class KbManualTradeWindow(tk.Toplevel):
             f"예수금 {balance.deposit:,.0f}원 · 주문가능 {balance.orderable_amount:,.0f}원 · "
             f"평가금액 {balance.total_evaluation:,.0f}원 · 추정자산 {balance.estimated_assets:,.0f}원"
         )
+        trade_capability = _balance_trade_capability_text(balance)
         self.kb_balance_detail_var.set(
             f"평가손익 {balance.total_profit_loss:,.0f}원 · 수익률 {balance.total_profit_rate:.2f}% · "
-            f"D+2 추정예수금 {balance.d2_estimated_deposit:,.0f}원"
+            f"D+2 추정예수금 {balance.d2_estimated_deposit:,.0f}원 · {trade_capability}"
         )
         self.kb_balance_holdings_var.set(f"보유 종목: {len(balance.holdings)}종목")
         self.kb_balance_updated_var.set(f"마지막 갱신: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
