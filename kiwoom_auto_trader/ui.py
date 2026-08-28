@@ -469,14 +469,9 @@ def _balance_trade_capability(balance_summary: BalanceSummary | None) -> tuple[b
 
 
 def _balance_trade_capability_text(balance_summary: BalanceSummary | None) -> str:
-    can_buy, can_sell = _balance_trade_capability(balance_summary)
-    if can_buy and can_sell:
-        return "매수매도 가능합니다"
-    if can_sell:
-        return "매도 가능합니다"
-    if can_buy:
-        return "매수 가능합니다"
-    return "주문 가능 여부 확인 필요"
+    if balance_summary is None:
+        return "체결/잔고 조회 전"
+    return "체결/잔고 확인 가능"
 
 
 class KiwoomLoginDialog(tk.Toplevel):
@@ -641,7 +636,7 @@ class KiwoomRestLoginDialog(tk.Toplevel):
             self.connect_button_var.set("모의투자 연결")
             self.help_var.set(
                 "모의투자 AppKey와 SecretKey를 사용하세요. 연결 후 현재가, 3분봉, "
-                "실시간 시세, 잔고 및 모의주문을 사용할 수 있습니다."
+                "실시간 시세, 잔고 및 체결 조회를 사용할 수 있습니다."
             )
             return
         self.heading_var.set("키움 REST API 실전투자 연결")
@@ -649,8 +644,8 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         self.help_var.set(
             "실전투자 AppKey와 SecretKey를 넣어 주세요. "
             "KB 계좌·IP 등록이 되어 있어야 연결됩니다. "
-            "연결되면 토큰·계좌·잔고·시세를 확인합니다. "
-            "실제 주문은 수동 주문 버튼과 최종 확인 후에만 전송됩니다."
+            "연결되면 토큰·계좌·잔고·시세·체결을 확인합니다. "
+            "주문 전송은 제외되었습니다."
         )
 
     def _refresh_public_ip(self) -> None:
@@ -1330,7 +1325,7 @@ class KbTokenLoginDialog(tk.Toplevel):
             self.status_var.set("ON 연결됨")
             self.expiry_var.set(f"만료 시각: {expires} · 남은 시간 {self.client.token_seconds_remaining:,}초")
             self._status_color = UI_GREEN
-            self.progress_var.set("4. 토큰 발행 완료. 계좌 연결/잔고 확인 후 주문 가능합니다.")
+            self.progress_var.set("4. 토큰 발행 완료. 계좌 연결/잔고 확인 후 조회 가능합니다.")
         else:
             self.status_var.set("OFF 연결 안됨")
             self.expiry_var.set("만료 시각: -")
@@ -1625,6 +1620,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self.side_var = tk.StringVar(value="BUY")
         self.status_var = tk.StringVar(value="KB HTS OFF")
         self.kb_api_status_var = tk.StringVar(value="KB API OFF")
+        self._manual_ordering_enabled = False
         self.kb_account_var = tk.StringVar(
             value=parent.service.storage.get_app_setting(
                 "kb.openapi.account",
@@ -1658,7 +1654,7 @@ class KbManualTradeWindow(tk.Toplevel):
         self.kb_account_probe_var = tk.StringVar(value="확인된 계좌: -")
         self.kb_balance_holdings_var = tk.StringVar(value="보유 종목: -")
         self.kb_balance_updated_var = tk.StringVar(value="마지막 갱신: -")
-        self.kb_execution_status_var = tk.StringVar(value="체결 정보: 주문 전송 전")
+        self.kb_execution_status_var = tk.StringVar(value="체결 정보: 조회 전")
         self.prepared_card_vars: list[dict[str, tk.StringVar]] = []
         self.kb_execution_tree: ttk.Treeview | None = None
         self.kb_holdings_tree: ttk.Treeview | None = None
@@ -1768,7 +1764,7 @@ class KbManualTradeWindow(tk.Toplevel):
             foreground=UI_MUTED,
         ).grid(row=3, column=0, columnspan=6, sticky="w", pady=(8, 0))
 
-        api_box = ttk.LabelFrame(body, text="KB Open API 토큰 로그인 · 수동 주문", padding=10)
+        api_box = ttk.LabelFrame(body, text="KB Open API 토큰 로그인 · 계좌 확인", padding=10)
         api_box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         for column in range(7):
             api_box.columnconfigure(column, weight=1 if column in {1, 3, 5} else 0)
@@ -1817,10 +1813,10 @@ class KbManualTradeWindow(tk.Toplevel):
         ttk.Entry(api_box, textvariable=self.kb_account_password_var, show="*", width=14).grid(
             row=1, column=3, sticky="w", padx=(6, 10), pady=(8, 0)
         )
-        ttk.Checkbutton(
+        ttk.Label(
             api_box,
-            text="KB API 수동 주문 허용",
-            variable=self.kb_order_enabled_var,
+            text="주문 전송은 제외되었습니다. 계좌·현재가·잔고·체결 정보만 확인합니다.",
+            foreground=UI_GREEN,
         ).grid(row=1, column=4, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Label(
             api_box,
@@ -1900,49 +1896,24 @@ class KbManualTradeWindow(tk.Toplevel):
         ).grid(row=1, column=3, sticky="w", padx=(8, 0), pady=(10, 0))
         symbol_entry.bind("<Return>", lambda _event: self._set_symbol())
 
-        order_box = ttk.LabelFrame(body, text="수동 주문 입력", padding=12)
+        order_box = ttk.LabelFrame(body, text="수동 거래 제외 안내", padding=12)
         order_box.grid(row=6, column=0, sticky="ew", pady=(0, 10))
         order_box.columnconfigure(1, weight=1)
-        ttk.Label(order_box, text="주문 구분").grid(row=0, column=0, sticky="w")
-        side_buttons = ttk.Frame(order_box)
-        side_buttons.grid(row=0, column=1, sticky="w", padx=(10, 0))
-        self.buy_side_button = ttk.Button(
-            side_buttons,
-            text="매수",
-            command=lambda: self._set_side("BUY"),
-            style="Accent.TButton",
-        )
-        self.buy_side_button.pack(side="left")
-        self.sell_side_button = ttk.Button(
-            side_buttons,
-            text="매도",
-            command=lambda: self._set_side("SELL"),
-            style="Blue.TButton",
-        )
-        self.sell_side_button.pack(side="left", padx=(6, 0))
-        self.decide_order_button = ttk.Button(
-            side_buttons,
-            text="결정",
-            command=self._submit_selected_api_order,
-            style="Success.TButton",
-        )
-        self.decide_order_button.pack(side="left", padx=(6, 0))
-        ttk.Label(order_box, text="수량").grid(row=1, column=0, sticky="w", pady=(10, 0))
-        quantity_row = ttk.Frame(order_box)
-        quantity_row.grid(row=1, column=1, sticky="w", padx=(10, 0), pady=(10, 0))
-        ttk.Entry(quantity_row, textvariable=self.quantity_var, width=8, justify="center").pack(side="left")
-        ttk.Button(quantity_row, text="-", width=3, command=lambda: self._change_quantity(-1)).pack(
-            side="left", padx=(6, 0)
-        )
-        ttk.Button(quantity_row, text="+", width=3, command=lambda: self._change_quantity(1)).pack(
-            side="left", padx=(4, 0)
-        )
-        ttk.Label(order_box, text="주문 가격(기본 현재가)").grid(
-            row=2, column=0, sticky="w", pady=(10, 0)
-        )
-        ttk.Entry(order_box, textvariable=self.order_price_var, width=16).grid(
-            row=2, column=1, sticky="w", padx=(10, 0), pady=(10, 0)
-        )
+        ttk.Label(
+            order_box,
+            text=(
+                "이 버전은 PDF 기준에 맞춰 매수·매도 전송 기능을 제외했습니다. "
+                "계좌 연결, 현재가 확인, 잔고 조회, 체결 내역 확인만 사용합니다."
+            ),
+            foreground=UI_MUTED,
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(
+            order_box,
+            text="주문 입력 UI는 숨기고, 현재가와 계좌/체결 상태만 남겼습니다.",
+            foreground=UI_GREEN,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         prepared_box = ttk.LabelFrame(body, text="준비 종목 4칸", padding=10)
         prepared_box.grid(row=7, column=0, sticky="ew", pady=(0, 10))
@@ -1952,9 +1923,9 @@ class KbManualTradeWindow(tk.Toplevel):
             prepared_box.rowconfigure(row, weight=1)
 
         prepared_specs = (
-            ("매수 준비", UI_PINK),
-            ("매도 준비", UI_BLUE),
-            ("계좌 상태", UI_GREEN),
+            ("계좌 상태", UI_PINK),
+            ("현재가 상태", UI_BLUE),
+            ("체결 리스트", UI_GREEN),
             ("API 상태", UI_ORANGE),
         )
         for index, (title, accent) in enumerate(prepared_specs):
@@ -2026,7 +1997,7 @@ class KbManualTradeWindow(tk.Toplevel):
         handoff_box.columnconfigure(0, weight=1)
         ttk.Label(
             handoff_box,
-            text="HTS 전달은 입력값을 복사하는 기능입니다. KB API 주문은 별도 허용 체크와 최종 확인 후에만 전송됩니다.",
+            text="HTS 전달은 종목과 현재가를 복사하는 기능입니다. 주문 전송은 제외되었습니다.",
             foreground=UI_MUTED,
             wraplength=650,
             justify="left",
@@ -2037,20 +2008,11 @@ class KbManualTradeWindow(tk.Toplevel):
             command=self._handoff,
             style="Blue.TButton",
         ).grid(row=1, column=0, sticky="w", pady=(10, 0))
-        order_buttons = ttk.Frame(handoff_box)
-        order_buttons.grid(row=1, column=1, sticky="e", pady=(10, 0))
-        ttk.Button(
-            order_buttons,
-            text="KB API 매수 주문",
-            command=lambda: self._submit_api_order("BUY"),
-            style="Accent.TButton",
-        ).pack(side="left")
-        ttk.Button(
-            order_buttons,
-            text="KB API 매도 주문",
-            command=lambda: self._submit_api_order("SELL"),
-            style="Blue.TButton",
-        ).pack(side="left", padx=(6, 0))
+        ttk.Label(
+            handoff_box,
+            text="매수·매도 버튼은 제외되었고 체결/잔고 조회만 유지됩니다.",
+            foreground=UI_GREEN,
+        ).grid(row=1, column=1, sticky="e", pady=(10, 0))
         ttk.Label(
             handoff_box,
             textvariable=self.handoff_var,
@@ -2345,11 +2307,12 @@ class KbManualTradeWindow(tk.Toplevel):
 
     def _set_side(self, side: str) -> None:
         self.side_var.set("SELL" if str(side).upper() == "SELL" else "BUY")
-        self.buy_side_button.configure(style="Accent.TButton" if self.side_var.get() == "BUY" else "TButton")
-        self.sell_side_button.configure(style="Blue.TButton" if self.side_var.get() == "SELL" else "TButton")
+        if hasattr(self, "buy_side_button"):
+            self.buy_side_button.configure(style="Accent.TButton" if self.side_var.get() == "BUY" else "TButton")
+        if hasattr(self, "sell_side_button"):
+            self.sell_side_button.configure(style="Blue.TButton" if self.side_var.get() == "SELL" else "TButton")
         if hasattr(self, "decide_order_button"):
-            label = "매도 결정" if self.side_var.get() == "SELL" else "매수 결정"
-            self.decide_order_button.configure(text=label)
+            self.decide_order_button.configure(text="조회 상태")
 
     def _change_quantity(self, delta: int) -> None:
         try:
@@ -2527,149 +2490,9 @@ class KbManualTradeWindow(tk.Toplevel):
         return execution_status, execution_notice
 
     def _submit_api_order(self, side: str) -> None:
-        if not self.kb_order_enabled_var.get():
-            self.parent_app._show_warning(
-                "KB API 주문 잠금",
-                "실제 주문을 보내려면 먼저 'KB API 수동 주문 허용'을 체크해 주세요.",
-                parent=self,
-            )
-            return
-        if not self.parent_app.kb_api.is_connected:
-            self.parent_app._show_warning("KB API 주문", "먼저 KB API 연결을 완료해 주세요.", parent=self)
-            return
-        symbol = normalize_kb_symbol(self.symbol_var.get())
-        account = "".join(character for character in self.kb_account_var.get() if character.isdigit())
-        password = self.kb_account_password_var.get().strip()
-        try:
-            quantity = int(self.quantity_var.get() or 0)
-            price = float(str(self.order_price_var.get() or "0").replace(",", ""))
-        except ValueError:
-            quantity, price = 0, 0.0
-        if not symbol or not account or quantity <= 0 or price <= 0:
-            self.parent_app._show_warning(
-                "KB API 주문 입력",
-                "종목번호, KB 계좌번호, 수량, 주문가격을 확인해 주세요.",
-                parent=self,
-            )
-            return
-        if not password.isdigit() or not 4 <= len(password) <= 8:
-            self.parent_app._show_warning(
-                "KB API 주문 입력",
-                "계좌 비밀번호는 4~8자리 숫자로 입력해 주세요.",
-                parent=self,
-            )
-            return
-        price, price_adjust_note, order_type_code = self._execution_priority_price(side, symbol, price)
-        self.order_price_var.set(f"{price:,.0f}")
-        try:
-            balance, account_probe_text = self._request_best_kb_balance(account)
-            self.parent_app.service.balance_summary = balance
-            self.kb_account_probe_var.set(f"확인된 계좌: {account_probe_text}")
-        except KbOpenApiError as exc:
-            self.parent_app.service.balance_summary = None
-            self._refresh_balance_display(force=False)
-            self.parent_app._show_warning(
-                "KB API 계좌 확인",
-                f"주문 전 계좌 잔고를 확인하지 못했습니다.\n{exc}",
-                parent=self,
-            )
-            return
-        estimated_amount = float(quantity) * float(price)
-        if side == "BUY":
-            try:
-                orderable = self.parent_app.kb_api.request_buy_orderable_cash(symbol)
-                if orderable.orderable_total > 0 or orderable.max_orderable_amount > 0:
-                    balance_orderable = max(
-                        balance.orderable_amount,
-                        orderable.orderable_total,
-                        orderable.max_orderable_amount,
-                    )
-                else:
-                    balance_orderable = balance.orderable_amount
-            except KbOpenApiError:
-                balance_orderable = balance.orderable_amount
-            if estimated_amount > balance_orderable:
-                self._update_kb_api_state(True, False)
-                self.kb_trade_ready_var.set("주문가능금액 부족")
-                try:
-                    self.kb_trade_ready_label.configure(fg=UI_RED)
-                except tk.TclError:
-                    pass
-                self.parent_app._show_warning(
-                    "KB API 매수 가능금액",
-                    f"매수 예상금액 {estimated_amount:,.0f}원이 주문가능금액 {balance_orderable:,.0f}원을 초과합니다.",
-                    parent=self,
-                )
-                return
-        else:
-            holding_quantity = self._sellable_quantity_for_symbol(symbol, balance)
-            if holding_quantity < quantity:
-                self._update_kb_api_state(True, False)
-                self.kb_trade_ready_var.set("매도가능수량 부족")
-                try:
-                    self.kb_trade_ready_label.configure(fg=UI_RED)
-                except tk.TclError:
-                    pass
-                self.parent_app._show_warning(
-                    "KB API 매도 가능수량",
-                    f"{symbol} 매도 가능수량 {holding_quantity}주가 주문수량 {quantity}주보다 적습니다.\n"
-                    "잔고가 늦게 반영되는 경우 '체결 새로고침' 또는 '보유주식 리스트'를 눌러 다시 확인해 주세요.",
-                    parent=self,
-                )
-                return
-        self._refresh_balance_display(force=False)
-        side_label = "매수" if side == "BUY" else "매도"
-        confirmed = messagebox.askyesno(
-            "KB 실계좌 수동 주문 확인",
-            f"KB Open API로 {side_label} 주문을 전송합니다.\n\n"
-            f"종목: {symbol}\n수량: {quantity}주\n가격: {price:,.0f}원\n\n"
-            f"{price_adjust_note}\n"
-            f"주문구분: {order_type_code}\n"
-            "전송 방식: 정규장 KRX 주문 우선, KB가 장개시전으로 응답하면 장개시전 주문으로 자동 재시도\n\n"
-            "이 주문은 KB 실계좌에 전송될 수 있습니다. 계속하시겠습니까?",
-            parent=self,
-        )
-        if not confirmed:
-            return
-        try:
-            order_no = self.parent_app.kb_api.place_cash_order(
-                account=account,
-                symbol=symbol,
-                side=side,
-                quantity=quantity,
-                price=price,
-                account_password=password,
-                order_type_code=order_type_code,
-            )
-        except KbOpenApiError as exc:
-            self.handoff_var.set(f"KB {side_label} 주문 실패: {exc}")
-            self.parent_app._show_warning("KB API 주문 실패", str(exc), parent=self)
-            return
-        execution_status, execution_notice = self._lookup_order_execution_notice(
-            symbol=symbol,
-            order_no=order_no,
-            side_label=side_label,
-        )
-
-        self.handoff_var.set(
-            f"KB {side_label} 주문 전송 완료 · 주문번호 {order_no} · {price_adjust_note}"
-        )
-        self._append_execution_row(
-            side=side_label,
-            symbol=symbol,
-            name=self.name_var.get(),
-            quantity=quantity,
-            price=price,
-            status=execution_status,
-            order_no=order_no,
-        )
-        self._refresh_balance_display(force=True)
-        self._refresh_execution_list()
-        self._refresh_prepared_cards()
-        messagebox.showinfo(
-            "KB API 주문 전송 완료",
-            f"{side_label} 주문 전송이 완료되었습니다.\n주문번호: {order_no}\n{execution_notice}\n\n"
-            f"{price_adjust_note}",
+        self.parent_app._show_warning(
+            "KB API 주문 제외",
+            "PDF 기준에 맞춰 매수·매도 전송 기능은 제외되었습니다. 계좌 연결, 현재가 확인, 잔고/체결 조회만 사용해 주세요.",
             parent=self,
         )
 
@@ -2724,19 +2547,18 @@ class KbManualTradeWindow(tk.Toplevel):
             ("사용자 ID", "KB REST API 토큰 인증" if connected else "확인 필요"),
             ("API 확인 계좌", account_label),
             ("계좌 수", "1개 (KB 신청계좌 1개)" if account_digits else "확인 필요"),
-            ("정보 활용", "계좌 / 현재가 / 잔고 / 주문가능금액 / 수동주문 / 체결조회"),
+            ("정보 활용", "계좌 / 현재가 / 잔고 / 체결조회 / 상세보기"),
         ]
         if balance is not None:
             can_buy, can_sell = _balance_trade_capability(balance)
             rows.extend(
                 [
                     ("예수금", f"{balance.deposit:,.0f}원"),
-                    ("주문가능금액", f"{balance.orderable_amount:,.0f}원"),
+                    ("가용금액", f"{balance.orderable_amount:,.0f}원"),
                     ("출금가능금액", f"{balance.withdrawable_amount:,.0f}원"),
                     ("D+2 추정예수금", f"{balance.d2_estimated_deposit:,.0f}원"),
                     ("보유 종목", f"{len(balance.holdings)}종목"),
-                    ("매수 가능", "가능" if can_buy else "불가"),
-                    ("매도 가능", "가능" if can_sell else "불가"),
+                    ("체결 확인", "가능" if can_buy or can_sell else "불가"),
                     ("추정예탁자산", f"{balance.estimated_assets:,.0f}원"),
                 ]
             )
@@ -2776,13 +2598,13 @@ class KbManualTradeWindow(tk.Toplevel):
             return
 
         if trade_ready:
-            self.kb_trade_ready_var.set("매수매도 가능합니다")
+            self.kb_trade_ready_var.set("계좌/시세 연동 가능")
             try:
                 self.kb_trade_ready_label.configure(fg=UI_GREEN)
             except tk.TclError:
                 pass
         else:
-            self.kb_trade_ready_var.set("잔고 확인 필요")
+            self.kb_trade_ready_var.set("잔고/시세 확인 필요")
             try:
                 self.kb_trade_ready_label.configure(fg=UI_ORANGE)
             except tk.TclError:
@@ -2961,8 +2783,8 @@ class KbManualTradeWindow(tk.Toplevel):
         ).pack(side="left")
         ttk.Button(
             button_row,
-            text="선택 종목 매도 준비",
-            command=self._prepare_sell_from_selected_holding,
+            text="선택 종목 정보 보기",
+            command=self._show_selected_holding_detail,
             style="Success.TButton",
         ).pack(side="left", padx=(6, 0))
         ttk.Label(
@@ -3002,7 +2824,7 @@ class KbManualTradeWindow(tk.Toplevel):
         tree.configure(yscrollcommand=scrollbar.set)
         tree.grid(row=2, column=0, sticky="nsew")
         scrollbar.grid(row=2, column=1, sticky="ns")
-        tree.bind("<Double-1>", lambda _event: self._prepare_sell_from_selected_holding())
+        tree.bind("<Double-1>", lambda _event: self._show_selected_holding_detail())
         self.kb_holdings_tree = tree
         self._refresh_kb_holdings_window()
 
@@ -3035,38 +2857,46 @@ class KbManualTradeWindow(tk.Toplevel):
                 ),
             )
         self.kb_holdings_status_var.set(
-            f"보유주식: {len(rows)}종목 · 더블클릭하면 매도 준비"
+            f"보유주식: {len(rows)}종목 · 더블클릭하면 상세 정보"
             if rows
             else "보유주식: 조회 결과 없음"
         )
 
-    def _prepare_sell_from_selected_holding(self) -> None:
+    def _show_selected_holding_detail(self) -> None:
         tree = self.kb_holdings_tree
         if tree is None:
             return
         selected = tree.selection()
         if not selected:
-            self.parent_app._show_warning("KB 보유주식", "매도할 보유 종목을 선택해 주세요.", parent=self)
+            self.parent_app._show_warning("KB 보유주식", "상세 정보를 볼 보유 종목을 선택해 주세요.", parent=self)
             return
         values = tree.item(selected[0], "values")
         if not values:
             return
         symbol = normalize_kb_symbol(values[0])
         name = str(values[1] or "-")
-        sellable = self._parse_kb_quantity(values[3])
         current_price = self._parse_kb_price(values[5])
-        if not symbol or sellable <= 0:
-            self.parent_app._show_warning("KB 보유주식", "선택 종목의 매도 가능수량이 없습니다.", parent=self)
+        quantity = self._parse_kb_quantity(values[2])
+        sellable = self._parse_kb_quantity(values[3])
+        if not symbol:
+            self.parent_app._show_warning("KB 보유주식", "선택 종목 정보를 확인할 수 없습니다.", parent=self)
             return
         self.symbol_var.set(symbol)
         self.name_var.set(name)
         self.price_var.set(f"{current_price:,.0f}원" if current_price > 0 else "현재가 미조회")
         if current_price > 0:
             self.order_price_var.set(f"{current_price:,.0f}")
-        self.quantity_var.set(str(max(1, sellable)))
-        self._set_side("SELL")
         self._refresh_prepared_cards()
-        self.handoff_var.set(f"매도 준비 완료 · {symbol} {name} · 매도가능 {sellable:,}주")
+        self.handoff_var.set(
+            f"보유 종목 상세 · {symbol} {name} · 보유 {quantity:,}주 · 매도가능 {sellable:,}주"
+        )
+        messagebox.showinfo(
+            "KB 보유주식",
+            f"{symbol} {name}\n보유: {quantity:,}주\n매도가능: {sellable:,}주\n현재가: {current_price:,.0f}원"
+            if current_price > 0
+            else f"{symbol} {name}\n보유: {quantity:,}주\n매도가능: {sellable:,}주\n현재가: 미조회",
+            parent=self,
+        )
 
     def _refresh_market(self) -> None:
         app = self.parent_app
@@ -3129,13 +2959,13 @@ class KbManualTradeWindow(tk.Toplevel):
         trade_ready = self.parent_app.kb_api.is_connected and (can_buy or can_sell)
         self._update_kb_api_state(self.parent_app.kb_api.is_connected, trade_ready)
         if self.parent_app.kb_api.is_connected and not trade_ready:
-            self.kb_trade_ready_var.set("주문 가능 여부 확인 필요")
+            self.kb_trade_ready_var.set("잔고/시세 확인 필요")
             try:
                 self.kb_trade_ready_label.configure(fg=UI_RED)
             except tk.TclError:
                 pass
         elif self.parent_app.kb_api.is_connected:
-            self.kb_trade_ready_var.set(_balance_trade_capability_text(balance))
+            self.kb_trade_ready_var.set("계좌/시세 연동 가능")
             try:
                 self.kb_trade_ready_label.configure(fg=UI_GREEN)
             except tk.TclError:
@@ -3177,31 +3007,31 @@ class KbManualTradeWindow(tk.Toplevel):
 
         api_connected = self.parent_app.kb_api.is_connected
         api_text = self.kb_api_status_var.get().strip() or "KB API OFF"
-        trade_text = self.kb_trade_ready_var.get().strip() or ("매수매도 가능합니다" if api_connected else "연결 필요")
+        trade_text = self.kb_trade_ready_var.get().strip() or ("계좌/시세 연동 가능" if api_connected else "연결 필요")
 
         payloads = (
             {
-                "symbol": f"종목: {symbol or '-'}",
-                "name": f"회사명: {name}",
-                "price": f"현재가: {price_text}",
-                "status": "매수 준비" if api_connected else "매수 대기",
-            },
-            {
-                "symbol": f"종목: {symbol or '-'}",
-                "name": f"회사명: {name}",
-                "price": f"현재가: {price_text}",
-                "status": "매도 준비" if api_connected else "매도 대기",
-            },
-            {
-                "symbol": "계좌 상태",
-                "name": f"요약: {account_summary}",
+                "symbol": f"계좌: {self._format_kb_account(self.kb_account_var.get())}",
+                "name": f"잔고: {account_summary}",
                 "price": f"상세: {account_detail}",
-                "status": "잔고 확인 완료" if balance is not None else "잔고 확인 필요",
+                "status": "계좌 확인 완료" if balance is not None else "계좌 확인 필요",
+            },
+            {
+                "symbol": f"종목: {symbol or '-'}",
+                "name": f"회사명: {name}",
+                "price": f"현재가: {price_text}",
+                "status": "현재가 갱신 완료" if price_value > 0 else "현재가 대기",
+            },
+            {
+                "symbol": f"체결: {len(self._local_kb_execution_rows)}건",
+                "name": f"최근 상태: {self.kb_execution_status_var.get().strip() or '체결 정보 없음'}",
+                "price": f"연동: {'완료' if self._kb_quote_symbol else '대기'}",
+                "status": "체결 리스트 확인" if self._local_kb_execution_rows else "체결 대기",
             },
             {
                 "symbol": "API 상태",
                 "name": f"상태: {api_text}",
-                "price": f"주문: {trade_text}",
+                "price": f"조회: {trade_text}",
                 "status": "토큰 연결 완료" if api_connected else "연결 안됨",
             },
         )
@@ -4960,7 +4790,7 @@ class TraderApp(tk.Tk):
         self.market_session_var = tk.StringVar(value="장 상태: 키움 신호 대기")
         self.auto_started_at_var = tk.StringVar(value="실시간 감시 시작 시각: 아직 시작하지 않음")
         self.auto_trade_capability_var = tk.StringVar(value="자동주문 미사용")
-        self.auto_trade_detail_var = tk.StringVar(value="자동매수·자동매도 기능이 제거되었습니다. 수동 주문만 사용할 수 있습니다.")
+        self.auto_trade_detail_var = tk.StringVar(value="자동주문 기능은 제외되었습니다. 계좌·현재가·잔고·체결 확인만 사용할 수 있습니다.")
         self.holding_monitor_state_var = tk.StringVar(value="감시 OFF")
         self.holding_monitor_detail_var = tk.StringVar(
             value="실시간 감시를 시작하면 매입한 주식의 보유수량을 감시합니다."
@@ -4968,7 +4798,7 @@ class TraderApp(tk.Tk):
         self.account_summary_var = tk.StringVar(
             value="계좌 창: 로그인 전입니다. 키움 로그인 후 계좌번호 앞4자리+뒤4자리와 잔고가 표시됩니다."
         )
-        self.trade_ready_var = tk.StringVar(value="거래 준비: 종목번호와 회사명, 계좌번호를 확인해 주세요.")
+        self.trade_ready_var = tk.StringVar(value="조회 준비: 종목번호와 회사명, 계좌번호를 확인해 주세요.")
         self.kb_manual_summary_var = tk.StringVar(
             value="KB HTS 수동거래 · 계좌번호와 계좌비밀번호를 사용하지 않습니다."
         )
@@ -5085,7 +4915,7 @@ class TraderApp(tk.Tk):
         ).grid(row=0, column=3, sticky="w", padx=6)
         ttk.Label(
             actions,
-            text="자동매매 기능 삭제 · KB HTS 수동 주문 전용",
+            text="자동매매 기능 삭제 · KB HTS 조회 전용",
             foreground=UI_GREEN,
             font=(UI_DISPLAY_FONT, 9, "bold"),
         ).grid(row=0, column=4, sticky="w", padx=(6, 8))
@@ -5225,7 +5055,7 @@ class TraderApp(tk.Tk):
         manual_info.grid(row=0, column=2, columnspan=2, sticky="nsew", padx=(4, 0))
         ttk.Label(
             manual_info,
-            text="수동 주문 전용\n매수·매도 버튼을 눌렀을 때만 주문합니다.",
+            text="조회 전용\n주문 전송은 제외되고 계좌·현재가·잔고·체결만 확인합니다.",
             foreground=UI_MUTED,
             justify="left",
         ).pack(anchor="w")
@@ -5241,24 +5071,18 @@ class TraderApp(tk.Tk):
         ttk.Button(data_actions, text="실시간 시세 중지", command=self._unregister_real_time).pack(side="left", padx=4)
         self.buy_button = ttk.Button(
             trade_actions,
-            text="수동 매수",
-            command=lambda: self._send_order("BUY", "NEW"),
+            text="주문 제외",
+            command=self._show_order_excluded_notice,
+            state="disabled",
         )
-        self.buy_button.configure(style="Accent.TButton")
-        self.buy_button.pack(
-            side="left",
-            padx=(10, 4),
-        )
+        self.buy_button.pack(side="left", padx=(10, 4))
         self.sell_button = ttk.Button(
             trade_actions,
-            text="수동 매도",
-            command=lambda: self._send_order("SELL", "NEW"),
+            text="주문 제외",
+            command=self._show_order_excluded_notice,
+            state="disabled",
         )
-        self.sell_button.configure(style="Blue.TButton")
-        self.sell_button.pack(
-            side="left",
-            padx=4,
-        )
+        self.sell_button.pack(side="left", padx=4)
         self.modify_button = ttk.Button(
             trade_actions,
             text="수동 정정",
@@ -5278,8 +5102,8 @@ class TraderApp(tk.Tk):
         quick_settings.pack(fill="x")
         quick_buttons = ttk.Frame(quick_row)
         quick_buttons.pack(fill="x", pady=(5, 0))
-        ttk.Label(quick_settings, text="수동 주문 전용").pack(side="left")
-        ttk.Label(quick_settings, text="중간가 지정가").pack(side="left", padx=(10, 4))
+        ttk.Label(quick_settings, text="조회 전용").pack(side="left")
+        ttk.Label(quick_settings, text="중간가 기준").pack(side="left", padx=(10, 4))
         ttk.Label(quick_settings, text="연동 그룹").pack(side="left", padx=(10, 4))
         group_combo = ttk.Combobox(
             quick_settings,
@@ -5610,7 +5434,7 @@ class TraderApp(tk.Tk):
         self.trade_history_tab = ttk.Frame(self.main_notebook, padding=(10, 10, 10, 8))
         self.trade_history_tab.columnconfigure(0, weight=1)
         self.trade_history_tab.rowconfigure(1, weight=1)
-        self.main_notebook.add(self.trade_history_tab, text="매수·매도 이력")
+        self.main_notebook.add(self.trade_history_tab, text="체결 이력")
 
         trade_toolbar = ttk.Frame(self.trade_history_tab)
         trade_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -7734,7 +7558,7 @@ class TraderApp(tk.Tk):
     def _open_trade_history_file(self) -> None:
         path = self.service.storage.trade_history_path
         if not path.exists():
-            messagebox.showwarning("매수·매도 이력", "아직 생성된 CSV 이력 파일이 없습니다.")
+            messagebox.showwarning("체결 이력", "아직 생성된 CSV 이력 파일이 없습니다.")
             return
         webbrowser.open(path.resolve().as_uri())
 
@@ -9831,61 +9655,20 @@ class TraderApp(tk.Tk):
         return str(timestamp)
 
     def _send_order(self, side: str, action: str = "NEW") -> None:
-        if not self._require_live_connection():
-            return
-        normalized_action = str(action or "NEW").strip().upper()
-        if normalized_action not in {"NEW", "MODIFY", "CANCEL"}:
-            normalized_action = "NEW"
-        original_order_no = self.original_order_no_var.get().strip()
-        if normalized_action in {"MODIFY", "CANCEL"} and not original_order_no:
-            self._show_warning(
-                "원주문번호 필요",
-                "미체결 주문을 선택하거나 원주문번호를 입력해 주세요.",
-            )
-            return
-        allow_real = self._real_order_session_ready()
-        if not self._trading_ready():
-            self._show_warning("주문 준비 필요", self.trade_ready_var.get())
-            return
-        if allow_real and not self._regular_market_open():
-            self._show_warning(
-                "정규장 장중 확인 필요",
-                "키움 장시작시간(0s) 또는 주식체결(0B)에서 정규장 장중을 "
-                "확인한 뒤 실거래 주문할 수 있습니다.",
-            )
-            return
-        action_label = {"NEW": "신규", "MODIFY": "정정", "CANCEL": "취소"}[normalized_action]
-        price_label = f"{self._order_price_label()} 지정" if normalized_action != "CANCEL" else "주문 취소"
-        if allow_real and not self._confirm_real_order(
-            f"{price_label} {action_label} 주문",
-            original_order_no=original_order_no,
-        ):
-            return
-        self.service.configure(self.symbol_var.get(), self._operating_capital(), self._settings())
-        self.service.send_kiwoom_order(
-            account=self._account_for_api(),
-            side=side,
-            quantity=self._order_quantity(),
-            allow_real_order=allow_real,
-            account_password=self._account_password_for_order(),
-            order_style=self._selected_order_style(),
-            action=normalized_action,
-            original_order_no=original_order_no,
-            use_margin=self.use_margin_var.get(),
-        )
-        if normalized_action == "CANCEL":
-            self.original_order_no_var.set("")
-        self._mark_holding_balance_refresh_due()
-        self._schedule_recent_trade_history_refresh()
-        self._handle_order_account_verification()
-        self._refresh()
+        self._show_order_excluded_notice()
 
     def _evaluate_and_send_order(self, auto: bool = False) -> None:
         self._show_warning(
-            "자동주문 사용 안 함",
-            "자동매수·자동매도 기능이 제거되었습니다. 화면의 수동 매수·매도 버튼만 사용해 주세요.",
+            "주문 기능 제외",
+            "PDF 기준에 맞춰 매수·매도 전송은 제외되었습니다. 계좌 연결, 현재가 확인, 잔고/체결 조회만 사용해 주세요.",
         )
         self._refresh()
+
+    def _show_order_excluded_notice(self) -> None:
+        self._show_warning(
+            "주문 기능 제외",
+            "PDF 기준에 맞춰 매수·매도 전송은 제외되었습니다. 계좌 연결, 현재가 확인, 잔고/체결 조회만 사용해 주세요.",
+        )
 
     def _confirm_real_order(self, title: str, original_order_no: str = "") -> bool:
         original_text = (
@@ -10433,11 +10216,10 @@ class TraderApp(tk.Tk):
             and baseline is not None
             and server_ready
         ):
-            order_mode = "모의주문" if snapshot.account_info.server_type == "모의투자" else "실거래 주문"
             return (
-                f"거래 준비 완료: {snapshot.symbol} {name} | 계좌 {self._privacy_account_label(account)} | "
+                f"조회 준비 완료: {snapshot.symbol} {name} | 계좌 {self._privacy_account_label(account)} | "
                 f"고정 운용금액 {baseline.capital_limit:,.0f}원 | "
-                f"{self._order_quantity()}주 수동 {self._order_price_label()} 매수/매도 {order_mode} 가능"
+                f"{self._order_quantity()}주 · 현재가/잔고/체결 확인 가능"
             )
         missing = []
         if not snapshot.account_info.connected:
@@ -10456,7 +10238,7 @@ class TraderApp(tk.Tk):
             missing.append("실거래 세션 승인")
         elif snapshot.account_info.server_type == "실거래" and not self._real_order_session_armed:
             missing.append("실거래 세션 승인 확인")
-        return f"거래 준비: {', '.join(missing)} 확인이 필요합니다."
+        return f"조회 준비: {', '.join(missing)} 확인이 필요합니다."
 
     def _trading_ready(self) -> bool:
         account = clean_account_number(self._account_for_api())
@@ -10773,12 +10555,11 @@ class TraderApp(tk.Tk):
             rows.extend(
                 [
                     ("예수금", f"{balance.deposit:,.0f}원"),
-                    ("주문가능금액", f"{balance.orderable_amount:,.0f}원"),
+                    ("가용금액", f"{balance.orderable_amount:,.0f}원"),
                     ("출금가능금액", f"{balance.withdrawable_amount:,.0f}원"),
                     ("D+2 추정예수금", f"{balance.d2_estimated_deposit:,.0f}원"),
                     ("보유 종목", f"{len(balance.holdings)}종목"),
-                    ("매수 가능", "가능" if can_buy else "불가"),
-                    ("매도 가능", "가능" if can_sell else "불가"),
+                    ("체결 확인", "가능" if can_buy or can_sell else "불가"),
                     ("추정예탁자산", f"{balance.estimated_assets:,.0f}원"),
                 ]
             )
@@ -10818,10 +10599,10 @@ class TraderApp(tk.Tk):
     @staticmethod
     def _account_capability_label(account_info) -> str:
         if account_info.connection_method == "REST API" and account_info.server_type == "실거래":
-            return "계좌 / 현재가 / 0B 실시간 / 0s 장 상태 / 3분봉 / 잔고 / 실주문(세션 승인·정규장)"
+            return "계좌 / 현재가 / 0B 실시간 / 0s 장 상태 / 3분봉 / 잔고 / 체결 확인"
         if account_info.connection_method == "REST API":
-            return "계좌 / 현재가 / 0B 실시간 / 0s 장 상태 / 3분봉 / 잔고 / 모의주문"
-        return "계좌 / 현재가 / 장 상태 / 실시간 시세 / 3분봉 / 잔고 / 주문"
+            return "계좌 / 현재가 / 0B 실시간 / 0s 장 상태 / 3분봉 / 잔고 / 조회"
+        return "계좌 / 현재가 / 장 상태 / 실시간 시세 / 3분봉 / 잔고 / 조회"
 
     def _account_for_api(self) -> str:
         entered = clean_account_number(self.account_var.get())

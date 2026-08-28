@@ -294,8 +294,8 @@ class UiHelperTests(unittest.TestCase):
 
         self.assertEqual(_balance_trade_capability(no_cash_with_sellable_holding), (False, True))
         self.assertEqual(_balance_trade_capability(cash_only), (True, False))
-        self.assertEqual(_balance_trade_capability_text(no_cash_with_sellable_holding), "매도 가능합니다")
-        self.assertEqual(_balance_trade_capability_text(cash_only), "매수 가능합니다")
+        self.assertEqual(_balance_trade_capability_text(no_cash_with_sellable_holding), "체결/잔고 확인 가능")
+        self.assertEqual(_balance_trade_capability_text(cash_only), "체결/잔고 확인 가능")
 
     def test_running_monitor_refreshes_rest_balance_without_log_spam(self):
         request_balance = MagicMock(return_value=BalanceSummary(account="12345678"))
@@ -564,8 +564,8 @@ class UiHelperTests(unittest.TestCase):
 
         label = TraderApp._account_capability_label(info)
 
-        self.assertIn("실주문", label)
-        self.assertIn("세션 승인", label)
+        self.assertIn("체결 확인", label)
+        self.assertNotIn("실주문", label)
         self.assertNotIn("주문 잠금", label)
 
     def test_recognizes_only_official_regular_market_open_code(self):
@@ -658,7 +658,7 @@ class UiHelperTests(unittest.TestCase):
 
         text = TraderApp._format_account_summary(app, snapshot)
 
-        self.assertIn("매도 가능합니다", text)
+        self.assertIn("체결/잔고 확인 가능", text)
         self.assertIn("계좌 창: REST API 연결됨(실거래)", text)
 
     def test_orders_api_candles_chronologically_for_the_main_chart(self):
