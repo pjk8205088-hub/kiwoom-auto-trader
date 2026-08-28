@@ -127,19 +127,19 @@ UI_RED = "#ED4956"
 UI_BUTTON_RADIUS = 8
 WINDOW_OPACITY_MIN_PERCENT = 0
 WINDOW_OPACITY_MAX_PERCENT = 100
-HUNDRED_EOK_WON = 10_000_000_000.0
+EOK_WON = 100_000_000.0
 
 WATCHLIST_FIELD_SPECS: dict[str, tuple[str, int, str]] = {
     "market": ("시장", 58, "center"),
     "symbol": ("종목코드", 82, "center"),
     "name": ("종목명", 150, "w"),
     "current_price": ("현재가", 96, "e"),
-    "trade_value": ("거래대금(백억)", 118, "e"),
-    "previous_trade_value": ("전일 거래대금(백억)", 142, "e"),
+    "trade_value": ("거래대금(억)", 118, "e"),
+    "previous_trade_value": ("전일 거래대금(억)", 142, "e"),
     "change": ("전일비", 82, "e"),
     "change_rate": ("등락률", 78, "e"),
     "volume": ("거래량", 112, "e"),
-    "market_cap": ("시가총액(백억)", 120, "e"),
+    "market_cap": ("시가총액(억)", 120, "e"),
     "trade_to_market_cap": ("대금/시총", 88, "e"),
     "program_trading_trend": ("프로그램 매매 추이", 138, "e"),
 }
@@ -295,14 +295,18 @@ def _compact_monitor_display(
     return stock_text, price_text, "─ 보합 0.00%", "flat"
 
 
-def _format_hundred_eok_won(value: object) -> str:
+def _format_eok_won(value: object) -> str:
     try:
         amount = float(value or 0.0)
     except (TypeError, ValueError, OverflowError):
         amount = 0.0
     if amount <= 0:
         return "-"
-    return f"{amount / HUNDRED_EOK_WON:,.2f}"
+    return f"{amount / EOK_WON:,.2f}"
+
+
+def _format_hundred_eok_won(value: object) -> str:
+    return _format_eok_won(value)
 
 
 def _account_access_confirmed(
@@ -6283,7 +6287,7 @@ class TraderApp(tk.Tk):
             "name": ("종목명", 72, "w"),
             "price": ("현재가", 54, "e"),
             "rate": ("등락률", 64, "e"),
-            "trade_value": ("거래대금\n(백억)", 68, "e"),
+            "trade_value": ("거래대금\n(억)", 68, "e"),
             "change": ("전일비", 58, "e"),
         }
         for key, (label, width, anchor) in trade_column_settings.items():
@@ -6770,7 +6774,7 @@ class TraderApp(tk.Tk):
             quote.name or "-",
             f"{quote.current_price:,.0f}",
             TraderApp._rank_rate_text(quote),
-            _format_hundred_eok_won(quote.trade_value),
+            _format_eok_won(quote.trade_value),
             f"{quote.change:+,.0f}",
         )
 
@@ -7090,7 +7094,7 @@ class TraderApp(tk.Tk):
         self.volume_rank_selection_var.set(
             f"거래대금 {quote.rank}위 · {quote.symbol} {quote.name} · "
             f"{sector} · 현재가 {quote.current_price:,.0f}원 · "
-            f"거래대금 {_format_hundred_eok_won(quote.trade_value)}백억원"
+            f"거래대금 {_format_eok_won(quote.trade_value)}억원"
         )
 
     def _activate_selected_rank(self) -> None:
@@ -8158,9 +8162,9 @@ class TraderApp(tk.Tk):
                 "전일대비",
                 "등락률",
                 "거래량",
-                "거래대금(백억)",
-                "전일 거래대금(백억)",
-                "시가총액(백억)",
+                "거래대금(억)",
+                "전일 거래대금(억)",
+                "시가총액(억)",
                 "대금/시총",
                 "프로그램 매매 추이",
                 "시가",
@@ -8888,11 +8892,11 @@ class TraderApp(tk.Tk):
             "전일대비": self._format_watchlist_change(quote.change) if has_price else "-",
             "등락률": f"{quote.change_rate:+.2f}%" if has_price else "-",
             "거래량": f"{quote.volume:,}주" if has_price else "-",
-            "거래대금(백억)": self._format_hundred_eok(quote.trade_value),
-            "전일 거래대금(백억)": self._format_hundred_eok(
+            "거래대금(억)": self._format_hundred_eok(quote.trade_value),
+            "전일 거래대금(억)": self._format_hundred_eok(
                 quote.previous_trade_value
             ),
-            "시가총액(백억)": self._format_hundred_eok(quote.market_cap),
+            "시가총액(억)": self._format_hundred_eok(quote.market_cap),
             "대금/시총": (
                 f"{quote.trade_value / quote.market_cap * 100:.2f}%"
                 if quote.trade_value and quote.market_cap
@@ -8984,7 +8988,7 @@ class TraderApp(tk.Tk):
     def _format_hundred_eok(value: float, signed: bool = False) -> str:
         if not value:
             return "-"
-        amount = float(value) / HUNDRED_EOK_WON
+        amount = float(value) / EOK_WON
         return f"{amount:+,.2f}" if signed else f"{amount:,.2f}"
 
     @staticmethod

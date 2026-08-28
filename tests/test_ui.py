@@ -170,9 +170,9 @@ class UiHelperTests(unittest.TestCase):
             "6698-6208",
         )
 
-    def test_formats_money_in_hundred_eok_won_units(self):
-        self.assertEqual(_format_hundred_eok_won(10_000_000_000), "1.00")
-        self.assertEqual(_format_hundred_eok_won(123_456_000_000), "12.35")
+    def test_formats_money_in_eok_won_units(self):
+        self.assertEqual(_format_hundred_eok_won(100_000_000), "1.00")
+        self.assertEqual(_format_hundred_eok_won(12_345_600_000), "123.46")
         self.assertEqual(_format_hundred_eok_won(0), "-")
 
     def test_applies_selected_opacity_only_to_the_main_window(self):
@@ -690,7 +690,7 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(values[3:], ("72,000", "+500", "+0.70%", "123,456"))
         self.assertEqual(TraderApp._watchlist_tag(quote), "up")
 
-    def test_formats_custom_watchlist_fields_in_hundred_eok_units(self):
+    def test_formats_custom_watchlist_fields_in_eok_units(self):
         quote = WatchlistQuote(
             symbol="005930",
             name="삼성전자",
@@ -706,11 +706,11 @@ class UiHelperTests(unittest.TestCase):
 
         values = TraderApp._watchlist_row_values(quote)
 
-        self.assertEqual(values[4], "25.00")
-        self.assertEqual(values[5], "20.00")
-        self.assertEqual(values[9], "500.00")
+        self.assertEqual(values[4], "2,500.00")
+        self.assertEqual(values[5], "2,000.00")
+        self.assertEqual(values[9], "50,000.00")
         self.assertEqual(values[10], "5.00%")
-        self.assertEqual(values[11], "-3.00")
+        self.assertEqual(values[11], "-300.00")
 
     def test_normalizes_visible_watchlist_fields_and_column_order(self):
         visible, order = normalize_watchlist_layout(
@@ -790,7 +790,7 @@ class UiHelperTests(unittest.TestCase):
                 "삼성전자",
                 "72,000",
                 "▼ 1.25%",
-                "12.35",
+                "1,234.56",
                 "-900",
             ),
         )
