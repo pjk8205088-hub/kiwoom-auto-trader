@@ -480,6 +480,28 @@ class StrategySettingsPanel(ttk.Frame):
         self.profile_tabs.add(state_page, text="현재 종목 상태")
         self.active_symbol_status = tk.StringVar()
         ttk.Label(state_page, textvariable=self.active_symbol_status, anchor="w").pack(fill="x")
+        self.profile_state_tree = ttk.Treeview(
+            state_page,
+            columns=("slot", "symbol", "name", "dmi", "minute", "daily", "status"),
+            show="headings",
+            height=20,
+        )
+        headings = {
+            "slot": "설정",
+            "symbol": "종목번호",
+            "name": "종목명",
+            "dmi": "DMI 기간",
+            "minute": "분봉 이평선",
+            "daily": "일자 이평선",
+            "status": "설정 상태",
+        }
+        widths = {"slot": 60, "symbol": 90, "name": 130, "dmi": 75, "minute": 130, "daily": 130, "status": 100}
+        for column, heading in headings.items():
+            self.profile_state_tree.heading(column, text=heading)
+            self.profile_state_tree.column(column, width=widths[column], anchor="center")
+        self.profile_state_tree.pack(fill="both", expand=True, pady=(8, 0))
+        self.profile_state_tree.tag_configure("configured", foreground="#0b6b35")
+        self.profile_state_tree.tag_configure("empty", foreground="#666666")
         self.profile_tabs.bind("<<NotebookTabChanged>>", self._on_profile_tab_changed)
 
         editor = ttk.Frame(self, padding=(12, 0, 12, 8))
@@ -511,13 +533,13 @@ class StrategySettingsPanel(ttk.Frame):
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-        body = ttk.Frame(canvas, padding=10)
+        body = ttk.Frame(canvas, padding=3)
         window_id = canvas.create_window((0, 0), window=body, anchor="nw")
         body.bind("<Configure>", lambda _event, c=canvas: c.configure(scrollregion=c.bbox("all")))
         canvas.bind("<Configure>", lambda event, c=canvas, item=window_id: c.itemconfigure(item, width=event.width))
         profile = self.profiles[index]
-        basics = ttk.LabelFrame(body, text="DMI 기준", padding=8)
-        basics.grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=(0, 6))
+        basics = ttk.LabelFrame(body, text="DMI 기준", padding=5)
+        basics.grid(row=0, column=0, columnspan=5, sticky="ew", padx=2, pady=(0, 2))
         ttk.Label(basics, text="연결 종목번호").pack(side="left", padx=(0, 5))
         symbol_var = tk.StringVar(value=str(profile.get("symbol", "")))
         ttk.Entry(basics, textvariable=symbol_var, width=9, justify="center").pack(side="left", padx=(0, 12))
@@ -532,13 +554,13 @@ class StrategySettingsPanel(ttk.Frame):
         self.field_vars[(index, ("dmi_period",))] = (dmi_var, int, None)
         ttk.Button(basics, text="설정 저장", command=self.save).pack(side="left", padx=(14, 0))
         for section_index, section in enumerate(("bar", "buy", "buyBlock", "sell", "sellBlock", "order")):
-            box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=9)
+            box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=5)
             if section == "bar":
-                box.grid(row=0, column=0, columnspan=5, sticky="ew", padx=3, pady=4)
+                box.grid(row=0, column=0, columnspan=5, sticky="ew", padx=2, pady=2)
             else:
                 row = 1 + (section_index - 1) // 5
                 column = (section_index - 1) % 5
-                box.grid(row=row, column=column, sticky="nsew", padx=3, pady=4)
+                box.grid(row=row, column=column, sticky="nsew", padx=2, pady=2)
             self._build_fields(box, index, profile[section], (section,))
         for column in range(5):
             body.columnconfigure(column, weight=1, uniform="profile-column")
@@ -559,11 +581,11 @@ class StrategySettingsPanel(ttk.Frame):
         for key, value in values.items():
             label = FIELD_LABELS.get(key, key)
             if isinstance(value, dict):
-                frame = ttk.LabelFrame(parent, text=GROUP_LABELS.get(key, label), padding=7)
-                frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=3, pady=4)
+                frame = ttk.LabelFrame(parent, text=GROUP_LABELS.get(key, label), padding=4)
+                frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
                 self._build_fields(frame, index, value, path + (key,))
             else:
-                ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=5, pady=3)
+                ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=3, pady=1)
                 if isinstance(value, bool):
                     variable = tk.BooleanVar(value=value)
                     widget = ttk.Checkbutton(parent, variable=variable)
@@ -576,7 +598,7 @@ class StrategySettingsPanel(ttk.Frame):
                     reverse = None
                     variable = tk.StringVar(value=str(value))
                     widget = ttk.Entry(parent, textvariable=variable, width=15)
-                widget.grid(row=row, column=1, sticky="w", padx=8, pady=3)
+                widget.grid(row=row, column=1, sticky="w", padx=5, pady=1)
                 self.field_vars[(index, path + (key,))] = (variable, type(value), reverse)
             row += 1
         parent.columnconfigure(0, minsize=145)
@@ -632,6 +654,7 @@ class StrategySettingsPanel(ttk.Frame):
             f"선택 종목: {app.symbol_name_var.get() or symbol} ({symbol}) · "
             f"현재 적용 DMI 기간: {app.dmi_period_var.get()}일 · 설정 {app._active_strategy_profile + 1} / 20"
         )
+        self._refresh_profile_state_table()
         self.selected_profile_label.set(f"현재 선택: 설정 {self.selected + 1} / 20")
         profiles, errors = self._collect_profiles()
         if errors:
@@ -643,6 +666,35 @@ class StrategySettingsPanel(ttk.Frame):
             self.check_label.configure(fg="#16833a")
             self.check_detail.set("설정값은 저장됩니다. 실제 매매 엔진에 연결된 값은 선택 프로필의 DMI 기간입니다.")
         self.status.set(f"선택한 설정의 DMI 계산 기간: {profiles[self.selected].get('dmi_period', 14)}일")
+
+    def _refresh_profile_state_table(self) -> None:
+        """Show all 20 saved symbol/profile summaries without opening each page."""
+        for item in self.profile_state_tree.get_children():
+            self.profile_state_tree.delete(item)
+        for index, profile in enumerate(self.profiles):
+            symbol = str(profile.get("symbol", "")).strip()
+            name = str(profile.get("symbol_name", "")).strip()
+            bar = profile.get("bar", {})
+            minute = bar.get("minute", {})
+            daily = bar.get("daily", {})
+            minute_text = f"{minute.get('shortPeriod', 5)} / {minute.get('longPeriod', 20)}"
+            daily_text = f"{daily.get('shortPeriod', 5)} / {daily.get('longPeriod', 20)}"
+            configured = bool(symbol and name)
+            status = "설정 완료" if configured else "종목 미설정"
+            self.profile_state_tree.insert(
+                "",
+                "end",
+                values=(
+                    f"설정 {index + 1}",
+                    symbol or "-",
+                    name or "-",
+                    f"{profile.get('dmi_period', 14)}일",
+                    minute_text,
+                    daily_text,
+                    status,
+                ),
+                tags=("configured" if configured else "empty",),
+            )
 
     def reload_selected(self) -> None:
         self.profiles = [deepcopy(item) for item in self.parent_app._strategy_profiles]
