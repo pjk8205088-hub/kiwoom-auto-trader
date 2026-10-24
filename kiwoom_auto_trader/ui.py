@@ -435,11 +435,6 @@ class StrategySettingsPanel(ttk.Frame):
         self.profile_style.configure("ConfiguredProfile.TButton", foreground="#0b6b35")
         self.profile_style.configure("EmptyProfile.TButton", foreground="#333333")
 
-        toolbar = ttk.Frame(self, padding=(12, 4, 12, 2))
-        toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="설정 저장", command=self.save).pack(side="left")
-        ttk.Button(toolbar, text="다시 보기", command=self.reload_selected).pack(side="left", padx=6)
-
         self.summary = tk.StringVar()
         self.mode_summary = ttk.Label(self, padding=(14, 2))
         self.mode_summary.pack(anchor="w")
@@ -449,7 +444,13 @@ class StrategySettingsPanel(ttk.Frame):
         check.pack(fill="x", padx=12, pady=(0, 4))
         self.check_title = tk.StringVar()
         self.check_detail = tk.StringVar(value="20개 설정은 각각 저장됩니다. V8 매매 엔진에 실제 적용되는 항목은 DMI 기간입니다.")
-        self.check_label = tk.Label(check, textvariable=self.check_title, font=("Malgun Gothic", 10, "bold"), anchor="w")
+        check_actions = ttk.Frame(check)
+        check_actions.pack(side="right", anchor="ne", padx=(12, 0))
+        ttk.Button(check_actions, text="설정 확정", width=12, command=self.confirm_selected_profile).pack(side="left", padx=(4, 0))
+        ttk.Button(check_actions, text="현재 저장값으로 초기화", width=20, command=self.reset_selected_profile).pack(side="left", padx=(4, 0))
+        check_row = ttk.Frame(check)
+        check_row.pack(fill="x")
+        self.check_label = tk.Label(check_row, textvariable=self.check_title, font=("Malgun Gothic", 10, "bold"), anchor="w")
         self.check_label.pack(fill="x")
         ttk.Label(check, textvariable=self.check_detail, anchor="w").pack(fill="x")
 
@@ -718,6 +719,17 @@ class StrategySettingsPanel(ttk.Frame):
             variable.set(value)
         self.update_summary()
 
+    def reset_selected_profile(self) -> None:
+        """Restore the selected profile from the last saved settings."""
+        self.reload_selected()
+        self.status.set(f"설정 {self.selected + 1}이 현재 저장값으로 초기화되었습니다.")
+
+    def confirm_selected_profile(self) -> None:
+        """Validate, save, and apply the currently selected strategy profile."""
+        self.save()
+        if not self.check_title.get().startswith("● 설정 구조가 맞지 않아"):
+            self.status.set(f"설정 {self.selected + 1}이 확정되어 저장·적용되었습니다.")
+
     def save(self) -> None:
         profiles, errors = self._collect_profiles()
         if errors:
@@ -966,7 +978,6 @@ class TraderApp(tk.Tk):
         ttk.Label(controls, textvariable=self.dmi_minus_var).grid(row=1, column=7, sticky="w")
         ttk.Label(controls, text="ADX").grid(row=0, column=8, sticky="w")
         ttk.Label(controls, textvariable=self.adx_var).grid(row=1, column=8, sticky="w")
-        ttk.Button(controls, text="설정 저장", command=self._save_settings).grid(row=1, column=9, sticky="ew")
 
         actions = ttk.Frame(controls)
         actions.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(6, 0))
