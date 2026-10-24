@@ -4,12 +4,14 @@ import json
 import tempfile
 import tkinter as tk
 import webbrowser
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from . import RELEASE_LABEL
 from .charting import moving_average, timeframe_label
+from .strategy_profile_schema import CHOICES, FIELD_LABELS, GROUP_LABELS, merge_profile, new_profile, validate_profile
 from .kiwoom_api import (
     KIWOOM_HOME_PAGE,
     is_valid_account_password,
@@ -425,13 +427,14 @@ class StrategySettingsWindow(tk.Toplevel):
     def __init__(self, parent: "TraderApp") -> None:
         super().__init__(parent)
         self.parent_app = parent
-        self.profiles = [dict(item) for item in parent._strategy_profiles]
+        self.profiles = [deepcopy(item) for item in parent._strategy_profiles]
         self.selected = parent._active_strategy_profile
         self.title("설정 창 · 전략 설정")
-        self.geometry("1000x700")
-        self.minsize(760, 600)
+        self.geometry("1180x820")
+        self.minsize(900, 640)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.field_vars: dict[tuple[int, tuple[str, ...]], tuple[tk.Variable, type, dict | None]] = {}
 
         toolbar = ttk.Frame(self, padding=(12, 10, 12, 4))
         toolbar.pack(fill="x")
@@ -447,7 +450,7 @@ class StrategySettingsWindow(tk.Toplevel):
         check = ttk.LabelFrame(self, text="설정 확인", padding=9)
         check.pack(fill="x", padx=12, pady=(0, 8))
         self.check_title = tk.StringVar()
-        self.check_detail = tk.StringVar(value="선택한 DMI 기간을 기존 거래 판단에 적용합니다.")
+        self.check_detail = tk.StringVar(value="20개 설정은 각각 저장됩니다. V8 매매 엔진에 실제 적용되는 항목은 DMI 기간입니다.")
         self.check_label = tk.Label(check, textvariable=self.check_title, font=("Malgun Gothic", 10, "bold"), anchor="w")
         self.check_label.pack(fill="x")
         ttk.Label(check, textvariable=self.check_detail, anchor="w").pack(fill="x")
@@ -467,56 +470,99 @@ class StrategySettingsWindow(tk.Toplevel):
             self.profile_nav.columnconfigure(column, weight=1, uniform="profile")
 
         self.profile_tabs = ttk.Notebook(self)
-        self.profile_tabs.pack(fill="x", padx=12, pady=(0, 8))
+        self.profile_tabs.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         for index in range(20):
-            self.profile_tabs.add(ttk.Frame(self.profile_tabs), text=f"설정 {index + 1}")
+            page = ttk.Frame(self.profile_tabs)
+            self.profile_tabs.add(page, text=f"설정 {index + 1}")
+            self._build_profile_page(page, index)
         state_page = ttk.Frame(self.profile_tabs, padding=8)
         self.profile_tabs.add(state_page, text="현재 종목 상태")
         self.active_symbol_status = tk.StringVar()
         ttk.Label(state_page, textvariable=self.active_symbol_status, anchor="w").pack(fill="x")
         self.profile_tabs.bind("<<NotebookTabChanged>>", self._on_profile_tab_changed)
 
-        editor = ttk.LabelFrame(self, text="선택한 설정", padding=14)
-        editor.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        editor.columnconfigure(1, weight=1)
-        ttk.Label(editor, text="DMI 계산 기간(일)").grid(row=0, column=0, sticky="w", padx=(2, 14), pady=8)
-        self.period_var = tk.StringVar()
-        self.period_input = ttk.Spinbox(editor, from_=1, to=99, textvariable=self.period_var, width=12, justify="right")
-        self.period_input.grid(row=0, column=1, sticky="w", pady=8)
-        ttk.Label(editor, text="저장하면 선택한 DMI 기간이 V8의 기존 매매 판단에 적용됩니다.", foreground="#555555").grid(
-            row=1, column=0, columnspan=2, sticky="w", padx=2, pady=(0, 8)
-        )
-        ttk.Label(
-            editor,
-            text="KKS 모의엔진의 상세 매수·매도 규칙은 V8 매매 엔진에 연결되어 있지 않아 여기서 적용되지 않습니다.",
-            foreground="#8a4b08",
-            wraplength=880,
-            justify="left",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=2, pady=(0, 8))
+        editor = ttk.Frame(self, padding=(12, 0, 12, 8))
+        editor.pack(fill="x")
         self.status = tk.StringVar(value="설정 값을 확인해 주세요.")
-        ttk.Label(editor, textvariable=self.status, foreground="#596579").grid(row=3, column=0, columnspan=2, sticky="w", padx=2, pady=8)
+        ttk.Label(editor, textvariable=self.status, foreground="#596579").pack(anchor="w")
         self.select_profile(self.selected, store_current=False)
 
-    def _read_period(self) -> int | None:
-        try:
-            value = int(self.period_var.get())
-        except (TypeError, ValueError):
-            return None
-        return value if 1 <= value <= 99 else None
+    def _build_profile_page(self, page: ttk.Frame, index: int) -> None:
+        canvas = tk.Canvas(page, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(page, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        body = ttk.Frame(canvas, padding=10)
+        window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda _event, c=canvas: c.configure(scrollregion=c.bbox("all")))
+        canvas.bind("<Configure>", lambda event, c=canvas, item=window_id: c.itemconfigure(item, width=event.width))
+        profile = self.profiles[index]
+        basics = ttk.LabelFrame(body, text="DMI 기준", padding=8)
+        basics.pack(fill="x", pady=(0, 6))
+        dmi_var = tk.StringVar(value=str(profile.get("dmi_period", 14)))
+        ttk.Label(basics, text="DMI 계산 기간(일)").pack(side="left", padx=(0, 8))
+        ttk.Spinbox(basics, from_=1, to=99, textvariable=dmi_var, width=8, justify="right").pack(side="left")
+        self.field_vars[(index, ("dmi_period",))] = (dmi_var, int, None)
+        for section in ("bar", "buy", "buyBlock", "sell", "sellBlock", "order"):
+            box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=9)
+            box.pack(fill="x", pady=4)
+            self._build_fields(box, index, profile[section])
 
-    def _store_current(self) -> bool:
-        value = self._read_period()
-        if value is None:
-            messagebox.showwarning("DMI 기간 확인", "DMI 기간은 1부터 99까지 숫자로 입력해 주세요.", parent=self)
-            return False
-        self.profiles[self.selected]["dmi_period"] = value
-        return True
+    def _build_fields(self, parent: ttk.LabelFrame, index: int, values: dict, path: tuple[str, ...] = ()) -> None:
+        row = 0
+        for key, value in values.items():
+            label = FIELD_LABELS.get(key, key)
+            if isinstance(value, dict):
+                frame = ttk.LabelFrame(parent, text=GROUP_LABELS.get(key, label), padding=7)
+                frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=3, pady=4)
+                self._build_fields(frame, index, value, path + (key,))
+            else:
+                ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=5, pady=3)
+                if isinstance(value, bool):
+                    variable = tk.BooleanVar(value=value)
+                    widget = ttk.Checkbutton(parent, variable=variable)
+                    reverse = None
+                elif key in CHOICES:
+                    reverse = {label: raw for raw, label in CHOICES[key].items()}
+                    variable = tk.StringVar(value=CHOICES[key].get(value, value))
+                    widget = ttk.Combobox(parent, textvariable=variable, values=tuple(CHOICES[key].values()), state="readonly", width=28)
+                else:
+                    reverse = None
+                    variable = tk.StringVar(value=str(value))
+                    widget = ttk.Entry(parent, textvariable=variable, width=24)
+                widget.grid(row=row, column=1, sticky="w", padx=8, pady=3)
+                self.field_vars[(index, path + (key,))] = (variable, type(value), reverse)
+            row += 1
+        parent.columnconfigure(0, minsize=255)
+        parent.columnconfigure(1, weight=1)
+
+    def _collect_profiles(self) -> tuple[list[dict], list[str]]:
+        result = deepcopy(self.profiles)
+        errors = []
+        for (index, path), (variable, value_type, reverse) in self.field_vars.items():
+            try:
+                value = variable.get()
+                if reverse is not None:
+                    value = reverse[value]
+                elif value_type is int:
+                    value = int(value)
+                elif value_type is float:
+                    value = float(value)
+                elif value_type is str:
+                    value = str(value).strip()
+                target = result[index]
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = value
+            except (ValueError, KeyError, TypeError, tk.TclError):
+                errors.append(f"설정 {index + 1}: {FIELD_LABELS.get(path[-1], path[-1])} 입력을 확인해 주세요")
+        for index, profile in enumerate(result):
+            errors.extend(validate_profile(profile, index))
+        return result, errors
 
     def select_profile(self, index: int, store_current: bool = True) -> None:
-        if store_current and not self._store_current():
-            return
         self.selected = index
-        self.period_var.set(str(self.profiles[index]["dmi_period"]))
         if self.profile_tabs.index(self.profile_tabs.select()) != index:
             self.profile_tabs.select(index)
         self.update_summary()
@@ -524,13 +570,9 @@ class StrategySettingsWindow(tk.Toplevel):
     def _on_profile_tab_changed(self, _event=None) -> None:
         selected = self.profile_tabs.index(self.profile_tabs.select())
         if selected < 20 and selected != self.selected:
-            if not self._store_current():
-                self.profile_tabs.select(self.selected)
-                return
             self.select_profile(selected, store_current=False)
 
     def update_summary(self) -> None:
-        value = self._read_period()
         app = self.parent_app
         symbol = normalize_symbol(app.symbol_var.get()) or "종목 미선택"
         mode = app.service.account_info.server_type if app.service.account_info.connected else "계좌 연결 전"
@@ -545,23 +587,33 @@ class StrategySettingsWindow(tk.Toplevel):
             f"현재 적용 DMI 기간: {app.dmi_period_var.get()}일 · 설정 {app._active_strategy_profile + 1} / 20"
         )
         self.selected_profile_label.set(f"현재 선택: 설정 {self.selected + 1} / 20")
-        if value is None:
-            self.check_title.set("● DMI 기간 입력값을 확인해 주세요")
+        _, errors = self._collect_profiles()
+        if errors:
+            self.check_title.set(f"● 확인이 필요한 설정이 있습니다 ({len(errors)}건)")
             self.check_label.configure(fg="#b3261e")
+            self.check_detail.set(" · ".join(errors[:3]))
         else:
-            self.check_title.set("● DMI 기간 입력값이 정상입니다")
+            self.check_title.set("● 20개 설정의 입력값이 정상입니다")
             self.check_label.configure(fg="#16833a")
-        self.status.set(f"선택한 설정의 DMI 계산 기간: {self.period_var.get()}일")
+            self.check_detail.set("설정값은 저장됩니다. 실제 매매 엔진에 연결된 값은 선택 프로필의 DMI 기간입니다.")
+        self.status.set(f"선택한 설정의 DMI 계산 기간: {self.profiles[self.selected].get('dmi_period', 14)}일")
 
     def reload_selected(self) -> None:
-        self.period_var.set(str(self.profiles[self.selected]["dmi_period"]))
-        self.update_summary()
+        self.profiles = [deepcopy(item) for item in self.parent_app._strategy_profiles]
+        self.destroy()
+        self.parent_app._strategy_settings_window = StrategySettingsWindow(self.parent_app)
 
     def save(self) -> None:
-        if not self._store_current():
+        profiles, errors = self._collect_profiles()
+        if errors:
+            self.check_title.set(f"● 설정값을 확인해 주세요 ({len(errors)}건)")
+            self.check_label.configure(fg="#b3261e")
+            self.check_detail.set(" · ".join(errors[:5]))
+            self.status.set("빨간 안내를 확인한 뒤 다시 저장해 주세요.")
             return
         app = self.parent_app
-        app._strategy_profiles = [dict(item) for item in self.profiles]
+        app._strategy_profiles = profiles
+        self.profiles = profiles
         app._active_strategy_profile = self.selected
         app.dmi_period_var.set(str(self.profiles[self.selected]["dmi_period"]))
         try:
@@ -614,7 +666,7 @@ class TraderApp(tk.Tk):
         self._last_auto_market_state: tuple[str, str, bool] | None = None
         self._last_realtime_display_key: tuple | None = None
         self._strategy_profile_path = Path.home() / "Documents" / "KiwoomAutoTrader" / "strategy_profiles.json"
-        self._strategy_profiles = [{"dmi_period": 14} for _ in range(20)]
+        self._strategy_profiles = [new_profile(index) for index in range(20)]
         self._active_strategy_profile = 0
         self._load_strategy_profiles()
         self._strategy_settings_window: StrategySettingsWindow | None = None
@@ -1448,13 +1500,12 @@ class TraderApp(tk.Tk):
             profiles = saved.get("profiles")
             if not isinstance(profiles, list) or len(profiles) != 20:
                 return
-            values = [int(item.get("dmi_period", 14)) for item in profiles]
-            if any(value < 1 or value > 99 for value in values):
-                return
             active = int(saved.get("active", 0))
             if not 0 <= active < 20:
                 return
-            self._strategy_profiles = [{"dmi_period": value} for value in values]
+            self._strategy_profiles = [merge_profile(item, index) for index, item in enumerate(profiles)]
+            if any(not 1 <= int(item["dmi_period"]) <= 99 for item in self._strategy_profiles):
+                return
             self._active_strategy_profile = active
         except (OSError, ValueError, TypeError, AttributeError):
             return
