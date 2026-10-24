@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import tkinter as tk
 import webbrowser
@@ -420,6 +421,158 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         self.destroy()
 
 
+class StrategySettingsWindow(tk.Toplevel):
+    def __init__(self, parent: "TraderApp") -> None:
+        super().__init__(parent)
+        self.parent_app = parent
+        self.profiles = [dict(item) for item in parent._strategy_profiles]
+        self.selected = parent._active_strategy_profile
+        self.title("설정 창 · 전략 설정")
+        self.geometry("1000x700")
+        self.minsize(760, 600)
+        self.transient(parent)
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+        toolbar = ttk.Frame(self, padding=(12, 10, 12, 4))
+        toolbar.pack(fill="x")
+        ttk.Button(toolbar, text="설정 저장", command=self.save).pack(side="left")
+        ttk.Button(toolbar, text="다시 보기", command=self.reload_selected).pack(side="left", padx=6)
+        ttk.Button(toolbar, text="닫기", command=self.destroy).pack(side="left")
+
+        self.summary = tk.StringVar()
+        self.mode_summary = ttk.Label(self, padding=(14, 8))
+        self.mode_summary.pack(anchor="w")
+        ttk.Label(self, textvariable=self.summary, padding=(14, 0, 14, 8)).pack(anchor="w")
+
+        check = ttk.LabelFrame(self, text="설정 확인", padding=9)
+        check.pack(fill="x", padx=12, pady=(0, 8))
+        self.check_title = tk.StringVar()
+        self.check_detail = tk.StringVar(value="선택한 DMI 기간을 기존 거래 판단에 적용합니다.")
+        self.check_label = tk.Label(check, textvariable=self.check_title, font=("Malgun Gothic", 10, "bold"), anchor="w")
+        self.check_label.pack(fill="x")
+        ttk.Label(check, textvariable=self.check_detail, anchor="w").pack(fill="x")
+
+        self.profile_nav = ttk.Frame(self, padding=(12, 4, 12, 8))
+        self.profile_nav.pack(fill="x")
+        self.profile_buttons: list[ttk.Button] = []
+        self.selected_profile_label = tk.StringVar()
+        ttk.Label(self.profile_nav, textvariable=self.selected_profile_label, foreground="#176b3a").grid(
+            row=4, column=0, columnspan=5, sticky="w", padx=4, pady=(5, 0)
+        )
+        for index in range(20):
+            button = ttk.Button(self.profile_nav, text=f"설정 {index + 1}", command=lambda i=index: self.select_profile(i))
+            button.grid(row=index // 5, column=index % 5, sticky="ew", padx=3, pady=3)
+            self.profile_buttons.append(button)
+        for column in range(5):
+            self.profile_nav.columnconfigure(column, weight=1, uniform="profile")
+
+        self.profile_tabs = ttk.Notebook(self)
+        self.profile_tabs.pack(fill="x", padx=12, pady=(0, 8))
+        for index in range(20):
+            self.profile_tabs.add(ttk.Frame(self.profile_tabs), text=f"설정 {index + 1}")
+        state_page = ttk.Frame(self.profile_tabs, padding=8)
+        self.profile_tabs.add(state_page, text="현재 종목 상태")
+        self.active_symbol_status = tk.StringVar()
+        ttk.Label(state_page, textvariable=self.active_symbol_status, anchor="w").pack(fill="x")
+        self.profile_tabs.bind("<<NotebookTabChanged>>", self._on_profile_tab_changed)
+
+        editor = ttk.LabelFrame(self, text="선택한 설정", padding=14)
+        editor.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        editor.columnconfigure(1, weight=1)
+        ttk.Label(editor, text="DMI 계산 기간(일)").grid(row=0, column=0, sticky="w", padx=(2, 14), pady=8)
+        self.period_var = tk.StringVar()
+        self.period_input = ttk.Spinbox(editor, from_=1, to=99, textvariable=self.period_var, width=12, justify="right")
+        self.period_input.grid(row=0, column=1, sticky="w", pady=8)
+        ttk.Label(editor, text="저장하면 선택한 DMI 기간이 V8의 기존 매매 판단에 적용됩니다.", foreground="#555555").grid(
+            row=1, column=0, columnspan=2, sticky="w", padx=2, pady=(0, 8)
+        )
+        ttk.Label(
+            editor,
+            text="KKS 모의엔진의 상세 매수·매도 규칙은 V8 매매 엔진에 연결되어 있지 않아 여기서 적용되지 않습니다.",
+            foreground="#8a4b08",
+            wraplength=880,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=2, pady=(0, 8))
+        self.status = tk.StringVar(value="설정 값을 확인해 주세요.")
+        ttk.Label(editor, textvariable=self.status, foreground="#596579").grid(row=3, column=0, columnspan=2, sticky="w", padx=2, pady=8)
+        self.select_profile(self.selected, store_current=False)
+
+    def _read_period(self) -> int | None:
+        try:
+            value = int(self.period_var.get())
+        except (TypeError, ValueError):
+            return None
+        return value if 1 <= value <= 99 else None
+
+    def _store_current(self) -> bool:
+        value = self._read_period()
+        if value is None:
+            messagebox.showwarning("DMI 기간 확인", "DMI 기간은 1부터 99까지 숫자로 입력해 주세요.", parent=self)
+            return False
+        self.profiles[self.selected]["dmi_period"] = value
+        return True
+
+    def select_profile(self, index: int, store_current: bool = True) -> None:
+        if store_current and not self._store_current():
+            return
+        self.selected = index
+        self.period_var.set(str(self.profiles[index]["dmi_period"]))
+        if self.profile_tabs.index(self.profile_tabs.select()) != index:
+            self.profile_tabs.select(index)
+        self.update_summary()
+
+    def _on_profile_tab_changed(self, _event=None) -> None:
+        selected = self.profile_tabs.index(self.profile_tabs.select())
+        if selected < 20 and selected != self.selected:
+            if not self._store_current():
+                self.profile_tabs.select(self.selected)
+                return
+            self.select_profile(selected, store_current=False)
+
+    def update_summary(self) -> None:
+        value = self._read_period()
+        app = self.parent_app
+        symbol = normalize_symbol(app.symbol_var.get()) or "종목 미선택"
+        mode = app.service.account_info.server_type if app.service.account_info.connected else "계좌 연결 전"
+        self.mode_summary.configure(text=f"실행 환경: {mode} · V8 기존 매매 판단 유지 · 지원 설정: DMI 기간")
+        self.summary.set(
+            f"현재 종목: {app.symbol_name_var.get() or symbol} · "
+            f"종목별 운용 한도: {app.capital_var.get()}원 · "
+            f"선택 항목: 설정 {self.selected + 1} / 20"
+        )
+        self.active_symbol_status.set(
+            f"선택 종목: {app.symbol_name_var.get() or symbol} ({symbol}) · "
+            f"현재 적용 DMI 기간: {app.dmi_period_var.get()}일 · 설정 {app._active_strategy_profile + 1} / 20"
+        )
+        self.selected_profile_label.set(f"현재 선택: 설정 {self.selected + 1} / 20")
+        if value is None:
+            self.check_title.set("● DMI 기간 입력값을 확인해 주세요")
+            self.check_label.configure(fg="#b3261e")
+        else:
+            self.check_title.set("● DMI 기간 입력값이 정상입니다")
+            self.check_label.configure(fg="#16833a")
+        self.status.set(f"선택한 설정의 DMI 계산 기간: {self.period_var.get()}일")
+
+    def reload_selected(self) -> None:
+        self.period_var.set(str(self.profiles[self.selected]["dmi_period"]))
+        self.update_summary()
+
+    def save(self) -> None:
+        if not self._store_current():
+            return
+        app = self.parent_app
+        app._strategy_profiles = [dict(item) for item in self.profiles]
+        app._active_strategy_profile = self.selected
+        app.dmi_period_var.set(str(self.profiles[self.selected]["dmi_period"]))
+        try:
+            app._save_settings()
+        except (OSError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("설정 저장 실패", f"설정 저장 또는 적용에 실패했습니다.\n{exc}", parent=self)
+            return
+        self.status.set(f"설정 {self.selected + 1} 저장 및 적용 완료")
+        self.update_summary()
+
+
 class TraderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -460,6 +613,11 @@ class TraderApp(tk.Tk):
         self._real_order_session_armed = False
         self._last_auto_market_state: tuple[str, str, bool] | None = None
         self._last_realtime_display_key: tuple | None = None
+        self._strategy_profile_path = Path.home() / "Documents" / "KiwoomAutoTrader" / "strategy_profiles.json"
+        self._strategy_profiles = [{"dmi_period": 14} for _ in range(20)]
+        self._active_strategy_profile = 0
+        self._load_strategy_profiles()
+        self._strategy_settings_window: StrategySettingsWindow | None = None
         self._build_ui()
         self._buy_percent_trace_id = self.buy_percent_var.trace_add(
             "write",
@@ -530,6 +688,7 @@ class TraderApp(tk.Tk):
             padx=(0, 8),
         )
         ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=7)
+        ttk.Button(header, text="설정 열기", command=self._open_strategy_settings).grid(row=0, column=8, padx=(8, 0))
         self._update_connection_badge(False)
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
@@ -541,7 +700,7 @@ class TraderApp(tk.Tk):
         self.symbol_name_var = tk.StringVar(value="")
         self.capital_var = tk.StringVar(value="1000000")
         self.baseline_status_var = tk.StringVar(value="미설정")
-        self.dmi_period_var = tk.StringVar(value="14")
+        self.dmi_period_var = tk.StringVar(value=str(self._strategy_profiles[self._active_strategy_profile]["dmi_period"]))
         self.dmi_state_var = tk.StringVar(value="계산 전")
         self.dmi_plus_var = tk.StringVar(value="-")
         self.dmi_minus_var = tk.StringVar(value="-")
@@ -722,7 +881,7 @@ class TraderApp(tk.Tk):
 
         order_controls = ttk.Frame(controls)
         order_controls.grid(row=4, column=0, columnspan=10, sticky="ew", pady=(8, 0))
-        for column in range(4):
+        for column in range(2):
             order_controls.columnconfigure(column, weight=1, uniform="order-control")
 
         price_box = ttk.LabelFrame(order_controls, text="현재가", padding=8)
@@ -760,6 +919,9 @@ class TraderApp(tk.Tk):
 
         self._build_percent_trigger_box(order_controls, "BUY", 2)
         self._build_percent_trigger_box(order_controls, "SELL", 3)
+        for widget in order_controls.grid_slaves(row=0):
+            if int(widget.grid_info().get("column", 0)) >= 2:
+                widget.grid_remove()
 
         api_actions = ttk.Frame(controls)
         api_actions.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
@@ -813,8 +975,22 @@ class TraderApp(tk.Tk):
             row=0, column=0, sticky="ew", pady=(0, 10)
         )
 
+        detail_actions = ttk.Frame(body)
+        detail_actions.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(
+            detail_actions,
+            text="계좌·주문·로그 열기",
+            command=self._open_operations_window,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            detail_actions,
+            text="매수·매도 이력 열기",
+            command=self._open_trade_history_window,
+        ).pack(side="left")
+
         self.main_notebook = ttk.Notebook(body)
-        self.main_notebook.grid(row=1, column=0, sticky="nsew")
+        # The chart remains available through the existing chart pop-up button only.
+        self.main_notebook.grid_remove()
 
         self.dmi_chart_tab = ttk.Frame(self.main_notebook, padding=(10, 10, 10, 8))
         self.dmi_chart_tab.columnconfigure(0, weight=1)
@@ -926,37 +1102,14 @@ class TraderApp(tk.Tk):
 
         chart_workspace = ttk.Frame(self.dmi_chart_tab)
         chart_workspace.grid(row=2, column=0, sticky="nsew")
-        chart_workspace.columnconfigure(0, minsize=150)
-        chart_workspace.columnconfigure(1, weight=1)
+        chart_workspace.columnconfigure(0, weight=1)
         chart_workspace.rowconfigure(0, weight=1)
 
-        indicator_panel = ttk.Frame(chart_workspace, width=150, padding=(4, 8, 10, 4))
-        indicator_panel.grid(row=0, column=0, sticky="nsw")
-        ttk.Label(indicator_panel, text="지표 설정", font=("Malgun Gothic", 10, "bold")).pack(
-            anchor="w",
-            pady=(0, 8),
-        )
+        # Keep indicator state and drawing logic, but omit its on-screen controls and legend.
         self.show_pattern_var = tk.BooleanVar(value=True)
         self.show_ma5_var = tk.BooleanVar(value=True)
         self.show_ma20_var = tk.BooleanVar(value=True)
         self.show_dmi_chart_var = tk.BooleanVar(value=True)
-        for label, variable in (
-            ("강/약 배경", self.show_pattern_var),
-            ("이동평균 MA5", self.show_ma5_var),
-            ("이동평균 MA20", self.show_ma20_var),
-            ("DMI / ADX", self.show_dmi_chart_var),
-        ):
-            ttk.Checkbutton(
-                indicator_panel,
-                text=label,
-                variable=variable,
-                command=self._draw_main_dmi_chart,
-            ).pack(anchor="w", pady=2)
-        ttk.Separator(indicator_panel, orient="horizontal").pack(fill="x", pady=10)
-        ttk.Label(indicator_panel, text="양봉", foreground="#d64545").pack(anchor="w")
-        ttk.Label(indicator_panel, text="음봉", foreground="#2f62bd").pack(anchor="w", pady=(3, 0))
-        ttk.Label(indicator_panel, text="MA5", foreground="#d92787").pack(anchor="w", pady=(8, 0))
-        ttk.Label(indicator_panel, text="MA20", foreground="#3459c7").pack(anchor="w", pady=(3, 0))
 
         self.main_chart_canvas = tk.Canvas(
             chart_workspace,
@@ -964,7 +1117,7 @@ class TraderApp(tk.Tk):
             highlightthickness=1,
             highlightbackground="#c8c8c8",
         )
-        self.main_chart_canvas.grid(row=0, column=1, sticky="nsew")
+        self.main_chart_canvas.grid(row=0, column=0, sticky="nsew")
         self.main_chart_canvas.bind("<Configure>", lambda _event: self._draw_main_dmi_chart())
         self.main_chart_canvas.bind(
             "<Motion>",
@@ -975,11 +1128,16 @@ class TraderApp(tk.Tk):
             lambda _event: self.main_chart_canvas.delete("crosshair"),
         )
 
-        self.operations_tab = ttk.Frame(self.main_notebook, padding=(8, 10, 8, 8))
+        self.operations_window = tk.Toplevel(self)
+        self.operations_window.title("계좌·주문·로그")
+        self.operations_window.geometry("1180x680")
+        self.operations_window.withdraw()
+        self.operations_window.protocol("WM_DELETE_WINDOW", self.operations_window.withdraw)
+        self.operations_tab = ttk.Frame(self.operations_window, padding=(8, 10, 8, 8))
         for column in range(3):
             self.operations_tab.columnconfigure(column, weight=1)
         self.operations_tab.rowconfigure(0, weight=1)
-        self.main_notebook.add(self.operations_tab, text="계좌·주문·로그")
+        self.operations_tab.pack(fill="both", expand=True)
 
         self.holdings = self._table(
             self.operations_tab,
@@ -995,10 +1153,15 @@ class TraderApp(tk.Tk):
         )
         self.logs = self._table(self.operations_tab, "시스템 로그", ("시간", "레벨", "분류", "메시지"), 2)
 
-        self.trade_history_tab = ttk.Frame(self.main_notebook, padding=(10, 10, 10, 8))
+        self.trade_history_window = tk.Toplevel(self)
+        self.trade_history_window.title("매수·매도 이력")
+        self.trade_history_window.geometry("1280x620")
+        self.trade_history_window.withdraw()
+        self.trade_history_window.protocol("WM_DELETE_WINDOW", self.trade_history_window.withdraw)
+        self.trade_history_tab = ttk.Frame(self.trade_history_window, padding=(10, 10, 10, 8))
         self.trade_history_tab.columnconfigure(0, weight=1)
         self.trade_history_tab.rowconfigure(1, weight=1)
-        self.main_notebook.add(self.trade_history_tab, text="매수·매도 이력")
+        self.trade_history_tab.pack(fill="both", expand=True)
 
         trade_toolbar = ttk.Frame(self.trade_history_tab)
         trade_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
@@ -1269,9 +1432,54 @@ class TraderApp(tk.Tk):
             return
         webbrowser.open(path.resolve().as_uri())
 
+    def _open_operations_window(self) -> None:
+        self.operations_window.deiconify()
+        self.operations_window.lift()
+        self.operations_window.focus_force()
+
+    def _open_trade_history_window(self) -> None:
+        self.trade_history_window.deiconify()
+        self.trade_history_window.lift()
+        self.trade_history_window.focus_force()
+
+    def _load_strategy_profiles(self) -> None:
+        try:
+            saved = json.loads(self._strategy_profile_path.read_text(encoding="utf-8"))
+            profiles = saved.get("profiles")
+            if not isinstance(profiles, list) or len(profiles) != 20:
+                return
+            values = [int(item.get("dmi_period", 14)) for item in profiles]
+            if any(value < 1 or value > 99 for value in values):
+                return
+            active = int(saved.get("active", 0))
+            if not 0 <= active < 20:
+                return
+            self._strategy_profiles = [{"dmi_period": value} for value in values]
+            self._active_strategy_profile = active
+        except (OSError, ValueError, TypeError, AttributeError):
+            return
+
+    def _save_strategy_profiles(self) -> None:
+        path = self._strategy_profile_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        payload = {"active": self._active_strategy_profile, "profiles": self._strategy_profiles}
+        temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temporary.replace(path)
+
+    def _open_strategy_settings(self) -> None:
+        if self._strategy_settings_window is not None and self._strategy_settings_window.winfo_exists():
+            self._strategy_settings_window.deiconify()
+            self._strategy_settings_window.lift()
+            self._strategy_settings_window.focus_force()
+            return
+        self._strategy_settings_window = StrategySettingsWindow(self)
+
     def _save_settings(self) -> None:
         settings = StrategySettings(dmi_period=max(1, int(float(self.dmi_period_var.get()))))
+        self._strategy_profiles[self._active_strategy_profile]["dmi_period"] = settings.dmi_period
         self.service.configure(self.symbol_var.get(), self._operating_capital(), settings)
+        self._save_strategy_profiles()
         if self.symbol_var.get().strip() != self.service.symbol:
             self.symbol_var.set(self.service.symbol)
         if self.service.symbol_name:
@@ -1312,6 +1520,12 @@ class TraderApp(tk.Tk):
     def _close_app(self) -> None:
         self._clear_real_order_authorization()
         self._clear_account_password_session()
+        try:
+            self.service.stop()
+            self.service.unregister_real_time()
+            self.service.rest_api.clear_session()
+        except Exception:
+            pass
         self.destroy()
 
     def _real_trading_account(self) -> bool:

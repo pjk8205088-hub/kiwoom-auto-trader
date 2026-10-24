@@ -21,7 +21,7 @@ def _acquire_single_instance_mutex(kernel32: Any | None = None) -> Any | None:
         create_mutex.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
         create_mutex.restype = wintypes.HANDLE
 
-    handle = create_mutex(None, False, INSTANCE_MUTEX_NAME)
+    handle = create_mutex(None, True, INSTANCE_MUTEX_NAME)
     if not handle:
         raise OSError("자동매매 프로그램 단일 실행 잠금을 만들지 못했습니다.")
     if int(library.GetLastError()) == ERROR_ALREADY_EXISTS:
@@ -37,7 +37,12 @@ def _release_single_instance_mutex(handle: Any, kernel32: Any | None = None) -> 
     import ctypes
 
     library = kernel32 or ctypes.windll.kernel32
-    library.CloseHandle(handle)
+    release_mutex = getattr(library, "ReleaseMutex", None)
+    try:
+        if release_mutex is not None:
+            release_mutex(handle)
+    finally:
+        library.CloseHandle(handle)
 
 
 def _show_already_running_message() -> None:
@@ -94,6 +99,7 @@ def main() -> None:
         _show_already_running_message()
         return
 
+    app = None
     try:
         _apply_windows_dpi_awareness()
 
@@ -102,7 +108,34 @@ def main() -> None:
         app = TraderApp()
         app.mainloop()
     finally:
-        _release_single_instance_mutex(mutex_handle)
+        try:
+            if app is not None:
+                _shutdown_app(app)
+        finally:
+            _release_single_instance_mutex(mutex_handle)
+
+
+def _shutdown_app(app: Any) -> None:
+    """Stop background market connections before releasing the process lock."""
+    service = getattr(app, "service", None)
+    if service is None:
+        return
+    for cleanup in (
+        getattr(service, "stop", None),
+        getattr(service, "unregister_real_time", None),
+    ):
+        if callable(cleanup):
+            try:
+                cleanup()
+            except Exception:
+                pass
+    rest_api = getattr(service, "rest_api", None)
+    clear_session = getattr(rest_api, "clear_session", None)
+    if callable(clear_session):
+        try:
+            clear_session()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
