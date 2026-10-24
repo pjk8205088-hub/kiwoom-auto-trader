@@ -534,14 +534,14 @@ class StrategySettingsPanel(ttk.Frame):
         for section_index, section in enumerate(("bar", "buy", "buyBlock", "sell", "sellBlock", "order")):
             box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=9)
             if section == "bar":
-                box.grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=4)
+                box.grid(row=0, column=0, columnspan=5, sticky="ew", padx=3, pady=4)
             else:
-                row = 1 + (section_index - 1) // 2
-                column = (section_index - 1) % 2
+                row = 1 + (section_index - 1) // 5
+                column = (section_index - 1) % 5
                 box.grid(row=row, column=column, sticky="nsew", padx=3, pady=4)
             self._build_fields(box, index, profile[section], (section,))
-        body.columnconfigure(0, weight=1, uniform="profile-column")
-        body.columnconfigure(1, weight=1, uniform="profile-column")
+        for column in range(5):
+            body.columnconfigure(column, weight=1, uniform="profile-column")
         def scroll_with_wheel(event: tk.Event, target: tk.Canvas = canvas) -> str:
             target.yview_scroll(-int(event.delta / 120), "units")
             return "break"
@@ -571,15 +571,15 @@ class StrategySettingsPanel(ttk.Frame):
                 elif key in CHOICES:
                     reverse = {label: raw for raw, label in CHOICES[key].items()}
                     variable = tk.StringVar(value=CHOICES[key].get(value, value))
-                    widget = ttk.Combobox(parent, textvariable=variable, values=tuple(CHOICES[key].values()), state="readonly", width=28)
+                    widget = ttk.Combobox(parent, textvariable=variable, values=tuple(CHOICES[key].values()), state="readonly", width=18)
                 else:
                     reverse = None
                     variable = tk.StringVar(value=str(value))
-                    widget = ttk.Entry(parent, textvariable=variable, width=24)
+                    widget = ttk.Entry(parent, textvariable=variable, width=15)
                 widget.grid(row=row, column=1, sticky="w", padx=8, pady=3)
                 self.field_vars[(index, path + (key,))] = (variable, type(value), reverse)
             row += 1
-        parent.columnconfigure(0, minsize=210)
+        parent.columnconfigure(0, minsize=145)
         parent.columnconfigure(1, weight=1)
 
     def _collect_profiles(self) -> tuple[list[dict], list[str]]:
@@ -3812,4 +3812,10 @@ class TraderApp(tk.Tk):
         self.account_var.set(mask_account_number(digits) if digits else "")
 
     def _settings(self) -> StrategySettings:
-        return StrategySettings(dmi_period=max(1, int(float(self.dmi_period_var.get()))))
+        profile = None
+        if 0 <= self._active_strategy_profile < len(self._strategy_profiles):
+            profile = deepcopy(self._strategy_profiles[self._active_strategy_profile])
+        return StrategySettings(
+            dmi_period=max(1, int(float(self.dmi_period_var.get()))),
+            profile=profile,
+        )

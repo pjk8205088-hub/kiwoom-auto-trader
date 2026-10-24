@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from .models import Action, Candle, DmiPoint, PatternState, StrategySettings, TradeDecision
 
 
 class StrategyEngine:
+    DAILY_DETAIL_PERIODS = (2, 3, 5, 10, 15, 20, 30, 45, 60)
+
     def __init__(self, settings: StrategySettings | None = None) -> None:
         self.settings = settings or StrategySettings()
         self.previous_pattern: PatternState = "NONE"
@@ -38,6 +42,12 @@ class StrategyEngine:
                 "이미 판단한 3분봉이라 중복 주문을 방지했습니다.",
                 current,
             )
+        profile_signal = self._profile_signal(candles)
+        if profile_signal is not None:
+            action, reason = profile_signal
+            if action != "HOLD":
+                self._last_signal_candle_key = candle_key
+            return self._decision(action, reason, current)
         if previous is not None:
             if previous.pattern_state == "BEARISH" and current.pattern_state == "BULLISH":
                 self._last_signal_candle_key = candle_key
@@ -55,6 +65,150 @@ class StrategyEngine:
                 )
 
         return self._decision("HOLD", "새로운 DMI 강세/약세 전환이 없습니다.", current)
+
+    def _profile_signal(self, candles: list[Candle]) -> tuple[Action, str] | None:
+        """Apply the selected saved profile without changing the DMI fallback."""
+        profile = self.settings.profile
+        if not isinstance(profile, dict):
+            return None
+        bar = profile.get("bar", {})
+        minute = bar.get("minute", {})
+        buy = profile.get("buy", {})
+        buy_block = profile.get("buyBlock", {})
+        sell = profile.get("sell", {})
+        sell_block = profile.get("sellBlock", {})
+        short_enabled = bool(minute.get("shortEnabled", True))
+        long_enabled = bool(minute.get("longEnabled", True))
+        short_period = max(1, int(minute.get("shortPeriod", 5)))
+        long_period = max(short_period + 1, int(minute.get("longPeriod", 20)))
+        required = short_period if not long_enabled else long_period
+        if len(candles) < required + 1:
+            return "HOLD", f"이평선 계산에 필요한 분봉이 부족합니다({len(candles)}/{required + 1})."
+
+        def average(end: int, period: int) -> float:
+            values = [c.close for c in candles[end - period:end]]
+            return sum(values) / period
+
+        current_short = average(len(candles), short_period) if short_enabled else 0.0
+        previous_short = average(len(candles) - 1, short_period) if short_enabled else 0.0
+        current_long = average(len(candles), long_period) if long_enabled else current_short
+        previous_long = average(len(candles) - 1, long_period) if long_enabled else previous_short
+        crossed_up = current_short > current_long and previous_short <= previous_long
+        crossed_down = current_short < current_long and previous_short >= previous_long
+        previous_close = candles[-2].close
+        current_close = candles[-1].close
+        single_cross_up = previous_close <= previous_short and current_close > current_short
+        single_cross_down = previous_close >= previous_short and current_close < current_short
+        bullish = candles[-1].close > candles[-1].open
+        bearish = candles[-1].close < candles[-1].open
+        buy_rules = [value for key, value in buy.items() if isinstance(value, dict) and value.get("enabled")]
+        sell_rules = [value for key, value in sell.items() if isinstance(value, dict) and value.get("enabled")]
+        buy_blocked = bool(
+            buy_block.get("X03_maFalling", {}).get("enabled")
+            and current_short < previous_short
+        )
+        sell_blocked = bool(
+            sell_block.get("Y03_maRising", {}).get("enabled")
+            and current_short > previous_short
+        )
+        buy_cross_rule = bool(buy.get("B02_minuteCross", {}).get("enabled"))
+        sell_cross_rule = bool(sell.get("S02_minuteCross", {}).get("enabled"))
+        buy_ma_rule = bool(buy.get("B01_maUpBullish", {}).get("enabled"))
+        sell_ma_rule = bool(sell.get("S01_maTurnDown", {}).get("enabled"))
+        buy_ok = bool(buy_rules) and not buy_blocked
+        sell_ok = bool(sell_rules) and not sell_blocked
+        if buy_ma_rule:
+            buy_ok = buy_ok and current_short >= previous_short and bullish
+        if sell_ma_rule:
+            sell_ok = sell_ok and current_short <= previous_short and bearish
+        if buy_cross_rule:
+            buy_ok = buy_ok and (crossed_up if long_enabled else single_cross_up)
+        if sell_cross_rule:
+            sell_ok = sell_ok and (crossed_down if long_enabled else single_cross_down)
+
+        # Intraday candles are converted to one close per trading day so that
+        # daily MAs can be used without requiring a separate daily API request.
+        combine = str(bar.get("combine", "BOTH"))
+        daily = bar.get("daily", {})
+        if combine in {"BOTH", "DAILY_ONLY"}:
+            daily_closes = self.daily_closes(candles)
+            daily_short_enabled = bool(daily.get("shortEnabled", True))
+            daily_long_enabled = bool(daily.get("longEnabled", True))
+            daily_short_period = max(2, int(daily.get("shortPeriod", 5)))
+            daily_long_period = max(daily_short_period + 1, int(daily.get("longPeriod", 20)))
+            daily_required = daily_short_period if not daily_long_enabled else daily_long_period
+            if len(daily_closes) < daily_required + 1:
+                return "HOLD", f"일자별 이평선 계산에 필요한 거래일이 부족합니다({len(daily_closes)}/{daily_required + 1})."
+
+            def daily_average(end: int, period: int) -> float:
+                return sum(daily_closes[end - period:end]) / period
+
+            ds = daily_average(len(daily_closes), daily_short_period) if daily_short_enabled else 0.0
+            pds = daily_average(len(daily_closes) - 1, daily_short_period) if daily_short_enabled else 0.0
+            dl = daily_average(len(daily_closes), daily_long_period) if daily_long_enabled else ds
+            pdl = daily_average(len(daily_closes) - 1, daily_long_period) if daily_long_enabled else pds
+            daily_up = ds > dl and pds <= pdl
+            daily_down = ds < dl and pds >= pdl
+            daily_bull = daily_closes[-1] >= daily_closes[-2]
+            daily_bear = daily_closes[-1] <= daily_closes[-2]
+            daily_single_up = daily_closes[-2] <= pds and daily_closes[-1] > ds
+            daily_single_down = daily_closes[-2] >= pds and daily_closes[-1] < ds
+
+            if combine == "DAILY_ONLY":
+                buy_ok = bool(buy_rules) and not buy_blocked
+                sell_ok = bool(sell_rules) and not sell_blocked
+            if buy_ma_rule:
+                buy_ok = buy_ok and daily_bull
+            if sell_ma_rule:
+                sell_ok = sell_ok and daily_bear
+            if buy_cross_rule:
+                buy_ok = buy_ok and (daily_up if daily_long_enabled else daily_single_up)
+            if sell_cross_rule:
+                sell_ok = sell_ok and (daily_down if daily_long_enabled else daily_single_down)
+
+        if buy_ok:
+            return "BUY", f"설정 이평선 매수 조건 충족: 단기 {current_short:.2f} / 장기 {current_long:.2f}"
+        if sell_ok:
+            return "SELL", f"설정 이평선 매도 조건 충족: 단기 {current_short:.2f} / 장기 {current_long:.2f}"
+        return "HOLD", "설정한 이평선·캔들 조건이 아직 충족되지 않았습니다."
+
+    @classmethod
+    def daily_closes(cls, candles: list[Candle]) -> list[float]:
+        """Return the latest close for each trading day in candle order."""
+        closes: list[float] = []
+        days: list[str] = []
+        for index, candle in enumerate(candles):
+            day = cls._day_key(candle.timestamp, index)
+            if days and day == days[-1]:
+                closes[-1] = candle.close
+            else:
+                days.append(day)
+                closes.append(candle.close)
+        return closes
+
+    @classmethod
+    def daily_moving_averages(
+        cls, candles: list[Candle], periods: tuple[int, ...] | None = None
+    ) -> dict[int, float]:
+        """Calculate selectable 2-60 day MAs from intraday candle data."""
+        closes = cls.daily_closes(candles)
+        selected = periods or cls.DAILY_DETAIL_PERIODS
+        return {
+            period: sum(closes[-period:]) / period
+            for period in selected
+            if period >= 1 and len(closes) >= period
+        }
+
+    @staticmethod
+    def _day_key(timestamp: str, fallback_index: int) -> str:
+        raw = (timestamp or "").strip()
+        if raw:
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")).date().isoformat()
+            except ValueError:
+                if len(raw) >= 10:
+                    return raw[:10]
+        return f"candle-{fallback_index}"
 
     def calculate_dmi_series(self, candles: list[Candle]) -> list[DmiPoint]:
         period = self.settings.dmi_period

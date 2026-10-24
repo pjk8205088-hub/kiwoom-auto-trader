@@ -22,6 +22,7 @@ class Candle:
 @dataclass(frozen=True)
 class StrategySettings:
     dmi_period: int = 14
+    profile: dict | None = None
 
 
 @dataclass(frozen=True)
