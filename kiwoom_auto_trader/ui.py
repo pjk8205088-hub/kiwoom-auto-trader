@@ -9,7 +9,6 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from . import RELEASE_LABEL
 from .charting import moving_average, timeframe_label
 from .strategy_profile_schema import CHOICES, FIELD_LABELS, GROUP_LABELS, merge_profile, new_profile, validate_profile
 from .kiwoom_api import (
@@ -560,7 +559,7 @@ class StrategySettingsPanel(ttk.Frame):
             else:
                 row = 1 + (section_index - 1) // 5
                 column = (section_index - 1) % 5
-                box.grid(row=row, column=column, sticky="nsew", padx=2, pady=2)
+                box.grid(row=row, column=column, sticky="new", padx=2, pady=2)
             self._build_fields(box, index, profile[section], (section,), wide=(section == "bar"))
         for column in range(5):
             body.columnconfigure(column, weight=1, uniform="profile-column")
@@ -590,7 +589,7 @@ class StrategySettingsPanel(ttk.Frame):
             if isinstance(value, dict):
                 frame = ttk.LabelFrame(parent, text=GROUP_LABELS.get(key, label), padding=4)
                 if wide:
-                    frame.grid(row=0, column=row, sticky="nsew", padx=2, pady=2)
+                    frame.grid(row=0, column=row, sticky="new", padx=2, pady=2)
                     parent.columnconfigure(row, weight=1, uniform="wide-section")
                 else:
                     frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
@@ -814,7 +813,7 @@ class TraderApp(tk.Tk):
         header.columnconfigure(0, weight=1)
         ttk.Label(
             header,
-            text=f"키움 자동매매 {RELEASE_LABEL}",
+            text="키움 자동매매",
             font=("Malgun Gothic", 16, "bold"),
         ).grid(
             row=0, column=0, sticky="w"
