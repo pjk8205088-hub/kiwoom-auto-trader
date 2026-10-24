@@ -99,7 +99,7 @@ CHOICES = {
 
 def new_profile(index: int):
     value = deepcopy(_PROFILE)
-    value.update(slot=index + 1, name=f"설정 {index + 1}", dmi_period=14)
+    value.update(slot=index + 1, name=f"설정 {index + 1}", symbol="", symbol_name="", dmi_period=14)
     return value
 
 
@@ -140,13 +140,18 @@ def validate_profile(profile, index):
         elif isinstance(value, (int, float)):
             if not isinstance(value, (int, float)) or not float("-inf") < float(value) < float("inf"):
                 errors.append(".".join(path))
-        elif isinstance(value, str) and not value.strip():
+        elif isinstance(value, str) and not value.strip() and path[-1] not in {"symbol", "symbol_name"}:
             errors.append(".".join(path))
     walk(profile)
     try:
         dmi = int(profile["dmi_period"])
         if not 1 <= dmi <= 99:
             errors.append("DMI 기간(1~99)")
+        symbol = str(profile.get("symbol", "")).strip()
+        if symbol and (len(symbol) != 6 or not symbol.isdigit()):
+            errors.append("연결 종목번호: 비워 두거나 숫자 6자리로 입력해 주세요")
+        if symbol and not str(profile.get("symbol_name", "")).strip():
+            errors.append("회사명: 연결 종목번호를 입력하면 회사명도 입력해 주세요")
         for key, options in CHOICES.items():
             if key == "dojiCountsAs":
                 selected = profile["bar"]["candle"][key]

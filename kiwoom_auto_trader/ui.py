@@ -116,11 +116,11 @@ def _baseline_validation_message(
     if available_funds <= 0:
         return "계좌의 주문가능금액을 먼저 불러와 주세요."
     if capital_limit <= 0:
-        return "종목별 운용 한도금액을 0원보다 크게 입력해 주세요."
+        return "계좌 총 운용 한도금액을 0원보다 크게 입력해 주세요."
     if reference_price <= 0:
         return "키움 현재가를 먼저 불러와 주세요."
     if capital_limit >= available_funds:
-        return "운용 한도금액은 계좌 주문가능금액보다 작아야 합니다."
+        return "계좌 총 운용 한도금액은 주문가능금액보다 작아야 합니다."
     if capital_limit < reference_price:
         return "운용 한도금액은 현재 주식 1주 가격보다 작을 수 없습니다."
     return ""
@@ -432,6 +432,9 @@ class StrategySettingsPanel(ttk.Frame):
         self.field_vars: dict[tuple[int, tuple[str, ...]], tuple[tk.Variable, type, dict | None]] = {}
         self.profile_pages: list[ttk.Frame] = []
         self.built_profiles: set[int] = set()
+        self.profile_style = ttk.Style(self)
+        self.profile_style.configure("ConfiguredProfile.TButton", foreground="#0b6b35")
+        self.profile_style.configure("EmptyProfile.TButton", foreground="#333333")
 
         toolbar = ttk.Frame(self, padding=(12, 4, 12, 2))
         toolbar.pack(fill="x")
@@ -456,9 +459,14 @@ class StrategySettingsPanel(ttk.Frame):
         self.profile_buttons: list[ttk.Button] = []
         self.selected_profile_label = tk.StringVar()
         for index in range(20):
-            button = ttk.Button(self.profile_nav, text=f"설정 {index + 1}", command=lambda i=index: self.select_profile(i))
+            button = ttk.Button(
+                self.profile_nav,
+                text=f"설정 {index + 1}",
+                command=lambda i=index: self.select_profile(i),
+            )
             button.grid(row=index // 5, column=index % 5, sticky="ew", padx=3, pady=1)
             self.profile_buttons.append(button)
+        self._refresh_profile_buttons()
         for column in range(5):
             self.profile_nav.columnconfigure(column, weight=1, uniform="profile")
 
@@ -481,6 +489,17 @@ class StrategySettingsPanel(ttk.Frame):
         self._ensure_profile_page(self.selected)
         self.select_profile(self.selected, store_current=False)
 
+    def _refresh_profile_buttons(self) -> None:
+        for index, button in enumerate(self.profile_buttons):
+            profile = self.profiles[index]
+            symbol = str(profile.get("symbol", "")).strip()
+            name = str(profile.get("symbol_name", "")).strip()
+            configured = len(symbol) == 6 and symbol.isdigit() and bool(name)
+            button.configure(
+                text=f"설정 {index + 1} · {name}" if configured else f"설정 {index + 1}",
+                style="ConfiguredProfile.TButton" if configured else "EmptyProfile.TButton",
+            )
+
     def _ensure_profile_page(self, index: int) -> None:
         if index not in self.built_profiles:
             self._build_profile_page(self.profile_pages[index], index)
@@ -498,15 +517,31 @@ class StrategySettingsPanel(ttk.Frame):
         canvas.bind("<Configure>", lambda event, c=canvas, item=window_id: c.itemconfigure(item, width=event.width))
         profile = self.profiles[index]
         basics = ttk.LabelFrame(body, text="DMI 기준", padding=8)
-        basics.pack(fill="x", pady=(0, 6))
+        basics.grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=(0, 6))
+        ttk.Label(basics, text="연결 종목번호").pack(side="left", padx=(0, 5))
+        symbol_var = tk.StringVar(value=str(profile.get("symbol", "")))
+        ttk.Entry(basics, textvariable=symbol_var, width=9, justify="center").pack(side="left", padx=(0, 12))
+        self.field_vars[(index, ("symbol",))] = (symbol_var, str, None)
+        ttk.Label(basics, text="회사명").pack(side="left", padx=(0, 5))
+        name_var = tk.StringVar(value=str(profile.get("symbol_name", "")))
+        ttk.Entry(basics, textvariable=name_var, width=14).pack(side="left", padx=(0, 14))
+        self.field_vars[(index, ("symbol_name",))] = (name_var, str, None)
         dmi_var = tk.StringVar(value=str(profile.get("dmi_period", 14)))
         ttk.Label(basics, text="DMI 계산 기간(일)").pack(side="left", padx=(0, 8))
         ttk.Spinbox(basics, from_=1, to=99, textvariable=dmi_var, width=8, justify="right").pack(side="left")
         self.field_vars[(index, ("dmi_period",))] = (dmi_var, int, None)
-        for section in ("bar", "buy", "buyBlock", "sell", "sellBlock", "order"):
+        ttk.Button(basics, text="설정 저장", command=self.save).pack(side="left", padx=(14, 0))
+        for section_index, section in enumerate(("bar", "buy", "buyBlock", "sell", "sellBlock", "order")):
             box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=9)
-            box.pack(fill="x", pady=4)
+            if section == "bar":
+                box.grid(row=0, column=0, columnspan=2, sticky="ew", padx=3, pady=4)
+            else:
+                row = 1 + (section_index - 1) // 2
+                column = (section_index - 1) % 2
+                box.grid(row=row, column=column, sticky="nsew", padx=3, pady=4)
             self._build_fields(box, index, profile[section], (section,))
+        body.columnconfigure(0, weight=1, uniform="profile-column")
+        body.columnconfigure(1, weight=1, uniform="profile-column")
         def scroll_with_wheel(event: tk.Event, target: tk.Canvas = canvas) -> str:
             target.yview_scroll(-int(event.delta / 120), "units")
             return "break"
@@ -544,7 +579,7 @@ class StrategySettingsPanel(ttk.Frame):
                 widget.grid(row=row, column=1, sticky="w", padx=8, pady=3)
                 self.field_vars[(index, path + (key,))] = (variable, type(value), reverse)
             row += 1
-        parent.columnconfigure(0, minsize=255)
+        parent.columnconfigure(0, minsize=210)
         parent.columnconfigure(1, weight=1)
 
     def _collect_profiles(self) -> tuple[list[dict], list[str]]:
@@ -590,7 +625,7 @@ class StrategySettingsPanel(ttk.Frame):
         self.mode_summary.configure(text=f"실행 환경: {mode} · V8 기존 매매 판단 유지 · 지원 설정: DMI 기간")
         self.summary.set(
             f"현재 종목: {app.symbol_name_var.get() or symbol} · "
-            f"종목별 운용 한도: {app.capital_var.get()}원 · "
+            f"계좌 총 운용 한도: {app.capital_var.get()}원 · "
             f"선택 항목: 설정 {self.selected + 1} / 20"
         )
         self.active_symbol_status.set(
@@ -611,6 +646,7 @@ class StrategySettingsPanel(ttk.Frame):
 
     def reload_selected(self) -> None:
         self.profiles = [deepcopy(item) for item in self.parent_app._strategy_profiles]
+        self._refresh_profile_buttons()
         for (index, path), (variable, _value_type, _reverse) in self.field_vars.items():
             value = self.profiles[index]
             for key in path:
@@ -632,6 +668,7 @@ class StrategySettingsPanel(ttk.Frame):
         app._strategy_profiles = profiles
         self.profiles = profiles
         app._active_strategy_profile = self.selected
+        app.symbol_profile_var.set(f"설정 {self.selected + 1}")
         app.dmi_period_var.set(str(self.profiles[self.selected]["dmi_period"]))
         try:
             app._save_settings()
@@ -639,13 +676,14 @@ class StrategySettingsPanel(ttk.Frame):
             messagebox.showerror("설정 저장 실패", f"설정 저장 또는 적용에 실패했습니다.\n{exc}", parent=self)
             return
         self.status.set(f"설정 {self.selected + 1} 저장 및 적용 완료")
+        self._refresh_profile_buttons()
         self.update_summary()
 
 
 class TraderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title(f"키움 자동매매 {RELEASE_LABEL}")
+        self.title("키움 자동매매")
         self.geometry("1440x900")
         self.minsize(1180, 740)
 
@@ -756,7 +794,7 @@ class TraderApp(tk.Tk):
             column=6,
             padx=(0, 8),
         )
-        ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=7)
+        # 긴급 정지 함수와 내부 동작은 유지하되, 요청에 따라 메인 화면에는 표시하지 않습니다.
         self._update_connection_badge(False)
 
         controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=7)
@@ -766,6 +804,7 @@ class TraderApp(tk.Tk):
 
         self.symbol_var = tk.StringVar(value="000000")
         self.symbol_name_var = tk.StringVar(value="")
+        self.symbol_profile_var = tk.StringVar(value=f"설정 {self._active_strategy_profile + 1}")
         self.capital_var = tk.StringVar(value="1000000")
         self.baseline_status_var = tk.StringVar(value="미설정")
         self.dmi_period_var = tk.StringVar(value=str(self._strategy_profiles[self._active_strategy_profile]["dmi_period"]))
@@ -796,7 +835,19 @@ class TraderApp(tk.Tk):
         )
         self.trade_ready_var = tk.StringVar(value="거래 준비: 종목번호와 회사명, 계좌번호를 확인해 주세요.")
 
-        self._field(controls, "종목번호(6자리)", self.symbol_var, 0)
+        ttk.Label(controls, text="종목번호(6자리)").grid(row=0, column=0, sticky="w")
+        symbol_input_row = ttk.Frame(controls)
+        symbol_input_row.grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        ttk.Entry(symbol_input_row, textvariable=self.symbol_var, width=12).pack(side="left")
+        self.symbol_profile_combo = ttk.Combobox(
+            symbol_input_row,
+            textvariable=self.symbol_profile_var,
+            values=tuple(f"설정 {index + 1}" for index in range(20)),
+            state="readonly",
+            width=9,
+        )
+        self.symbol_profile_combo.pack(side="left", padx=(5, 0))
+        self.symbol_profile_combo.bind("<<ComboboxSelected>>", self._on_symbol_profile_selected)
         ttk.Label(controls, text="회사명").grid(row=0, column=1, sticky="w")
         symbol_name_row = ttk.Frame(controls)
         symbol_name_row.grid(row=1, column=1, sticky="ew", padx=(0, 8))
@@ -806,7 +857,7 @@ class TraderApp(tk.Tk):
             expand=True,
         )
         ttk.Button(symbol_name_row, text="종목 세팅", width=9, command=self._set_symbol).pack(side="right")
-        ttk.Label(controls, text="종목별 운용 한도금액").grid(row=0, column=2, sticky="w")
+        ttk.Label(controls, text="계좌 총 운용 한도금액").grid(row=0, column=2, sticky="w")
         self.capital_entry = ttk.Entry(controls, textvariable=self.capital_var, width=14)
         self.capital_entry.grid(row=1, column=2, sticky="ew", padx=(0, 8))
 
@@ -875,17 +926,21 @@ class TraderApp(tk.Tk):
             pady=3,
         )
         self.auto_trade_capability_badge.grid(row=0, column=2, sticky="w", padx=(6, 8))
-        ttk.Checkbutton(
+        self.kiwoom_auto_order_checkbutton = ttk.Checkbutton(
             actions,
             text="자동운용 시 3분봉 DMI 강약 전환을 키움 주문에 연결",
             variable=self.kiwoom_auto_order_var,
-        ).grid(row=0, column=3, sticky="w", padx=(8, 0))
-        ttk.Label(actions, textvariable=self.market_session_var).grid(
+        )
+        self.kiwoom_auto_order_checkbutton.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self.market_session_label = ttk.Label(actions, textvariable=self.market_session_var)
+        self.market_session_label.grid(
             row=0,
             column=4,
             sticky="e",
             padx=(14, 0),
         )
+        self.kiwoom_auto_order_checkbutton.grid_remove()
+        self.market_session_label.grid_remove()
         ttk.Label(
             actions,
             textvariable=self.auto_started_at_var,
@@ -1038,6 +1093,9 @@ class TraderApp(tk.Tk):
         )
         self.chart_button.pack(side="left")
         ttk.Label(ready_row, textvariable=self.trade_ready_var).pack(side="left", padx=(10, 0))
+        # 데이터 조회·시세·DMI·수동 주문 함수는 유지하되 요청에 따라 조작 행은 화면에서 숨깁니다.
+        api_actions.grid_remove()
+        ready_row.grid_remove()
 
         body = ttk.Frame(self, padding=(12, 6))
         body.grid(row=2, column=0, sticky="nsew")
@@ -1328,12 +1386,7 @@ class TraderApp(tk.Tk):
         return baseline
 
     def _operating_capital(self) -> float:
-        baseline = self._selected_trading_baseline()
-        return (
-            baseline.capital_limit
-            if baseline is not None
-            else _parse_money_input(self.capital_var.get())
-        )
+        return _parse_money_input(self.capital_var.get())
 
     def _load_trading_baseline(self, symbol: str) -> None:
         normalized = normalize_symbol(symbol)
@@ -2149,6 +2202,29 @@ class TraderApp(tk.Tk):
             f"종목 세팅: {normalized} {name or '종목명 조회 실패'}",
         )
         self._refresh()
+
+    def _on_symbol_profile_selected(self, _event=None) -> None:
+        try:
+            index = int(self.symbol_profile_var.get().replace("설정", "").strip()) - 1
+        except ValueError:
+            return
+        if not 0 <= index < len(self._strategy_profiles):
+            return
+        profile = self._strategy_profiles[index]
+        self._active_strategy_profile = index
+        symbol = str(profile.get("symbol", "")).strip()
+        name = str(profile.get("symbol_name", "")).strip()
+        if symbol:
+            self.symbol_var.set(symbol)
+            self.symbol_name_var.set(name)
+            self._load_trading_baseline(symbol)
+        else:
+            self.symbol_var.set("000000")
+            self.symbol_name_var.set("")
+        self.dmi_period_var.set(str(profile.get("dmi_period", 14)))
+        if self._strategy_settings_panel is not None:
+            self._strategy_settings_panel.select_profile(index)
+        self._save_strategy_profiles()
 
     def _schedule_account_poll(self) -> None:
         if self._account_after_id is None:

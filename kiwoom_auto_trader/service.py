@@ -91,6 +91,7 @@ class AutoTradingService:
         self.symbol = "000000"
         self.symbol_name = ""
         self.max_capital = 1_000_000.0
+        self.total_capital_limit = 1_000_000.0
         self.current_price = 0.0
         self.pattern_state: PatternState = "NONE"
         self.candles: list[Candle] = []
@@ -141,6 +142,7 @@ class AutoTradingService:
         elif next_symbol != previous_symbol:
             self.symbol_name = ""
         self.max_capital = max_capital
+        self.total_capital_limit = max(0.0, float(max_capital))
         self.storage.log("INFO", "설정", f"{self.symbol} 설정을 저장했습니다.")
 
     def start(self) -> None:
@@ -823,6 +825,15 @@ class AutoTradingService:
 
             holding_quantity = self._holding_quantity(self.symbol)
             if result_side == "BUY":
+                if self.balance_summary is not None and self.total_capital_limit > 0:
+                    current_evaluation = max(0.0, float(self.balance_summary.total_evaluation))
+                    estimated_cost = quantity * self.current_price
+                    if current_evaluation + estimated_cost > self.total_capital_limit:
+                        raise KiwoomOpenApiError(
+                            f"계좌 총 운용 한도 {self.total_capital_limit:,.0f}원을 초과합니다. "
+                            f"현재 평가금액 {current_evaluation:,.0f}원, "
+                            f"예상 매수금액 {estimated_cost:,.0f}원입니다."
+                        )
                 risk_check = self.risk.approve_buy(
                     self.max_capital,
                     self.current_price,
