@@ -668,13 +668,13 @@ class StrategySettingsPanel(ttk.Frame):
         self.selected_profile_label.set(f"현재 선택: 설정 {self.selected + 1} / 20")
         profiles, errors = self._collect_profiles()
         if errors:
-            self.check_title.set(f"● 확인이 필요한 설정이 있습니다 ({len(errors)}건)")
+            self.check_title.set("● 설정 구조가 맞지 않아 자동운용 불가능합니다")
             self.check_label.configure(fg="#b3261e")
             self.check_detail.set(" · ".join(errors[:3]))
         else:
-            self.check_title.set("● 20개 설정의 입력값이 정상입니다")
+            self.check_title.set("● 자동운용 가능합니다")
             self.check_label.configure(fg="#16833a")
-            self.check_detail.set("설정값은 저장됩니다. 실제 매매 엔진에 연결된 값은 선택 프로필의 DMI 기간입니다.")
+            self.check_detail.set("설정값이 정상적으로 저장되었고 자동운용에 사용할 수 있습니다.")
         self.status.set(f"선택한 설정의 DMI 계산 기간: {profiles[self.selected].get('dmi_period', 14)}일")
 
     def _refresh_profile_state_table(self) -> None:
