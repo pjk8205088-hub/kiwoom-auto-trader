@@ -548,6 +548,12 @@ class StrategySettingsPanel(ttk.Frame):
         name_var = tk.StringVar(value=str(profile.get("symbol_name", "")))
         ttk.Entry(basics, textvariable=name_var, width=14).pack(side="left", padx=(0, 14))
         self.field_vars[(index, ("symbol_name",))] = (name_var, str, None)
+        buy_enabled_var = tk.BooleanVar(value=bool(profile.get("buyEnabled", True)))
+        ttk.Checkbutton(basics, text="매수 허용", variable=buy_enabled_var).pack(side="left", padx=(0, 6))
+        self.field_vars[(index, ("buyEnabled",))] = (buy_enabled_var, bool, None)
+        sell_enabled_var = tk.BooleanVar(value=bool(profile.get("sellEnabled", True)))
+        ttk.Checkbutton(basics, text="매도 허용", variable=sell_enabled_var).pack(side="left", padx=(0, 10))
+        self.field_vars[(index, ("sellEnabled",))] = (sell_enabled_var, bool, None)
         dmi_var = tk.StringVar(value=str(profile.get("dmi_period", 14)))
         ttk.Label(basics, text="DMI 계산 기간(일)").pack(side="left", padx=(0, 8))
         ttk.Spinbox(basics, from_=1, to=99, textvariable=dmi_var, width=8, justify="right").pack(side="left")
@@ -896,6 +902,8 @@ class TraderApp(tk.Tk):
         self.current_price_display_var = tk.StringVar(value="미조회")
         self.buy_percent_var = tk.StringVar(value="")
         self.sell_percent_var = tk.StringVar(value="")
+        self.close_buy_ratio_var = tk.IntVar(value=60)
+        self.open_buy_ratio_var = tk.StringVar(value="시초가 매수 40%")
         self.buy_trigger_status_var = tk.StringVar(value="입력 후 설정 필요")
         self.sell_trigger_status_var = tk.StringVar(value="입력 후 설정 필요")
         self.allow_real_order_var = tk.BooleanVar(value=False)
@@ -981,6 +989,7 @@ class TraderApp(tk.Tk):
 
         actions = ttk.Frame(controls)
         actions.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(6, 0))
+        actions.columnconfigure(3, weight=1)
         actions.columnconfigure(4, weight=1)
         ttk.Button(actions, text="자동 운용 시작", command=self._start).grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="자동 운용 중지", command=self._stop).grid(
@@ -999,6 +1008,19 @@ class TraderApp(tk.Tk):
             pady=3,
         )
         self.auto_trade_capability_badge.grid(row=0, column=2, sticky="w", padx=(6, 8))
+        allocation_bar = ttk.Frame(actions)
+        allocation_bar.grid(row=0, column=3, sticky="ew", padx=(6, 8))
+        allocation_bar.columnconfigure(1, weight=1)
+        ttk.Label(allocation_bar, text="종가·시초가 매수 비율").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        ttk.Scale(
+            allocation_bar,
+            from_=0,
+            to=100,
+            variable=self.close_buy_ratio_var,
+            command=self._update_buy_ratio_labels,
+        ).grid(row=0, column=1, sticky="ew")
+        ttk.Label(allocation_bar, textvariable=self.open_buy_ratio_var, width=18).grid(row=0, column=2, padx=(6, 0))
+        self._update_buy_ratio_labels()
         self.kiwoom_auto_order_checkbutton = ttk.Checkbutton(
             actions,
             text="자동운용 시 3분봉 DMI 강약 전환을 키움 주문에 연결",
@@ -3387,6 +3409,11 @@ class TraderApp(tk.Tk):
 
     def _order_quantity_valid(self) -> bool:
         return self._order_quantity() > 0
+
+    def _update_buy_ratio_labels(self, _value=None) -> None:
+        close_ratio = max(0, min(100, int(round(float(self.close_buy_ratio_var.get())))))
+        self.close_buy_ratio_var.set(close_ratio)
+        self.open_buy_ratio_var.set(f"종가 {close_ratio}% · 시초가 {100 - close_ratio}%")
 
     def _order_quantity(self) -> int:
         return _parse_order_quantity(self.order_qty_var.get())

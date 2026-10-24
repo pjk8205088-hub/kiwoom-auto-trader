@@ -6,7 +6,8 @@ from .models import Action, Candle, DmiPoint, PatternState, StrategySettings, Tr
 
 
 class StrategyEngine:
-    DAILY_DETAIL_PERIODS = (2, 3, 5, 10, 15, 20, 30, 45, 60)
+    # Every daily period from 2 to 60 is available to the strategy layer.
+    DAILY_DETAIL_PERIODS = tuple(range(2, 61))
 
     def __init__(self, settings: StrategySettings | None = None) -> None:
         self.settings = settings or StrategySettings()
@@ -72,6 +73,8 @@ class StrategyEngine:
         if not isinstance(profile, dict):
             return None
         bar = profile.get("bar", {})
+        buy_enabled = bool(profile.get("buyEnabled", True))
+        sell_enabled = bool(profile.get("sellEnabled", True))
         minute = bar.get("minute", {})
         buy = profile.get("buy", {})
         buy_block = profile.get("buyBlock", {})
@@ -117,6 +120,8 @@ class StrategyEngine:
         sell_ma_rule = bool(sell.get("S01_maTurnDown", {}).get("enabled"))
         buy_ok = bool(buy_rules) and not buy_blocked
         sell_ok = bool(sell_rules) and not sell_blocked
+        buy_ok = buy_ok and buy_enabled
+        sell_ok = sell_ok and sell_enabled
         if buy_ma_rule:
             buy_ok = buy_ok and current_short >= previous_short and bullish
         if sell_ma_rule:
@@ -134,8 +139,8 @@ class StrategyEngine:
             daily_closes = self.daily_closes(candles)
             daily_short_enabled = bool(daily.get("shortEnabled", True))
             daily_long_enabled = bool(daily.get("longEnabled", True))
-            daily_short_period = max(2, int(daily.get("shortPeriod", 5)))
-            daily_long_period = max(daily_short_period + 1, int(daily.get("longPeriod", 20)))
+            daily_short_period = min(60, max(2, int(daily.get("shortPeriod", 5))))
+            daily_long_period = min(60, max(daily_short_period + 1, int(daily.get("longPeriod", 20))))
             daily_required = daily_short_period if not daily_long_enabled else daily_long_period
             if len(daily_closes) < daily_required + 1:
                 return "HOLD", f"일자별 이평선 계산에 필요한 거래일이 부족합니다({len(daily_closes)}/{daily_required + 1})."
@@ -155,8 +160,8 @@ class StrategyEngine:
             daily_single_down = daily_closes[-2] >= pds and daily_closes[-1] < ds
 
             if combine == "DAILY_ONLY":
-                buy_ok = bool(buy_rules) and not buy_blocked
-                sell_ok = bool(sell_rules) and not sell_blocked
+                buy_ok = bool(buy_rules) and not buy_blocked and buy_enabled
+                sell_ok = bool(sell_rules) and not sell_blocked and sell_enabled
             if buy_ma_rule:
                 buy_ok = buy_ok and daily_bull
             if sell_ma_rule:

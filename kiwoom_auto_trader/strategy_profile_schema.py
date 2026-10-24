@@ -16,6 +16,8 @@ def _line(minute=False):
 
 _PROFILE = {
     "name": "기본",
+    "buyEnabled": True,
+    "sellEnabled": True,
     "bar": {"combine": "BOTH", "minute": _line(True), "daily": _line(),
             "candle": {"buyRequireBullish": True, "sellRequireBearish": True, "dojiCountsAs": "NEITHER"},
             "pivot": {"lookback": 2, "compareCount": 2, "enabled": True}},
@@ -57,6 +59,7 @@ GROUP_LABELS = {
     "sell": "매도 조건", "sellBlock": "매도 제한 조건", "order": "주문 방법",
     "minute": "분봉 가격 흐름", "daily": "일봉 가격 흐름", "candle": "캔들 모양",
     "pivot": "최근 고점·저점", "detailAverages": "세부 이동평균선",
+    "buyEnabled": "매수 허용", "sellEnabled": "매도 허용",
 }
 FIELD_LABELS = {
     "combine": "함께 확인할 자료", "shortPeriod": "짧은 이동평균 기간", "longPeriod": "긴 이동평균 기간",
