@@ -561,7 +561,7 @@ class StrategySettingsPanel(ttk.Frame):
                 row = 1 + (section_index - 1) // 5
                 column = (section_index - 1) % 5
                 box.grid(row=row, column=column, sticky="nsew", padx=2, pady=2)
-            self._build_fields(box, index, profile[section], (section,))
+            self._build_fields(box, index, profile[section], (section,), wide=(section == "bar"))
         for column in range(5):
             body.columnconfigure(column, weight=1, uniform="profile-column")
         def scroll_with_wheel(event: tk.Event, target: tk.Canvas = canvas) -> str:
@@ -576,13 +576,24 @@ class StrategySettingsPanel(ttk.Frame):
         canvas.bind("<MouseWheel>", scroll_with_wheel)
         bind_wheel(body)
 
-    def _build_fields(self, parent: ttk.LabelFrame, index: int, values: dict, path: tuple[str, ...] = ()) -> None:
+    def _build_fields(
+        self,
+        parent: ttk.LabelFrame,
+        index: int,
+        values: dict,
+        path: tuple[str, ...] = (),
+        wide: bool = False,
+    ) -> None:
         row = 0
         for key, value in values.items():
             label = FIELD_LABELS.get(key, key)
             if isinstance(value, dict):
                 frame = ttk.LabelFrame(parent, text=GROUP_LABELS.get(key, label), padding=4)
-                frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
+                if wide:
+                    frame.grid(row=0, column=row, sticky="nsew", padx=2, pady=2)
+                    parent.columnconfigure(row, weight=1, uniform="wide-section")
+                else:
+                    frame.grid(row=row, column=0, columnspan=2, sticky="ew", padx=2, pady=2)
                 self._build_fields(frame, index, value, path + (key,))
             else:
                 ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", padx=3, pady=1)
