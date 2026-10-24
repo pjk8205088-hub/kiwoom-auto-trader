@@ -423,48 +423,41 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         self.destroy()
 
 
-class StrategySettingsWindow(tk.Toplevel):
-    def __init__(self, parent: "TraderApp") -> None:
-        super().__init__(parent)
+class StrategySettingsPanel(ttk.Frame):
+    def __init__(self, parent: "TraderApp", container: ttk.Frame) -> None:
+        super().__init__(container)
         self.parent_app = parent
         self.profiles = [deepcopy(item) for item in parent._strategy_profiles]
         self.selected = parent._active_strategy_profile
-        self.title("설정 창 · 전략 설정")
-        self.geometry("1180x820")
-        self.minsize(900, 640)
-        self.transient(parent)
-        self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.field_vars: dict[tuple[int, tuple[str, ...]], tuple[tk.Variable, type, dict | None]] = {}
+        self.profile_pages: list[ttk.Frame] = []
+        self.built_profiles: set[int] = set()
 
-        toolbar = ttk.Frame(self, padding=(12, 10, 12, 4))
+        toolbar = ttk.Frame(self, padding=(12, 4, 12, 2))
         toolbar.pack(fill="x")
         ttk.Button(toolbar, text="설정 저장", command=self.save).pack(side="left")
         ttk.Button(toolbar, text="다시 보기", command=self.reload_selected).pack(side="left", padx=6)
-        ttk.Button(toolbar, text="닫기", command=self.destroy).pack(side="left")
 
         self.summary = tk.StringVar()
-        self.mode_summary = ttk.Label(self, padding=(14, 8))
+        self.mode_summary = ttk.Label(self, padding=(14, 2))
         self.mode_summary.pack(anchor="w")
-        ttk.Label(self, textvariable=self.summary, padding=(14, 0, 14, 8)).pack(anchor="w")
+        ttk.Label(self, textvariable=self.summary, padding=(14, 0, 14, 2)).pack(anchor="w")
 
-        check = ttk.LabelFrame(self, text="설정 확인", padding=9)
-        check.pack(fill="x", padx=12, pady=(0, 8))
+        check = ttk.LabelFrame(self, text="설정 확인", padding=5)
+        check.pack(fill="x", padx=12, pady=(0, 4))
         self.check_title = tk.StringVar()
         self.check_detail = tk.StringVar(value="20개 설정은 각각 저장됩니다. V8 매매 엔진에 실제 적용되는 항목은 DMI 기간입니다.")
         self.check_label = tk.Label(check, textvariable=self.check_title, font=("Malgun Gothic", 10, "bold"), anchor="w")
         self.check_label.pack(fill="x")
         ttk.Label(check, textvariable=self.check_detail, anchor="w").pack(fill="x")
 
-        self.profile_nav = ttk.Frame(self, padding=(12, 4, 12, 8))
+        self.profile_nav = ttk.Frame(self, padding=(12, 0, 12, 2))
         self.profile_nav.pack(fill="x")
         self.profile_buttons: list[ttk.Button] = []
         self.selected_profile_label = tk.StringVar()
-        ttk.Label(self.profile_nav, textvariable=self.selected_profile_label, foreground="#176b3a").grid(
-            row=4, column=0, columnspan=5, sticky="w", padx=4, pady=(5, 0)
-        )
         for index in range(20):
             button = ttk.Button(self.profile_nav, text=f"설정 {index + 1}", command=lambda i=index: self.select_profile(i))
-            button.grid(row=index // 5, column=index % 5, sticky="ew", padx=3, pady=3)
+            button.grid(row=index // 5, column=index % 5, sticky="ew", padx=3, pady=1)
             self.profile_buttons.append(button)
         for column in range(5):
             self.profile_nav.columnconfigure(column, weight=1, uniform="profile")
@@ -474,7 +467,7 @@ class StrategySettingsWindow(tk.Toplevel):
         for index in range(20):
             page = ttk.Frame(self.profile_tabs)
             self.profile_tabs.add(page, text=f"설정 {index + 1}")
-            self._build_profile_page(page, index)
+            self.profile_pages.append(page)
         state_page = ttk.Frame(self.profile_tabs, padding=8)
         self.profile_tabs.add(state_page, text="현재 종목 상태")
         self.active_symbol_status = tk.StringVar()
@@ -485,7 +478,13 @@ class StrategySettingsWindow(tk.Toplevel):
         editor.pack(fill="x")
         self.status = tk.StringVar(value="설정 값을 확인해 주세요.")
         ttk.Label(editor, textvariable=self.status, foreground="#596579").pack(anchor="w")
+        self._ensure_profile_page(self.selected)
         self.select_profile(self.selected, store_current=False)
+
+    def _ensure_profile_page(self, index: int) -> None:
+        if index not in self.built_profiles:
+            self._build_profile_page(self.profile_pages[index], index)
+            self.built_profiles.add(index)
 
     def _build_profile_page(self, page: ttk.Frame, index: int) -> None:
         canvas = tk.Canvas(page, highlightthickness=0, borderwidth=0)
@@ -507,7 +506,18 @@ class StrategySettingsWindow(tk.Toplevel):
         for section in ("bar", "buy", "buyBlock", "sell", "sellBlock", "order"):
             box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=9)
             box.pack(fill="x", pady=4)
-            self._build_fields(box, index, profile[section])
+            self._build_fields(box, index, profile[section], (section,))
+        def scroll_with_wheel(event: tk.Event, target: tk.Canvas = canvas) -> str:
+            target.yview_scroll(-int(event.delta / 120), "units")
+            return "break"
+
+        def bind_wheel(widget: tk.Widget) -> None:
+            widget.bind("<MouseWheel>", scroll_with_wheel)
+            for child in widget.winfo_children():
+                bind_wheel(child)
+
+        canvas.bind("<MouseWheel>", scroll_with_wheel)
+        bind_wheel(body)
 
     def _build_fields(self, parent: ttk.LabelFrame, index: int, values: dict, path: tuple[str, ...] = ()) -> None:
         row = 0
@@ -562,6 +572,7 @@ class StrategySettingsWindow(tk.Toplevel):
         return result, errors
 
     def select_profile(self, index: int, store_current: bool = True) -> None:
+        self._ensure_profile_page(index)
         self.selected = index
         if self.profile_tabs.index(self.profile_tabs.select()) != index:
             self.profile_tabs.select(index)
@@ -587,7 +598,7 @@ class StrategySettingsWindow(tk.Toplevel):
             f"현재 적용 DMI 기간: {app.dmi_period_var.get()}일 · 설정 {app._active_strategy_profile + 1} / 20"
         )
         self.selected_profile_label.set(f"현재 선택: 설정 {self.selected + 1} / 20")
-        _, errors = self._collect_profiles()
+        profiles, errors = self._collect_profiles()
         if errors:
             self.check_title.set(f"● 확인이 필요한 설정이 있습니다 ({len(errors)}건)")
             self.check_label.configure(fg="#b3261e")
@@ -596,12 +607,18 @@ class StrategySettingsWindow(tk.Toplevel):
             self.check_title.set("● 20개 설정의 입력값이 정상입니다")
             self.check_label.configure(fg="#16833a")
             self.check_detail.set("설정값은 저장됩니다. 실제 매매 엔진에 연결된 값은 선택 프로필의 DMI 기간입니다.")
-        self.status.set(f"선택한 설정의 DMI 계산 기간: {self.profiles[self.selected].get('dmi_period', 14)}일")
+        self.status.set(f"선택한 설정의 DMI 계산 기간: {profiles[self.selected].get('dmi_period', 14)}일")
 
     def reload_selected(self) -> None:
         self.profiles = [deepcopy(item) for item in self.parent_app._strategy_profiles]
-        self.destroy()
-        self.parent_app._strategy_settings_window = StrategySettingsWindow(self.parent_app)
+        for (index, path), (variable, _value_type, _reverse) in self.field_vars.items():
+            value = self.profiles[index]
+            for key in path:
+                value = value[key]
+            if path[-1] in CHOICES:
+                value = CHOICES[path[-1]].get(value, value)
+            variable.set(value)
+        self.update_summary()
 
     def save(self) -> None:
         profiles, errors = self._collect_profiles()
@@ -629,8 +646,8 @@ class TraderApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title(f"키움 자동매매 {RELEASE_LABEL}")
-        self.geometry("1280x820")
-        self.minsize(1180, 700)
+        self.geometry("1440x900")
+        self.minsize(1180, 740)
 
         db_path = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_ko.sqlite3"
         trade_history_path = Path.home() / "Documents" / "KiwoomAutoTrader" / "매수매도_이력.csv"
@@ -669,7 +686,7 @@ class TraderApp(tk.Tk):
         self._strategy_profiles = [new_profile(index) for index in range(20)]
         self._active_strategy_profile = 0
         self._load_strategy_profiles()
-        self._strategy_settings_window: StrategySettingsWindow | None = None
+        self._strategy_settings_panel: StrategySettingsPanel | None = None
         self._build_ui()
         self._buy_percent_trace_id = self.buy_percent_var.trace_add(
             "write",
@@ -691,7 +708,7 @@ class TraderApp(tk.Tk):
         self.rowconfigure(2, weight=1)
         self.connection_state_var = tk.StringVar(value="OFF 연결 안됨")
 
-        header = ttk.Frame(self, padding=12)
+        header = ttk.Frame(self, padding=(12, 6))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(0, weight=1)
         ttk.Label(
@@ -740,10 +757,9 @@ class TraderApp(tk.Tk):
             padx=(0, 8),
         )
         ttk.Button(header, text="긴급 정지", command=self._emergency_stop).grid(row=0, column=7)
-        ttk.Button(header, text="설정 열기", command=self._open_strategy_settings).grid(row=0, column=8, padx=(8, 0))
         self._update_connection_badge(False)
 
-        controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=12)
+        controls = ttk.LabelFrame(self, text="1. 종목/전략/계좌 설정", padding=7)
         controls.grid(row=1, column=0, sticky="ew", padx=12)
         for idx in range(10):
             controls.columnconfigure(idx, weight=1)
@@ -840,7 +856,7 @@ class TraderApp(tk.Tk):
         ttk.Button(controls, text="설정 저장", command=self._save_settings).grid(row=1, column=9, sticky="ew")
 
         actions = ttk.Frame(controls)
-        actions.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(12, 0))
+        actions.grid(row=2, column=0, columnspan=10, sticky="ew", pady=(6, 0))
         actions.columnconfigure(4, weight=1)
         ttk.Button(actions, text="자동 운용 시작", command=self._start).grid(row=0, column=0, sticky="w")
         ttk.Button(actions, text="자동 운용 중지", command=self._stop).grid(
@@ -880,9 +896,21 @@ class TraderApp(tk.Tk):
             textvariable=self.auto_trade_detail_var,
             foreground="#555555",
         ).grid(row=1, column=2, columnspan=3, sticky="w", padx=(6, 0), pady=(5, 0))
+        detail_actions = ttk.Frame(actions)
+        detail_actions.grid(row=2, column=4, sticky="e", pady=(5, 0))
+        ttk.Button(
+            detail_actions,
+            text="계좌·주문·로그 열기",
+            command=self._open_operations_window,
+        ).pack(side="left", padx=(0, 6))
+        ttk.Button(
+            detail_actions,
+            text="매수·매도 이력 열기",
+            command=self._open_trade_history_window,
+        ).pack(side="left")
 
         kiwoom_controls = ttk.Frame(controls)
-        kiwoom_controls.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(12, 0))
+        kiwoom_controls.grid(row=3, column=0, columnspan=10, sticky="ew", pady=(6, 0))
         ttk.Label(kiwoom_controls, text="계좌번호(로그인 후 자동 표시)").pack(side="left")
         ttk.Entry(
             kiwoom_controls,
@@ -932,7 +960,7 @@ class TraderApp(tk.Tk):
         self.allow_real_order_checkbutton.pack(side="left", padx=(12, 0))
 
         order_controls = ttk.Frame(controls)
-        order_controls.grid(row=4, column=0, columnspan=10, sticky="ew", pady=(8, 0))
+        order_controls.grid(row=4, column=0, columnspan=10, sticky="ew", pady=(4, 0))
         for column in range(2):
             order_controls.columnconfigure(column, weight=1, uniform="order-control")
 
@@ -976,7 +1004,7 @@ class TraderApp(tk.Tk):
                 widget.grid_remove()
 
         api_actions = ttk.Frame(controls)
-        api_actions.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(8, 0))
+        api_actions.grid(row=5, column=0, columnspan=10, sticky="ew", pady=(4, 0))
         ttk.Button(api_actions, text="3분봉 데이터 불러오기", command=self._request_three_minute).pack(side="left")
         ttk.Button(api_actions, text="계좌잔고 불러오기", command=self._request_balance).pack(side="left", padx=4)
         ttk.Button(api_actions, text="실시간 시세 시작", command=self._register_real_time).pack(side="left", padx=4)
@@ -1002,7 +1030,7 @@ class TraderApp(tk.Tk):
             padx=4,
         )
         ready_row = ttk.Frame(controls)
-        ready_row.grid(row=6, column=0, columnspan=10, sticky="ew", pady=(8, 0))
+        ready_row.grid(row=6, column=0, columnspan=10, sticky="ew", pady=(4, 0))
         self.chart_button = ttk.Button(
             ready_row,
             text="DMI 차트 확대",
@@ -1011,7 +1039,7 @@ class TraderApp(tk.Tk):
         self.chart_button.pack(side="left")
         ttk.Label(ready_row, textvariable=self.trade_ready_var).pack(side="left", padx=(10, 0))
 
-        body = ttk.Frame(self, padding=12)
+        body = ttk.Frame(self, padding=(12, 6))
         body.grid(row=2, column=0, sticky="nsew")
         body.columnconfigure(0, weight=1)
         body.rowconfigure(1, weight=1)
@@ -1024,21 +1052,8 @@ class TraderApp(tk.Tk):
             wraplength=1120,
             justify="left",
         ).grid(
-            row=0, column=0, sticky="ew", pady=(0, 10)
+            row=0, column=0, sticky="ew", pady=(0, 4)
         )
-
-        detail_actions = ttk.Frame(body)
-        detail_actions.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        ttk.Button(
-            detail_actions,
-            text="계좌·주문·로그 열기",
-            command=self._open_operations_window,
-        ).pack(side="left", padx=(0, 6))
-        ttk.Button(
-            detail_actions,
-            text="매수·매도 이력 열기",
-            command=self._open_trade_history_window,
-        ).pack(side="left")
 
         self.main_notebook = ttk.Notebook(body)
         # The chart remains available through the existing chart pop-up button only.
@@ -1297,6 +1312,8 @@ class TraderApp(tk.Tk):
             yscrollcommand=trade_scroll_y.set,
             xscrollcommand=trade_scroll_x.set,
         )
+        self._strategy_settings_panel = StrategySettingsPanel(self, body)
+        self._strategy_settings_panel.grid(row=1, column=0, sticky="nsew")
 
     def _field(self, parent: ttk.Frame, label: str, variable: tk.StringVar, column: int) -> None:
         ttk.Label(parent, text=label).grid(row=0, column=column, sticky="w")
@@ -1517,14 +1534,6 @@ class TraderApp(tk.Tk):
         payload = {"active": self._active_strategy_profile, "profiles": self._strategy_profiles}
         temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(path)
-
-    def _open_strategy_settings(self) -> None:
-        if self._strategy_settings_window is not None and self._strategy_settings_window.winfo_exists():
-            self._strategy_settings_window.deiconify()
-            self._strategy_settings_window.lift()
-            self._strategy_settings_window.focus_force()
-            return
-        self._strategy_settings_window = StrategySettingsWindow(self)
 
     def _save_settings(self) -> None:
         settings = StrategySettings(dmi_period=max(1, int(float(self.dmi_period_var.get()))))
