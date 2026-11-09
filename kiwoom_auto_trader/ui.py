@@ -874,6 +874,11 @@ class TraderApp(tk.Tk):
             column=6,
             padx=(0, 8),
         )
+        ttk.Button(header, text="모니터", command=self._open_monitor_window).grid(
+            row=0,
+            column=7,
+            padx=(0, 8),
+        )
         # 긴급 정지 함수와 내부 동작은 유지하되, 요청에 따라 메인 화면에는 표시하지 않습니다.
         self._update_connection_badge(False)
 
@@ -1373,6 +1378,43 @@ class TraderApp(tk.Tk):
         )
         self.logs = self._table(self.operations_tab, "시스템 로그", ("시간", "레벨", "분류", "메시지"), 2)
 
+        self.monitor_window = tk.Toplevel(self)
+        self.monitor_window.title("자동매매 모니터")
+        self.monitor_window.geometry("1320x720")
+        self.monitor_window.withdraw()
+        self.monitor_window.protocol("WM_DELETE_WINDOW", self.monitor_window.withdraw)
+        monitor_body = ttk.Frame(self.monitor_window, padding=10)
+        monitor_body.pack(fill="both", expand=True)
+        monitor_body.columnconfigure(0, weight=1)
+        monitor_body.rowconfigure(1, weight=1)
+        monitor_header = ttk.Frame(monitor_body)
+        monitor_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        monitor_header.columnconfigure(0, weight=1)
+        self.monitor_title_var = tk.StringVar(value="자동매매 모니터 · 종목을 세팅하면 현재 상태가 표시됩니다.")
+        ttk.Label(
+            monitor_header,
+            textvariable=self.monitor_title_var,
+            font=("Malgun Gothic", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(monitor_header, text="새로고침", command=self._refresh_monitor).grid(row=0, column=1)
+        monitor_frame = ttk.Frame(monitor_body)
+        monitor_frame.grid(row=1, column=0, sticky="nsew")
+        monitor_frame.columnconfigure(0, weight=1)
+        monitor_frame.rowconfigure(0, weight=1)
+        monitor_columns = ("구분", "시간", "종목번호", "종목명", "매수/매도", "수량", "가격", "상태", "비고")
+        self.monitor_table = ttk.Treeview(monitor_frame, columns=monitor_columns, show="headings")
+        monitor_widths = {"구분": 90, "시간": 110, "종목번호": 100, "종목명": 150, "매수/매도": 100, "수량": 80, "가격": 110, "상태": 140, "비고": 360}
+        for column in monitor_columns:
+            self.monitor_table.heading(column, text=column)
+            self.monitor_table.column(column, width=monitor_widths[column], minwidth=70, stretch=column in {"종목명", "비고"}, anchor="center")
+        self.monitor_table.tag_configure("ready", foreground="#1769a7")
+        self.monitor_table.tag_configure("warning", foreground="#a12622")
+        self.monitor_table.grid(row=0, column=0, sticky="nsew")
+        monitor_scroll = ttk.Scrollbar(monitor_frame, orient="vertical", command=self.monitor_table.yview)
+        monitor_scroll.grid(row=0, column=1, sticky="ns")
+        self.monitor_table.configure(yscrollcommand=monitor_scroll.set)
+        self._refresh_monitor()
+
         self.trade_history_window = tk.Toplevel(self)
         self.trade_history_window.title("매수·매도 이력")
         self.trade_history_window.geometry("1280x620")
@@ -1658,6 +1700,36 @@ class TraderApp(tk.Tk):
         self.trade_history_window.deiconify()
         self.trade_history_window.lift()
         self.trade_history_window.focus_force()
+
+    def _open_monitor_window(self) -> None:
+        self._refresh_monitor()
+        self.monitor_window.deiconify()
+        self.monitor_window.lift()
+        self.monitor_window.focus_force()
+
+    def _refresh_monitor(self) -> None:
+        if not hasattr(self, "monitor_table"):
+            return
+        for item in self.monitor_table.get_children():
+            self.monitor_table.delete(item)
+        symbol = normalize_symbol(self.symbol_var.get())
+        name = self.symbol_name_var.get().strip() or "종목명 미설정"
+        connected = self.connection_state_var.get()
+        ready = bool(symbol and symbol != "000000" and name != "종목명 미설정")
+        status = "자동운용 가능" if ready else "종목 세팅 필요"
+        tag = "ready" if ready else "warning"
+        self.monitor_title_var.set(f"자동매매 모니터 · {symbol or '종목 미설정'} {name}")
+        self.monitor_table.insert(
+            "",
+            "end",
+            values=("현재 상태", datetime.now().strftime("%H:%M:%S"), symbol or "-", name, "허용", "-", "-", status, connected),
+            tags=(tag,),
+        )
+        self.monitor_table.insert(
+            "",
+            "end",
+            values=("운용 설정", "-", symbol or "-", name, "매수/매도", "-", "-", self.symbol_profile_var.get(), "설정 확정 후 운용"),
+        )
 
     def _load_strategy_profiles(self) -> None:
         try:
