@@ -2,6 +2,7 @@ import unittest
 
 from kiwoom_auto_trader.models import Candle, StrategySettings
 from kiwoom_auto_trader.strategy import StrategyEngine
+from kiwoom_auto_trader.strategy_profile_schema import new_profile
 
 
 def dmi_buy_transition_candles() -> list[Candle]:
@@ -16,6 +17,124 @@ def dmi_buy_transition_candles() -> list[Candle]:
 
 
 class StrategyEngineTests(unittest.TestCase):
+    def test_default_profile_stop_loss_overrides_unimplemented_normal_rules(self):
+        profile = new_profile(1)
+        candles = dmi_buy_transition_candles()
+
+        decision = StrategyEngine(StrategySettings(dmi_period=3, profile=profile)).evaluate(
+            candles, entry_price=10.0
+        )
+
+        self.assertEqual(decision.action, "SELL")
+        self.assertIn("손실 제한", decision.reason)
+        profile["sellEnabled"] = False
+        blocked = StrategyEngine(StrategySettings(dmi_period=3, profile=profile)).evaluate(
+            candles, entry_price=10.0
+        )
+        self.assertEqual(blocked.action, "HOLD")
+
+    def test_target_profit_sells_only_with_known_entry_price(self):
+        profile = new_profile(1)
+        profile["sell"]["S03_dayTargetProfit"]["enabled"] = True
+        candles = dmi_buy_transition_candles()
+
+        matched = StrategyEngine(StrategySettings(dmi_period=3, profile=profile)).evaluate(
+            candles, entry_price=7.0
+        )
+        unknown_entry = StrategyEngine(StrategySettings(dmi_period=3, profile=profile)).evaluate(candles)
+
+        self.assertEqual(matched.action, "SELL")
+        self.assertIn("목표 수익", matched.reason)
+        self.assertEqual(unknown_entry.action, "HOLD")
+
+    def test_stop_loss_rule_alone_does_not_sell_without_loss(self):
+        profile = {
+            "bar": {"combine": "MINUTE_ONLY", "minute": {"shortPeriod": 2, "longPeriod": 3}},
+            "sell": {"S10_stopLoss": {"enabled": True, "pct": 3.5}},
+        }
+        decision = StrategyEngine(StrategySettings(dmi_period=3, profile=profile)).evaluate(
+            dmi_buy_transition_candles(), entry_price=8.0
+        )
+        self.assertEqual(decision.action, "HOLD")
+
+    def test_enabled_unimplemented_rule_blocks_profile_signal_and_dmi_fallback(self):
+        profile = new_profile(1)
+        engine = StrategyEngine(StrategySettings(dmi_period=3, profile=profile))
+
+        decision = engine.evaluate(dmi_buy_transition_candles())
+
+        self.assertEqual(decision.action, "HOLD")
+        self.assertIn("미구현 설정", decision.reason)
+        self.assertIn("X04_breakoutCooldown", decision.reason)
+
+    def test_day_low_rebound_rule_requires_configured_rise(self):
+        profile = {
+            "bar": {"combine": "MINUTE_ONLY", "minute": {"shortPeriod": 2, "longPeriod": 3}},
+            "buy": {"B03_fromDayLow": {"enabled": True, "risePct": 100.0}},
+        }
+        engine = StrategyEngine(StrategySettings(dmi_period=3, profile=profile))
+
+        decision = engine.evaluate(dmi_buy_transition_candles())
+
+        self.assertEqual(decision.action, "HOLD")
+        profile["buy"]["B03_fromDayLow"]["risePct"] = 10.0
+        matched = StrategyEngine(StrategySettings(dmi_period=3, profile=profile)).evaluate(
+            dmi_buy_transition_candles()
+        )
+        self.assertEqual(matched.action, "BUY")
+
+    def test_below_open_and_overextension_block_day_low_buy(self):
+        candles = dmi_buy_transition_candles()
+        candles[0] = Candle(high=10, low=8, close=9, open=9, timestamp=candles[0].timestamp)
+        profile = {
+            "bar": {"combine": "MINUTE_ONLY", "minute": {"shortPeriod": 2, "longPeriod": 3}},
+            "buy": {"B03_fromDayLow": {"enabled": True, "risePct": 10.0}},
+            "buyBlock": {"X01_belowDayOpen": {"enabled": True}},
+        }
+        settings = StrategySettings(dmi_period=3, profile=profile)
+        self.assertEqual(StrategyEngine(settings).evaluate(candles).action, "HOLD")
+
+        profile["buyBlock"] = {"X02_overExtended": {"enabled": True, "gapFromPrevClosePct": 5.0}}
+        prior = [Candle(high=8, low=6, close=7, timestamp="20260710")]
+        self.assertEqual(StrategyEngine(settings).evaluate(candles, prior).action, "HOLD")
+
+    def test_open_breakout_requires_previous_minute_below_open(self):
+        candles = dmi_buy_transition_candles()
+        candles[0] = Candle(high=10, low=7, close=9, open=7.5, timestamp=candles[0].timestamp)
+        profile = {
+            "bar": {"combine": "MINUTE_ONLY", "minute": {"shortPeriod": 2, "longPeriod": 3}},
+            "buy": {"B04_openBreakUp": {"enabled": True, "useMinute": True, "useDaily": True}},
+        }
+
+        self.assertEqual(
+            StrategyEngine(StrategySettings(dmi_period=3, profile=profile)).evaluate(candles).action,
+            "BUY",
+        )
+
+    def test_daily_closes_groups_compact_kiwoom_times_by_trading_day(self):
+        candles = [
+            Candle(high=11, low=9, close=10, timestamp="20260711090000"),
+            Candle(high=12, low=10, close=11, timestamp="20260711120000"),
+            Candle(high=14, low=12, close=13, timestamp="20260712090000"),
+            Candle(high=15, low=13, close=14, timestamp="20260712150000"),
+        ]
+
+        self.assertEqual(StrategyEngine.daily_closes(candles), [11, 14])
+        self.assertEqual(StrategyEngine.daily_moving_averages(candles, (2,)), {2: 12.5})
+
+    def test_daily_history_is_extended_with_current_intraday_close(self):
+        daily = [
+            Candle(high=14, low=11, close=12, timestamp="20260713"),
+            Candle(high=13, low=10, close=11, timestamp="20260712"),
+            Candle(high=12, low=9, close=10, timestamp="20260711"),
+        ]
+        minute = [
+            Candle(high=13, low=11, close=12, timestamp="20260713100000"),
+            Candle(high=15, low=12, close=14, timestamp="20260713110000"),
+        ]
+
+        self.assertEqual(StrategyEngine.daily_closes_with_intraday(daily, minute), [10, 11, 14])
+
     def test_calculates_wilder_dmi_and_adx(self):
         engine = StrategyEngine(StrategySettings(dmi_period=3))
 

@@ -15,8 +15,10 @@ from kiwoom_auto_trader.models import (
 )
 from kiwoom_auto_trader.price_triggers import OneShotPriceTriggerBook
 from kiwoom_auto_trader.service import ServiceSnapshot
+from kiwoom_auto_trader.strategy_profile_schema import new_profile
 from kiwoom_auto_trader.ui import (
     KiwoomRestLoginDialog,
+    StrategySettingsPanel,
     TraderApp,
     _account_access_confirmed,
     _account_password_input_allowed,
@@ -32,6 +34,76 @@ from kiwoom_auto_trader.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_monitor_shows_configured_symbol_without_watchlist_registration(self):
+        table = MagicMock()
+        table.get_children.return_value = []
+        holdings_table = MagicMock()
+        holdings_table.get_children.return_value = []
+        app = SimpleNamespace(
+            monitor_table=table,
+            monitor_holdings_table=holdings_table,
+            symbol_var=SimpleNamespace(get=lambda: "000000"),
+            symbol_name_var=SimpleNamespace(get=lambda: ""),
+            connection_state_var=SimpleNamespace(get=lambda: "연결됨"),
+            monitor_title_var=MagicMock(),
+            service=SimpleNamespace(watchlist_rows=lambda: [], watchlist_quotes={}, balance_summary=None),
+            _strategy_settings_panel=None,
+            _strategy_profiles=[{"symbol": "005930", "symbol_name": "삼성전자"}],
+            _monitor_decisions={"005930": "SELL 3주 계획 · 주문 안 함"},
+        )
+
+        TraderApp._refresh_monitor(app)
+
+        self.assertEqual(table.insert.call_args.kwargs["values"][0:2], ("005930", "삼성전자"))
+        self.assertEqual(table.insert.call_args.kwargs["values"][-1], "SELL 3주 계획 · 주문 안 함")
+
+    def test_monitor_skips_strategy_when_balance_refresh_fails(self):
+        service = SimpleNamespace(
+            account_info=KiwoomAccountInfo(True, ["1234567890"]),
+            request_balance=MagicMock(return_value=None),
+            refresh_watchlist_quotes=MagicMock(),
+            evaluate_watch_symbols=MagicMock(),
+        )
+        app = SimpleNamespace(
+            _strategy_settings_panel=None,
+            _strategy_profiles=[{"symbol": "005930", "dmi_period": 14}],
+            service=service,
+            _account_for_api=lambda: "1234567890",
+            _account_password_for_order=lambda: "1234",
+            _refresh_monitor=MagicMock(),
+        )
+
+        TraderApp._evaluate_monitor_profiles(app)
+
+        self.assertEqual(app._monitor_decisions, {"005930": "잔고 조회 실패 · 주문 불가"})
+        service.evaluate_watch_symbols.assert_not_called()
+        service.refresh_watchlist_quotes.assert_not_called()
+
+    def test_settings_summary_does_not_claim_automatic_trading_for_unimplemented_rules(self):
+        profile = new_profile(1)
+        profile["symbol"] = "005930"
+        profile["symbol_name"] = "삼성전자"
+        app = SimpleNamespace(
+            symbol_var=SimpleNamespace(get=lambda: "005930"),
+            symbol_name_var=SimpleNamespace(get=lambda: "삼성전자"),
+            capital_var=SimpleNamespace(get=lambda: "1000000"),
+            dmi_period_var=SimpleNamespace(get=lambda: "14"),
+            service=SimpleNamespace(account_info=KiwoomAccountInfo(False, [])),
+            _active_strategy_profile=0,
+        )
+        panel = SimpleNamespace(
+            parent_app=app, selected=0, mode_summary=MagicMock(), summary=MagicMock(),
+            active_symbol_status=MagicMock(), _refresh_profile_state_table=MagicMock(),
+            selected_profile_label=MagicMock(), _collect_profiles=lambda: ([profile], []),
+            check_title=MagicMock(), check_label=MagicMock(), check_detail=MagicMock(),
+            status=MagicMock(),
+        )
+
+        StrategySettingsPanel.update_summary(panel)
+
+        panel.check_title.set.assert_called_with("● 미구현 조건으로 자동운용 불가능합니다")
+        self.assertIn("X04_breakoutCooldown", panel.check_detail.set.call_args.args[0])
+
     def test_realtime_price_tick_updates_only_for_a_new_trade(self):
         quote = RealTimeQuote(
             symbol="012200",

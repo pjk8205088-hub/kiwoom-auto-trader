@@ -110,6 +110,8 @@ class AutoTradingService:
         self._real_time_registration_logged = False
         self._first_real_time_quote_logged_symbol = ""
         self.watchlist_quotes: dict[str, WatchlistQuote] = {}
+        self._watch_engines: dict[str, StrategyEngine] = {}
+        self._watch_daily_history: dict[str, tuple[str, list[Candle]]] = {}
         self.last_api_message = ""
         self.last_order_account_access_verified: bool | None = None
         self.started_at: datetime | None = None
@@ -538,9 +540,109 @@ class AutoTradingService:
             for symbol, name in self.watchlist_items()
         ]
 
-    def refresh_watchlist_quotes(self) -> list[WatchlistQuote]:
+    def evaluate_watch_symbols(
+        self, settings_by_symbol: dict[str, StrategySettings]
+    ) -> dict[str, TradeDecision | None]:
+        """Evaluate configured symbols independently without submitting orders."""
+        results: dict[str, TradeDecision | None] = {}
+        api = self._active_api()
+        holdings = {
+            normalize_symbol(item.symbol): item.average_price
+            for item in self.balance_summary.holdings
+        } if self.balance_summary else {}
+        for raw_symbol, settings in settings_by_symbol.items():
+            symbol = normalize_symbol(raw_symbol)
+            if not symbol or symbol == "000000":
+                continue
+            engine = self._watch_engines.get(symbol)
+            if engine is None or engine.settings != settings:
+                engine = StrategyEngine(settings)
+                self._watch_engines[symbol] = engine
+            try:
+                candles = api.request_minute_candles(symbol, interval=3, count=120)
+                daily_candles = None
+                profile = settings.profile or {}
+                needs_daily = profile and (
+                    profile.get("bar", {}).get("combine", "BOTH") in {"BOTH", "DAILY_ONLY"}
+                    or profile.get("buyBlock", {}).get("X02_overExtended", {}).get("enabled")
+                )
+                if needs_daily:
+                    today = datetime.now().strftime("%Y%m%d")
+                    cached = self._watch_daily_history.get(symbol)
+                    if cached is None or cached[0] != today:
+                        history = api.request_daily_candles(symbol, count=61)
+                        self._watch_daily_history[symbol] = (today, history)
+                    daily_candles = self._watch_daily_history[symbol][1]
+            except API_ERRORS as exc:
+                self.storage.log("ERROR", "다중 감시", f"{symbol} 차트 조회 실패: {exc}")
+                results[symbol] = None
+                continue
+            required = settings.dmi_period + 1
+            results[symbol] = (
+                engine.evaluate(
+                    list(reversed(candles)), daily_candles,
+                    entry_price=holdings.get(symbol, 0.0),
+                )
+                if len(candles) >= required else None
+            )
+        return results
+
+    def order_candidates(
+        self,
+        decisions: dict[str, TradeDecision | None],
+        settings_by_symbol: dict[str, StrategySettings],
+    ) -> dict[str, str]:
+        """Return eligible signal sides; never submit an order."""
+        if not self.balance_summary:
+            return {}
+        holdings = {item.symbol: item.quantity for item in self.balance_summary.holdings}
+        candidates: dict[str, str] = {}
+        for raw_symbol, decision in decisions.items():
+            symbol = normalize_symbol(raw_symbol)
+            settings = settings_by_symbol.get(symbol)
+            if not symbol or decision is None or settings is None:
+                continue
+            profile = settings.profile or {}
+            held = holdings.get(symbol, 0)
+            if decision.action == "BUY" and held <= 0 and profile.get("buyEnabled", True):
+                candidates[symbol] = "BUY"
+            elif decision.action == "SELL" and held > 0 and profile.get("sellEnabled", True):
+                candidates[symbol] = "SELL"
+        return candidates
+
+    def plan_candidate_quantities(self, candidates: dict[str, str]) -> dict[str, int]:
+        """Size candidate orders against current account data without submitting them."""
+        balance = self.balance_summary
+        if balance is None:
+            return {}
+        holdings = {item.symbol: item.quantity for item in balance.holdings}
+        buys = [symbol for symbol, side in candidates.items() if side == "BUY"]
+        available = max(0.0, min(
+            balance.orderable_amount,
+            self.total_capital_limit - max(0.0, balance.total_evaluation),
+        ))
+        per_buy_budget = available / len(buys) if buys else 0.0
+        plan: dict[str, int] = {}
+        for symbol, side in candidates.items():
+            if side == "SELL" and holdings.get(symbol, 0) > 0:
+                plan[symbol] = holdings[symbol]
+            elif side == "BUY":
+                quote = self.watchlist_quotes.get(symbol)
+                price = quote.current_price if quote else 0.0
+                quantity = self.risk.calculate_quantity(per_buy_budget, price)
+                if quantity > 0:
+                    plan[symbol] = quantity
+        return plan
+
+    def refresh_watchlist_quotes(self, extra_symbols: tuple[str, ...] = ()) -> list[WatchlistQuote]:
         items = self.watchlist_items()
+        watchlist_symbols = {symbol for symbol, _name in items}
         symbols = [symbol for symbol, _name in items]
+        symbols.extend(
+            symbol for symbol in (normalize_symbol(raw) for raw in extra_symbols)
+            if symbol and symbol not in watchlist_symbols
+        )
+        symbols = list(dict.fromkeys(symbols))
         if not symbols:
             self.watchlist_quotes = {}
             self.last_api_message = "등록된 관심종목이 없습니다."
@@ -550,7 +652,7 @@ class AutoTradingService:
             quotes = api.request_watchlist_quotes(symbols)
             self.watchlist_quotes = {quote.symbol: quote for quote in quotes if quote.symbol}
             for quote in quotes:
-                if quote.symbol and quote.name:
+                if quote.symbol in watchlist_symbols and quote.name:
                     self.storage.add_watchlist_symbol(quote.symbol, quote.name)
             selected = self.watchlist_quotes.get(self.symbol)
             if selected is not None:
@@ -561,6 +663,7 @@ class AutoTradingService:
             self.storage.log("INFO", "관심종목", self.last_api_message)
             return self.watchlist_rows()
         except API_ERRORS as exc:
+            self.watchlist_quotes = {}
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "관심종목", self.last_api_message)
             return self.watchlist_rows()
@@ -714,6 +817,7 @@ class AutoTradingService:
             )
             return self.balance_summary
         except API_ERRORS as exc:
+            self.balance_summary = None
             self.last_api_message = str(exc)
             self.storage.log("ERROR", "잔고", self.last_api_message)
             return None

@@ -47,6 +47,50 @@ def response(body):
 
 
 class KiwoomRestApiClientTests(unittest.TestCase):
+    def test_requests_and_parses_daily_candles(self):
+        requester = FakeRequester([
+            response({"token": "test-token", "expires_dt": "20991231235959"}),
+            response({"acctNo": "1234567890"}),
+            response({"stk_dt_pole_chart_qry": [
+                {"dt": "20260711", "cur_prc": "-72000", "open_pric": "-71000",
+                 "high_pric": "-73000", "low_pric": "-70000", "trde_qty": "1000"},
+            ]}),
+        ])
+        client = KiwoomRestApiClient(mock=True, requester=requester, rate_limiter=NoopLimiter())
+        client.connect("app-key", "secret-key")
+
+        candles = client.request_daily_candles("005930")
+
+        self.assertEqual(candles[0].timestamp, "20260711")
+        self.assertEqual(candles[0].close, 72000)
+        call = requester.calls[-1]
+        self.assertEqual(call[2]["api-id"], "ka10081")
+        self.assertEqual(call[3]["stk_cd"], "005930")
+        self.assertEqual(call[3]["upd_stkpc_tp"], "1")
+        self.assertEqual(len(call[3]["base_dt"]), 8)
+
+    def test_daily_candles_follow_rest_continuation_headers(self):
+        requester = FakeRequester([
+            response({"token": "test-token", "expires_dt": "20991231235959"}),
+            response({"acctNo": "1234567890"}),
+            RestResponse(200, {"cont-yn": "Y", "next-key": "page-two"}, {
+                "return_code": 0,
+                "stk_dt_pole_chart_qry": [{"dt": "20260712", "cur_prc": "120"}],
+            }),
+            RestResponse(200, {"cont-yn": "N"}, {
+                "return_code": 0,
+                "stk_dt_pole_chart_qry": [{"dt": "20260711", "cur_prc": "100"}],
+            }),
+        ])
+        client = KiwoomRestApiClient(mock=True, requester=requester, rate_limiter=NoopLimiter())
+        client.connect("app-key", "secret-key")
+
+        candles = client.request_daily_candles("005930", count=2)
+
+        self.assertEqual([candle.close for candle in candles], [120, 100])
+        self.assertEqual(requester.calls[-1][2]["cont-yn"], "Y")
+        self.assertEqual(requester.calls[-1][2]["next-key"], "page-two")
+
     def test_connects_with_token_and_account_without_storing_secret(self):
         requester = FakeRequester(
             [

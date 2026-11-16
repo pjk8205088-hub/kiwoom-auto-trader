@@ -15,6 +15,7 @@ from kiwoom_auto_trader.models import (
 from kiwoom_auto_trader.rest_api import KiwoomRestApiError
 from kiwoom_auto_trader.service import AutoTradingService
 from kiwoom_auto_trader.storage import Storage
+from kiwoom_auto_trader.strategy_profile_schema import new_profile
 
 
 def dmi_buy_transition_candles() -> list[Candle]:
@@ -244,6 +245,191 @@ class FakeWatchlistApi:
 
 
 class AutoTradingServiceTests(unittest.TestCase):
+    def test_configured_quote_refresh_does_not_register_symbol_as_watchlist(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "configured-quote.sqlite3"))
+            service.kiwoom_api = FakeWatchlistApi()
+
+            rows = service.refresh_watchlist_quotes(("005930",))
+
+            self.assertEqual(rows, [])
+            self.assertEqual(service.watchlist_quotes["005930"].current_price, 72000)
+            self.assertEqual(service.watchlist_items(), [])
+
+    def test_failed_balance_refresh_discards_stale_holdings(self):
+        class FailingBalanceApi:
+            def request_balance(self, account, password=""):
+                raise KiwoomOpenApiError("잔고 조회 실패")
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "balance-fail.sqlite3"))
+            service.kiwoom_api = FailingBalanceApi()
+            service.balance_summary = BalanceSummary(
+                account="1234567890",
+                holdings=(Holding("005930", "삼성전자", 3, 10, 8, -6, -20),),
+            )
+
+            self.assertIsNone(service.request_balance("1234567890", password="1234"))
+            self.assertIsNone(service.balance_summary)
+
+    def test_candidate_quantity_plan_respects_total_funds_and_holdings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "plan.sqlite3"))
+            service.total_capital_limit = 1_000_000
+            service.balance_summary = BalanceSummary(
+                account="1234567890", orderable_amount=800_000,
+                total_evaluation=600_000,
+                holdings=(Holding("005930", "삼성전자", 4, 70000, 72000, 8000, 2.8),),
+            )
+            service.watchlist_quotes = {
+                "000660": WatchlistQuote("000660", current_price=100_000),
+                "035420": WatchlistQuote("035420", current_price=50_000),
+            }
+            plan = service.plan_candidate_quantities({
+                "000660": "BUY", "035420": "BUY", "005930": "SELL"
+            })
+            self.assertEqual(plan, {"000660": 2, "035420": 4, "005930": 4})
+            self.assertEqual(service.storage.recent_orders(10), [])
+
+    def test_failed_quote_refresh_does_not_size_buy_from_old_price(self):
+        class FailingQuoteApi:
+            def request_watchlist_quotes(self, symbols):
+                raise KiwoomOpenApiError("시세 조회 실패")
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "stale.sqlite3"))
+            service.add_watchlist_symbol("005930")
+            service.kiwoom_api = FailingQuoteApi()
+            service.balance_summary = BalanceSummary(account="1234567890", orderable_amount=1_000_000)
+            service.watchlist_quotes = {"005930": WatchlistQuote("005930", current_price=70_000)}
+
+            service.refresh_watchlist_quotes()
+
+            self.assertEqual(service.watchlist_quotes, {})
+            self.assertEqual(service.plan_candidate_quantities({"005930": "BUY"}), {})
+
+    def test_order_candidates_respect_holdings_and_profile_switches(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "candidates.sqlite3"))
+            buy = TradeDecision("BUY", "test", "BULLISH")
+            sell = TradeDecision("SELL", "test", "BEARISH")
+            settings = {
+                "005930": StrategySettings(profile={"sellEnabled": True}),
+                "000660": StrategySettings(profile={"buyEnabled": True}),
+                "035420": StrategySettings(profile={"buyEnabled": False}),
+            }
+            decisions = {"005930": sell, "000660": buy, "035420": buy}
+            self.assertEqual(service.order_candidates(decisions, settings), {})
+
+            service.balance_summary = BalanceSummary(
+                account="1234567890",
+                holdings=(Holding("005930", "삼성전자", 3, 70000, 71000, 3000, 1.4),),
+            )
+            self.assertEqual(
+                service.order_candidates(decisions, settings),
+                {"005930": "SELL", "000660": "BUY"},
+            )
+            self.assertEqual(service.order_candidates({"005930": buy}, settings), {})
+            self.assertEqual(service.storage.recent_orders(10), [])
+
+    def test_multi_symbol_evaluation_keeps_selected_symbol_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "multi-eval.sqlite3"))
+            service.symbol = "005930"
+            service.current_price = 72000
+
+            class CandleApi:
+                def request_minute_candles(self, symbol, interval=3, count=120):
+                    if symbol == "000660":
+                        raise KiwoomOpenApiError("시세 조회 실패")
+                    return list(reversed(dmi_buy_transition_candles()))
+
+            service.kiwoom_api = CandleApi()
+            settings = StrategySettings(dmi_period=2)
+            results = service.evaluate_watch_symbols({"005930": settings, "000660": settings})
+
+            self.assertIn("005930", results)
+            self.assertIsNone(results["000660"])
+            self.assertEqual(set(service._watch_engines), {"005930", "000660"})
+            self.assertEqual(service.symbol, "005930")
+            self.assertEqual(service.current_price, 72000)
+            self.assertEqual(service.storage.recent_orders(10), [])
+
+    def test_profiled_watch_evaluation_reuses_daily_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "daily-watch.sqlite3"))
+
+            class ChartApi:
+                daily_calls = 0
+
+                def request_minute_candles(self, symbol, interval=3, count=120):
+                    return list(reversed(dmi_buy_transition_candles()))
+
+                def request_daily_candles(self, symbol, count=61):
+                    self.daily_calls += 1
+                    return [Candle(high=10, low=8, close=9, timestamp="20260710")]
+
+            api = ChartApi()
+            service.kiwoom_api = api
+            settings = StrategySettings(dmi_period=2, profile={"bar": {"combine": "DAILY_ONLY"}})
+
+            first = service.evaluate_watch_symbols({"005930": settings})
+            second = service.evaluate_watch_symbols({"005930": settings})
+
+            self.assertEqual(api.daily_calls, 1)
+            self.assertEqual(first["005930"].action, "HOLD")
+            self.assertEqual(second["005930"].action, "HOLD")
+            self.assertEqual(service.storage.recent_orders(10), [])
+
+    def test_watch_strategy_uses_manual_holding_average_for_stop_loss(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "manual-sell.sqlite3"))
+
+            class ChartApi:
+                def request_minute_candles(self, symbol, interval=3, count=120):
+                    return list(reversed(dmi_buy_transition_candles()))
+
+                def request_daily_candles(self, symbol, count=61):
+                    return []
+
+            service.kiwoom_api = ChartApi()
+            service.balance_summary = BalanceSummary(
+                account="1234567890",
+                holdings=(Holding("005930", "삼성전자", 3, 10, 8, -6, -20),),
+            )
+            settings = {"005930": StrategySettings(dmi_period=3, profile=new_profile(1))}
+
+            decisions = service.evaluate_watch_symbols(settings)
+
+            self.assertEqual(decisions["005930"].action, "SELL")
+            self.assertEqual(service.order_candidates(decisions, settings), {"005930": "SELL"})
+            self.assertEqual(service.storage.recent_orders(10), [])
+
+    def test_minute_only_profile_loads_daily_close_for_overextension_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "overextension.sqlite3"))
+
+            class ChartApi:
+                daily_calls = 0
+
+                def request_minute_candles(self, symbol, interval=3, count=120):
+                    return list(reversed(dmi_buy_transition_candles()))
+
+                def request_daily_candles(self, symbol, count=61):
+                    self.daily_calls += 1
+                    return [Candle(high=10, low=8, close=9, timestamp="20260710")]
+
+            api = ChartApi()
+            service.kiwoom_api = api
+            profile = {
+                "bar": {"combine": "MINUTE_ONLY"},
+                "buyBlock": {"X02_overExtended": {"enabled": True}},
+            }
+
+            service.evaluate_watch_symbols({"005930": StrategySettings(dmi_period=2, profile=profile)})
+
+            self.assertEqual(api.daily_calls, 1)
+
     def test_bulk_watchlist_registration_skips_duplicates_and_capacity(self):
         with tempfile.TemporaryDirectory() as directory:
             service = AutoTradingService(storage=Storage(Path(directory) / "bulk-watch.sqlite3"))

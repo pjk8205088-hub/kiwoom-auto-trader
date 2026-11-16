@@ -27,6 +27,7 @@ from .models import (
 from .price_triggers import OneShotPriceTrigger, OneShotPriceTriggerBook
 from .rest_api import KIWOOM_REST_PORTAL
 from .service import AutoTradingService
+from .strategy import StrategyEngine
 from .storage import Storage
 from .symbols import (
     clean_account_number,
@@ -427,7 +428,7 @@ class StrategySettingsPanel(ttk.Frame):
         super().__init__(container)
         self.parent_app = parent
         self.profiles = [deepcopy(item) for item in parent._strategy_profiles]
-        self.selected = parent._active_strategy_profile
+        self.selected = min(parent._active_strategy_profile, 2)
         self.field_vars: dict[tuple[int, tuple[str, ...]], tuple[tk.Variable, type, dict | None]] = {}
         self.profile_pages: list[ttk.Frame] = []
         self.built_profiles: set[int] = set()
@@ -633,6 +634,8 @@ class StrategySettingsPanel(ttk.Frame):
         return result, errors
 
     def select_profile(self, index: int, store_current: bool = True) -> None:
+        if not 0 <= index < len(self.profile_pages):
+            return
         self._ensure_profile_page(index)
         self.selected = index
         self.update_summary()
@@ -657,14 +660,31 @@ class StrategySettingsPanel(ttk.Frame):
         self._refresh_profile_state_table()
         self.selected_profile_label.set(f"현재 선택: 설정 {self.selected + 1} / 20")
         profiles, errors = self._collect_profiles()
+        configured = [
+            (index, profile) for index, profile in enumerate(profiles)
+            if normalize_symbol(profile.get("symbol", "")) not in ("", "000000")
+        ]
+        unsupported = [
+            f"설정 {index + 1}: {', '.join(StrategyEngine.unsupported_profile_rules(profile))}"
+            for index, profile in configured
+            if StrategyEngine.unsupported_profile_rules(profile)
+        ]
         if errors:
             self.check_title.set("● 설정 구조가 맞지 않아 자동운용 불가능합니다")
             self.check_label.configure(fg="#b3261e")
             self.check_detail.set(" · ".join(errors[:3]))
+        elif unsupported:
+            self.check_title.set("● 미구현 조건으로 자동운용 불가능합니다")
+            self.check_label.configure(fg="#b3261e")
+            self.check_detail.set(" · ".join(unsupported[:3]))
+        elif not configured:
+            self.check_title.set("● 자동운용할 종목을 세팅해 주세요")
+            self.check_label.configure(fg="#b3261e")
+            self.check_detail.set("설정 1~20 중 운용할 종목을 연결해 주세요.")
         else:
-            self.check_title.set("● 자동운용 가능합니다")
+            self.check_title.set("● 전략 설정 확인 완료")
             self.check_label.configure(fg="#16833a")
-            self.check_detail.set("설정값이 정상적으로 저장되었고 자동운용에 사용할 수 있습니다.")
+            self.check_detail.set("실제 주문에는 계좌 연결과 주문 승인이 별도로 필요합니다.")
         self.status.set(f"선택한 설정의 DMI 계산 기간: {profiles[self.selected].get('dmi_period', 14)}일")
 
     def _refresh_profile_state_table(self) -> None:
@@ -718,7 +738,7 @@ class StrategySettingsPanel(ttk.Frame):
     def confirm_selected_profile(self) -> None:
         """Validate, save, and apply the currently selected strategy profile."""
         self.save()
-        if not self.check_title.get().startswith("● 설정 구조가 맞지 않아"):
+        if self.check_title.get() == "● 전략 설정 확인 완료":
             self.status.set(f"설정 {self.selected + 1}이 확정되어 저장·적용되었습니다.")
 
     def save(self) -> None:
@@ -758,6 +778,7 @@ class TraderApp(tk.Tk):
             storage=Storage(db_path, trade_history_path=trade_history_path)
         )
         self._refresh_after_id: str | None = None
+        self._monitor_after_id: str | None = None
         self._price_refresh_after_id: str | None = None
         self._chart_refresh_after_id: str | None = None
         self._account_after_id: str | None = None
@@ -1367,7 +1388,7 @@ class TraderApp(tk.Tk):
         self.monitor_window.title("자동매매 모니터")
         self.monitor_window.geometry("1320x720")
         self.monitor_window.withdraw()
-        self.monitor_window.protocol("WM_DELETE_WINDOW", self.monitor_window.withdraw)
+        self.monitor_window.protocol("WM_DELETE_WINDOW", self._close_monitor_window)
         monitor_body = ttk.Frame(self.monitor_window, padding=10)
         monitor_body.pack(fill="both", expand=True)
         monitor_body.columnconfigure(0, weight=1)
@@ -1386,7 +1407,8 @@ class TraderApp(tk.Tk):
         monitor_toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(monitor_toolbar, text="전 종목 로딩", command=self._show_symbol_source_notice).pack(side="left")
         ttk.Button(monitor_toolbar, text="조건검색", command=self._open_condition_search).pack(side="left", padx=(6, 0))
-        ttk.Label(monitor_toolbar, text="조건검색에서 등록한 종목만 자동 감시합니다.").pack(side="left", padx=(10, 0))
+        ttk.Button(monitor_toolbar, text="전략 판단", command=self._evaluate_monitor_profiles).pack(side="left", padx=(6, 0))
+        ttk.Label(monitor_toolbar, text="설정 1~3 종목의 판단 결과 조회 · 주문 없음").pack(side="left", padx=(10, 0))
 
         monitor_frame = ttk.PanedWindow(monitor_body, orient="horizontal")
         monitor_frame.grid(row=2, column=0, sticky="nsew")
@@ -1712,6 +1734,25 @@ class TraderApp(tk.Tk):
         self.monitor_window.deiconify()
         self.monitor_window.lift()
         self.monitor_window.focus_force()
+        self._schedule_monitor_tick()
+
+    def _close_monitor_window(self) -> None:
+        if self._monitor_after_id is not None:
+            self.after_cancel(self._monitor_after_id)
+            self._monitor_after_id = None
+        self.monitor_window.withdraw()
+
+    def _schedule_monitor_tick(self) -> None:
+        if self._monitor_after_id is None and self.monitor_window.winfo_viewable():
+            self._monitor_after_id = self.after(30000, self._monitor_tick)
+
+    def _monitor_tick(self) -> None:
+        self._monitor_after_id = None
+        if not self.monitor_window.winfo_viewable():
+            return
+        if self.service.running and self.service.account_info.connected:
+            self._evaluate_monitor_profiles()
+        self._schedule_monitor_tick()
 
     def _open_condition_search(self) -> None:
         if self.service.connection_mode != "ACTIVEX" or not self.service.account_info.connected:
@@ -1792,17 +1833,26 @@ class TraderApp(tk.Tk):
         name = self.symbol_name_var.get().strip() or "종목명 미설정"
         connected = self.connection_state_var.get()
         ready = bool(symbol and symbol != "000000" and name != "종목명 미설정")
-        status = "자동운용 가능" if ready else "종목 세팅 필요"
+        status = "종목 세팅 완료" if ready else "종목 세팅 필요"
         tag = "ready" if ready else "warning"
-        self.monitor_title_var.set(f"자동매매 모니터 · 감시 {len(self.service.watchlist_items())}종목 · {connected}")
         watch_rows = self.service.watchlist_rows()
+        shown = {quote.symbol for quote in watch_rows}
+        profiles = self._strategy_settings_panel.profiles[:3] if self._strategy_settings_panel else self._strategy_profiles[:3]
+        for profile in profiles:
+            configured_symbol = normalize_symbol(profile.get("symbol", ""))
+            if configured_symbol and configured_symbol != "000000" and configured_symbol not in shown:
+                watch_rows.append(self.service.watchlist_quotes.get(configured_symbol) or WatchlistQuote(
+                    symbol=configured_symbol, name=str(profile.get("symbol_name", "")).strip(),
+                ))
+                shown.add(configured_symbol)
+        self.monitor_title_var.set(f"자동매매 모니터 · 표시 {len(watch_rows)}종목 · {connected}")
         if not watch_rows and ready:
             self.monitor_table.insert("", "end", values=(symbol, name, "-", "-", "-", status), tags=(tag,))
         for quote in watch_rows:
             has_price = quote.current_price > 0
             self.monitor_table.insert(
                 "", "end",
-                values=(quote.symbol, quote.name or "미조회", f"{quote.current_price:,.0f}" if has_price else "-", self._format_watchlist_change(quote.change) if has_price else "-", f"{quote.volume:,}" if quote.volume else "-", "감시 중"),
+                values=(quote.symbol, quote.name or "미조회", f"{quote.current_price:,.0f}" if has_price else "-", self._format_watchlist_change(quote.change) if has_price else "-", f"{quote.volume:,}" if quote.volume else "-", getattr(self, "_monitor_decisions", {}).get(quote.symbol, "관심종목 등록")),
                 tags=("ready",),
             )
         balance = self.service.balance_summary
@@ -1811,6 +1861,42 @@ class TraderApp(tk.Tk):
                 "", "end",
                 values=(holding.symbol, holding.name or "미조회", f"{holding.quantity:,}", f"{holding.average_price:,.0f}", f"{holding.current_price:,.0f}", f"{holding.profit_loss:,.0f}", f"{holding.profit_rate:.2f}%"),
             )
+
+    def _evaluate_monitor_profiles(self) -> None:
+        profiles = self._strategy_settings_panel.profiles[:3] if self._strategy_settings_panel else self._strategy_profiles[:3]
+        settings = {
+            normalize_symbol(profile.get("symbol", "")): StrategySettings(
+                dmi_period=int(profile.get("dmi_period", 14)), profile=profile
+            )
+            for profile in profiles
+            if normalize_symbol(profile.get("symbol", "")) not in ("", "000000")
+        }
+        if not settings or not self.service.account_info.connected:
+            messagebox.showwarning("전략 판단", "설정 1~3의 종목과 키움 API 연결을 확인해 주세요.")
+            return
+        if self.service.request_balance(
+            self._account_for_api(), password=self._account_password_for_order()
+        ) is None:
+            self._monitor_decisions = {
+                symbol: "잔고 조회 실패 · 주문 불가" for symbol in settings
+            }
+            self._refresh_monitor()
+            return
+        self.service.refresh_watchlist_quotes(tuple(settings))
+        results = self.service.evaluate_watch_symbols(settings)
+        candidates = self.service.order_candidates(results, settings)
+        quantities = self.service.plan_candidate_quantities(candidates)
+        self._monitor_decisions = {
+            symbol: (
+                f"{candidates[symbol]} {quantities[symbol]:,}주 계획 · 주문 안 함"
+                if quantities.get(symbol, 0) > 0
+                else "한도/현재가 부족 · 주문 불가" if symbol in candidates
+                else decision.reason if decision and "미구현 설정" in decision.reason
+                else "신호 없음/주문 불가" if decision else "데이터 부족/조회 실패"
+            )
+            for symbol, decision in results.items()
+        }
+        self._refresh_monitor()
 
     def _show_symbol_source_notice(self) -> None:
         try:
@@ -1903,6 +1989,9 @@ class TraderApp(tk.Tk):
         self._refresh()
 
     def _close_app(self) -> None:
+        if self._monitor_after_id is not None:
+            self.after_cancel(self._monitor_after_id)
+            self._monitor_after_id = None
         self._clear_real_order_authorization()
         self._clear_account_password_session()
         try:

@@ -353,6 +353,47 @@ class KiwoomRestApiClient:
         ]
         return candles[:count]
 
+    def request_daily_candles(self, symbol: str, count: int = 61) -> list[Candle]:
+        symbol = normalize_symbol(symbol)
+        if not symbol:
+            raise KiwoomRestApiError("종목코드를 입력해 주세요.")
+        limit = max(1, int(count))
+        request_body = {
+            "stk_cd": symbol,
+            "base_dt": datetime.now().strftime("%Y%m%d"),
+            "upd_stkpc_tp": "1",
+        }
+        rows: list[dict[str, Any]] = []
+        continuation = ""
+        seen_keys: set[str] = set()
+        for _ in range(10):
+            request_headers = {"cont-yn": "Y", "next-key": continuation} if continuation else None
+            response = self._post_response(
+                "ka10081", "/api/dostk/chart", request_body,
+                extra_headers=request_headers,
+            )
+            page = response.body.get("stk_dt_pole_chart_qry") or []
+            if not isinstance(page, list):
+                raise KiwoomRestApiError("REST API 일봉 응답 형식이 올바르지 않습니다.")
+            rows.extend(row for row in page if isinstance(row, dict))
+            headers = {key.lower(): value for key, value in response.headers.items()}
+            next_key = str(headers.get("next-key") or "").strip()
+            if len(rows) >= limit or headers.get("cont-yn") != "Y" or not next_key or next_key in seen_keys:
+                break
+            seen_keys.add(next_key)
+            continuation = next_key
+        return [
+            Candle(
+                high=_price(row.get("high_pric")),
+                low=_price(row.get("low_pric")),
+                close=_price(row.get("cur_prc")),
+                open=_price(row.get("open_pric")),
+                volume=_integer(row.get("trde_qty")),
+                timestamp=str(row.get("dt") or "").strip(),
+            )
+            for row in rows[:limit]
+        ]
+
     def request_tick_candles(self, symbol: str, count: int = 3000) -> list[Candle]:
         symbol = normalize_symbol(symbol)
         if not symbol:
@@ -759,6 +800,16 @@ class KiwoomRestApiClient:
         body: dict[str, Any],
         authorized: bool = True,
     ) -> dict[str, Any]:
+        return self._post_response(api_id, path, body, authorized=authorized).body
+
+    def _post_response(
+        self,
+        api_id: str,
+        path: str,
+        body: dict[str, Any],
+        authorized: bool = True,
+        extra_headers: dict[str, str] | None = None,
+    ) -> RestResponse:
         if authorized and not self._has_valid_token():
             raise KiwoomRestApiError("REST API 토큰이 없거나 만료되었습니다.")
         self._rate_limiter.acquire(api_id)
@@ -768,6 +819,8 @@ class KiwoomRestApiClient:
         }
         if authorized:
             headers["authorization"] = f"Bearer {self._token}"
+        if extra_headers:
+            headers.update(extra_headers)
         response = self._requester(
             "POST",
             f"{self.base_url}{path}",
@@ -795,7 +848,7 @@ class KiwoomRestApiClient:
                     "현재 인터넷 공인 IP가 같은지 확인해 주세요."
                 )
             raise KiwoomRestApiError(f"{api_id} 오류 {normalized_code}: {message}")
-        return response_body
+        return RestResponse(response.status_code, response.headers, response_body)
 
     def _has_valid_token(self) -> bool:
         return bool(self._token and self._clock() < self._token_expires_at - 30.0)
