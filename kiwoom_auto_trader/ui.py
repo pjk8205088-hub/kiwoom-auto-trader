@@ -434,6 +434,15 @@ class StrategySettingsPanel(ttk.Frame):
         self.profile_style = ttk.Style(self)
         self.profile_style.configure("ConfiguredProfile.TButton", foreground="#0b6b35")
         self.profile_style.configure("EmptyProfile.TButton", foreground="#333333")
+        self.profile_style.configure("Settings.TLabel", font=("Malgun Gothic", 12))
+        self.profile_style.configure("Settings.TButton", font=("Malgun Gothic", 12))
+        self.profile_style.configure("Settings.TCheckbutton", font=("Malgun Gothic", 12))
+        self.profile_style.configure("TLabel", font=("Malgun Gothic", 12))
+        self.profile_style.configure("TButton", font=("Malgun Gothic", 12))
+        self.profile_style.configure("TCheckbutton", font=("Malgun Gothic", 12))
+        self.profile_style.configure("TEntry", font=("Malgun Gothic", 12))
+        self.profile_style.configure("TCombobox", font=("Malgun Gothic", 12))
+        self.profile_style.configure("TSpinbox", font=("Malgun Gothic", 12))
 
         self.summary = tk.StringVar()
         self.mode_summary = ttk.Label(self, padding=(14, 2))
@@ -470,39 +479,17 @@ class StrategySettingsPanel(ttk.Frame):
         for column in range(3):
             self.profile_nav.columnconfigure(column, weight=1, uniform="profile")
 
-        self.profile_tabs = ttk.Notebook(self)
-        self.profile_tabs.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        self.profile_grid = ttk.Frame(self, padding=(12, 0, 12, 8))
+        self.profile_grid.pack(fill="both", expand=True)
+        self.profile_grid.columnconfigure(0, weight=1, uniform="settings")
+        self.profile_grid.columnconfigure(1, weight=1, uniform="settings")
+        self.profile_grid.columnconfigure(2, weight=1, uniform="settings")
+        self.profile_grid.rowconfigure(0, weight=1)
         for index in range(3):
-            page = ttk.Frame(self.profile_tabs)
-            self.profile_tabs.add(page, text=f"설정 {index + 1}")
+            page = ttk.LabelFrame(self.profile_grid, text=f"설정 {index + 1}", padding=2)
+            page.grid(row=0, column=index, sticky="nsew", padx=3)
             self.profile_pages.append(page)
-        state_page = ttk.Frame(self.profile_tabs, padding=8)
-        self.profile_tabs.add(state_page, text="현재 종목 상태")
         self.active_symbol_status = tk.StringVar()
-        ttk.Label(state_page, textvariable=self.active_symbol_status, anchor="w").pack(fill="x")
-        self.profile_state_tree = ttk.Treeview(
-            state_page,
-            columns=("slot", "symbol", "name", "dmi", "minute", "daily", "status"),
-            show="headings",
-            height=20,
-        )
-        headings = {
-            "slot": "설정",
-            "symbol": "종목번호",
-            "name": "종목명",
-            "dmi": "DMI 기간",
-            "minute": "분봉 이평선",
-            "daily": "일자 이평선",
-            "status": "설정 상태",
-        }
-        widths = {"slot": 60, "symbol": 90, "name": 130, "dmi": 75, "minute": 130, "daily": 130, "status": 100}
-        for column, heading in headings.items():
-            self.profile_state_tree.heading(column, text=heading)
-            self.profile_state_tree.column(column, width=widths[column], anchor="center")
-        self.profile_state_tree.pack(fill="both", expand=True, pady=(8, 0))
-        self.profile_state_tree.tag_configure("configured", foreground="#0b6b35")
-        self.profile_state_tree.tag_configure("empty", foreground="#666666")
-        self.profile_tabs.bind("<<NotebookTabChanged>>", self._on_profile_tab_changed)
 
         editor = ttk.Frame(self, padding=(12, 0, 12, 8))
         editor.pack(fill="x")
@@ -648,14 +635,10 @@ class StrategySettingsPanel(ttk.Frame):
     def select_profile(self, index: int, store_current: bool = True) -> None:
         self._ensure_profile_page(index)
         self.selected = index
-        if self.profile_tabs.index(self.profile_tabs.select()) != index:
-            self.profile_tabs.select(index)
         self.update_summary()
 
     def _on_profile_tab_changed(self, _event=None) -> None:
-        selected = self.profile_tabs.index(self.profile_tabs.select())
-        if selected < len(self.profile_pages) and selected != self.selected:
-            self.select_profile(selected, store_current=False)
+        return
 
     def update_summary(self) -> None:
         app = self.parent_app
@@ -686,6 +669,8 @@ class StrategySettingsPanel(ttk.Frame):
 
     def _refresh_profile_state_table(self) -> None:
         """Show all 20 saved symbol/profile summaries without opening each page."""
+        if not hasattr(self, "profile_state_tree"):
+            return
         for item in self.profile_state_tree.get_children():
             self.profile_state_tree.delete(item)
         for index, profile in enumerate(self.profiles):
