@@ -458,21 +458,21 @@ class StrategySettingsPanel(ttk.Frame):
         self.profile_nav.pack(fill="x")
         self.profile_buttons: list[ttk.Button] = []
         self.selected_profile_label = tk.StringVar()
-        for index in range(20):
+        for index in range(3):
             button = ttk.Button(
                 self.profile_nav,
                 text=f"설정 {index + 1}",
                 command=lambda i=index: self.select_profile(i),
             )
-            button.grid(row=index // 5, column=index % 5, sticky="ew", padx=3, pady=1)
+            button.grid(row=0, column=index, sticky="ew", padx=3, pady=1)
             self.profile_buttons.append(button)
         self._refresh_profile_buttons()
-        for column in range(5):
+        for column in range(3):
             self.profile_nav.columnconfigure(column, weight=1, uniform="profile")
 
         self.profile_tabs = ttk.Notebook(self)
         self.profile_tabs.pack(fill="both", expand=True, padx=12, pady=(0, 8))
-        for index in range(20):
+        for index in range(3):
             page = ttk.Frame(self.profile_tabs)
             self.profile_tabs.add(page, text=f"설정 {index + 1}")
             self.profile_pages.append(page)
@@ -654,7 +654,7 @@ class StrategySettingsPanel(ttk.Frame):
 
     def _on_profile_tab_changed(self, _event=None) -> None:
         selected = self.profile_tabs.index(self.profile_tabs.select())
-        if selected < 20 and selected != self.selected:
+        if selected < len(self.profile_pages) and selected != self.selected:
             self.select_profile(selected, store_current=False)
 
     def update_summary(self) -> None:
