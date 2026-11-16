@@ -1397,22 +1397,43 @@ class TraderApp(tk.Tk):
             font=("Malgun Gothic", 11, "bold"),
         ).grid(row=0, column=0, sticky="w")
         ttk.Button(monitor_header, text="새로고침", command=self._refresh_monitor).grid(row=0, column=1)
-        monitor_frame = ttk.Frame(monitor_body)
-        monitor_frame.grid(row=1, column=0, sticky="nsew")
-        monitor_frame.columnconfigure(0, weight=1)
-        monitor_frame.rowconfigure(0, weight=1)
-        monitor_columns = ("구분", "시간", "종목번호", "종목명", "매수/매도", "수량", "가격", "상태", "비고")
-        self.monitor_table = ttk.Treeview(monitor_frame, columns=monitor_columns, show="headings")
-        monitor_widths = {"구분": 90, "시간": 110, "종목번호": 100, "종목명": 150, "매수/매도": 100, "수량": 80, "가격": 110, "상태": 140, "비고": 360}
-        for column in monitor_columns:
+        monitor_toolbar = ttk.Frame(monitor_body)
+        monitor_toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(monitor_toolbar, text="전 종목 로딩", command=self._show_symbol_source_notice).pack(side="left")
+        ttk.Button(monitor_toolbar, text="조건검색", command=self._open_watchlist_window).pack(side="left", padx=(6, 0))
+        ttk.Label(monitor_toolbar, text="조건검색에서 등록한 종목만 자동 감시합니다.").pack(side="left", padx=(10, 0))
+
+        monitor_frame = ttk.PanedWindow(monitor_body, orient="horizontal")
+        monitor_frame.grid(row=2, column=0, sticky="nsew")
+        left_frame = ttk.LabelFrame(monitor_frame, text="거래종목 · 실시간 감시")
+        right_frame = ttk.LabelFrame(monitor_frame, text="보유종목 · 체결 현황")
+        monitor_frame.add(left_frame, weight=3)
+        monitor_frame.add(right_frame, weight=2)
+        left_frame.columnconfigure(0, weight=1)
+        left_frame.rowconfigure(0, weight=1)
+        right_frame.columnconfigure(0, weight=1)
+        right_frame.rowconfigure(0, weight=1)
+        watch_columns = ("종목코드", "종목명", "현재가", "등락률", "거래량", "감시상태")
+        self.monitor_table = ttk.Treeview(left_frame, columns=watch_columns, show="headings")
+        watch_widths = {"종목코드": 90, "종목명": 150, "현재가": 100, "등락률": 90, "거래량": 110, "감시상태": 120}
+        for column in watch_columns:
             self.monitor_table.heading(column, text=column)
-            self.monitor_table.column(column, width=monitor_widths[column], minwidth=70, stretch=column in {"종목명", "비고"}, anchor="center")
+            self.monitor_table.column(column, width=watch_widths[column], minwidth=70, stretch=column == "종목명", anchor="center")
         self.monitor_table.tag_configure("ready", foreground="#1769a7")
         self.monitor_table.tag_configure("warning", foreground="#a12622")
         self.monitor_table.grid(row=0, column=0, sticky="nsew")
-        monitor_scroll = ttk.Scrollbar(monitor_frame, orient="vertical", command=self.monitor_table.yview)
-        monitor_scroll.grid(row=0, column=1, sticky="ns")
-        self.monitor_table.configure(yscrollcommand=monitor_scroll.set)
+        watch_scroll = ttk.Scrollbar(left_frame, orient="vertical", command=self.monitor_table.yview)
+        watch_scroll.grid(row=0, column=1, sticky="ns")
+        self.monitor_table.configure(yscrollcommand=watch_scroll.set)
+        holding_columns = ("종목번호", "종목명", "보유수량", "평균가", "현재가", "평가손익", "수익률")
+        self.monitor_holdings_table = ttk.Treeview(right_frame, columns=holding_columns, show="headings")
+        for column in holding_columns:
+            self.monitor_holdings_table.heading(column, text=column)
+            self.monitor_holdings_table.column(column, width=95, minwidth=70, stretch=column == "종목명", anchor="center")
+        self.monitor_holdings_table.grid(row=0, column=0, sticky="nsew")
+        holding_scroll = ttk.Scrollbar(right_frame, orient="vertical", command=self.monitor_holdings_table.yview)
+        holding_scroll.grid(row=0, column=1, sticky="ns")
+        self.monitor_holdings_table.configure(yscrollcommand=holding_scroll.set)
         self._refresh_monitor()
 
         self.trade_history_window = tk.Toplevel(self)
@@ -1712,23 +1733,36 @@ class TraderApp(tk.Tk):
             return
         for item in self.monitor_table.get_children():
             self.monitor_table.delete(item)
+        for item in self.monitor_holdings_table.get_children():
+            self.monitor_holdings_table.delete(item)
         symbol = normalize_symbol(self.symbol_var.get())
         name = self.symbol_name_var.get().strip() or "종목명 미설정"
         connected = self.connection_state_var.get()
         ready = bool(symbol and symbol != "000000" and name != "종목명 미설정")
         status = "자동운용 가능" if ready else "종목 세팅 필요"
         tag = "ready" if ready else "warning"
-        self.monitor_title_var.set(f"자동매매 모니터 · {symbol or '종목 미설정'} {name}")
-        self.monitor_table.insert(
-            "",
-            "end",
-            values=("현재 상태", datetime.now().strftime("%H:%M:%S"), symbol or "-", name, "허용", "-", "-", status, connected),
-            tags=(tag,),
-        )
-        self.monitor_table.insert(
-            "",
-            "end",
-            values=("운용 설정", "-", symbol or "-", name, "매수/매도", "-", "-", self.symbol_profile_var.get(), "설정 확정 후 운용"),
+        self.monitor_title_var.set(f"자동매매 모니터 · 감시 {len(self.service.watchlist_items())}종목 · {connected}")
+        watch_rows = self.service.watchlist_rows()
+        if not watch_rows and ready:
+            self.monitor_table.insert("", "end", values=(symbol, name, "-", "-", "-", status), tags=(tag,))
+        for quote in watch_rows:
+            has_price = quote.current_price > 0
+            self.monitor_table.insert(
+                "", "end",
+                values=(quote.symbol, quote.name or "미조회", f"{quote.current_price:,.0f}" if has_price else "-", self._format_watchlist_change(quote.change) if has_price else "-", f"{quote.volume:,}" if quote.volume else "-", "감시 중"),
+                tags=("ready",),
+            )
+        balance = self.service.balance_summary
+        for holding in list(balance.holdings) if balance else []:
+            self.monitor_holdings_table.insert(
+                "", "end",
+                values=(holding.symbol, holding.name or "미조회", f"{holding.quantity:,}", f"{holding.average_price:,.0f}", f"{holding.current_price:,.0f}", f"{holding.profit_loss:,.0f}", f"{holding.profit_rate:.2f}%"),
+            )
+
+    def _show_symbol_source_notice(self) -> None:
+        messagebox.showinfo(
+            "전 종목 로딩",
+            "키움 API에서 제공하는 종목목록 연동 후 전체 KOSPI/KOSDAQ을 불러올 수 있습니다.\n현재는 조건검색 또는 관심종목 등록 항목을 감시 목록으로 사용합니다.",
         )
 
     def _load_strategy_profiles(self) -> None:
