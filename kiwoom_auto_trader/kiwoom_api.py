@@ -117,6 +117,16 @@ def _to_int(value: Any) -> int:
 
 
 class _KiwoomEventSink:
+    def OnReceiveTrCondition(self, screen_no: str, code_list: str, name: str, index: int, next_flag: int) -> None:
+        client = getattr(self, "_client", None)
+        if client is not None:
+            client._condition_search_events.append((str(screen_no), str(code_list), str(name), int(index), int(next_flag)))
+
+    def OnReceiveConditionVer(self, success: int, message: str) -> None:
+        client = getattr(self, "_client", None)
+        if client is not None:
+            client._condition_load_result = (bool(success), str(message))
+
     def OnReceiveTrData(
         self,
         screen_no: str,
@@ -202,6 +212,8 @@ class KiwoomOpenApiClient:
         self._login_window_status = ""
         self._login_window_nudger = login_window_nudger or self._nudge_login_window_to_front
         self._request_limiter = request_limiter or KiwoomRequestLimiter()
+        self._condition_load_result: tuple[bool, str] | None = None
+        self._condition_search_events: deque[tuple[str, str, str, int, int]] = deque()
 
     def check_environment(self) -> KiwoomEnvironmentStatus:
         process_bits = struct.calcsize("P") * 8
@@ -338,6 +350,70 @@ class KiwoomOpenApiClient:
 
     def get_server_name(self) -> str:
         return "모의투자" if self.is_mock_server() else "실거래"
+
+    def list_market_symbols(self, market: str) -> list[str]:
+        market_code = {"KOSPI": "0", "KOSDAQ": "10"}.get(market.upper())
+        if market_code is None:
+            raise ValueError("시장 구분은 KOSPI 또는 KOSDAQ이어야 합니다.")
+        if not self.is_connected():
+            raise KiwoomOpenApiError("종목 목록 조회 전에 키움 OpenAPI+에 로그인해 주세요.")
+        api = self._ensure_api()
+        try:
+            raw = str(self._call_api(lambda: api.GetCodeListByMarket(market_code)) or "")
+        except Exception as exc:
+            raise KiwoomOpenApiError(f"{market} 종목 목록 조회 실패: {exc}") from exc
+        return list(dict.fromkeys(code for code in (normalize_symbol(item) for item in raw.split(";")) if code))
+
+    def list_saved_conditions(self, timeout_seconds: float = DEFAULT_TR_TIMEOUT_SECONDS) -> list[tuple[int, str]]:
+        if not self.is_connected():
+            raise KiwoomOpenApiError("조건검색 전에 키움 OpenAPI+에 로그인해 주세요.")
+        api = self._ensure_api()
+        self._condition_load_result = None
+        self._request_limiter.acquire()
+        if int(self._call_api(lambda: api.GetConditionLoad())) != 1:
+            raise KiwoomOpenApiError("키움 조건식 불러오기 요청에 실패했습니다.")
+        deadline = time.monotonic() + timeout_seconds
+        while self._condition_load_result is None and time.monotonic() < deadline:
+            self.pump_messages()
+            time.sleep(0.05)
+        if self._condition_load_result is None:
+            raise KiwoomOpenApiError("키움 조건식 수신 대기 시간이 초과되었습니다.")
+        success, message = self._condition_load_result
+        if not success:
+            raise KiwoomOpenApiError(f"키움 조건식 불러오기 실패: {message}")
+        raw = str(self._call_api(lambda: api.GetConditionNameList()) or "")
+        conditions = []
+        for entry in raw.split(";"):
+            index, separator, name = entry.partition("^")
+            if separator and index.isdigit() and name.strip():
+                conditions.append((int(index), name.strip()))
+        return conditions
+
+    def search_condition(self, index: int, name: str, timeout_seconds: float = DEFAULT_TR_TIMEOUT_SECONDS) -> list[str]:
+        if (index, name) not in self.list_saved_conditions():
+            raise KiwoomOpenApiError("저장된 키움 조건식을 선택해 주세요.")
+        api = self._ensure_api()
+        screen = self._next_screen_no()
+        self._condition_search_events.clear()
+        self._request_limiter.acquire()
+        if int(self._call_api(lambda: api.SendCondition(screen, name, index, 0))) != 1:
+            raise KiwoomOpenApiError(f"{name} 조건검색 요청에 실패했습니다.")
+        symbols: list[str] = []
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            self.pump_messages()
+            if self._condition_search_events:
+                event_screen, codes, event_name, event_index, next_flag = self._condition_search_events.popleft()
+                if (event_screen, event_name, event_index) != (screen, name, index):
+                    continue
+                symbols.extend(code for code in (normalize_symbol(item) for item in codes.split(";")) if code)
+                if next_flag != 2:
+                    return list(dict.fromkeys(symbols))
+                self._request_limiter.acquire()
+                if int(self._call_api(lambda: api.SendCondition(screen, name, index, 2))) != 1:
+                    raise KiwoomOpenApiError("조건검색 연속조회에 실패했습니다.")
+            time.sleep(0.05)
+        raise KiwoomOpenApiError("키움 조건검색 응답 대기 시간이 초과되었습니다.")
 
     @property
     def last_login_error(self) -> int | None:

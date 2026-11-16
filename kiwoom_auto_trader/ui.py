@@ -1385,7 +1385,7 @@ class TraderApp(tk.Tk):
         monitor_toolbar = ttk.Frame(monitor_body)
         monitor_toolbar.grid(row=1, column=0, sticky="ew", pady=(0, 6))
         ttk.Button(monitor_toolbar, text="전 종목 로딩", command=self._show_symbol_source_notice).pack(side="left")
-        ttk.Button(monitor_toolbar, text="조건검색", command=self._open_watchlist_window).pack(side="left", padx=(6, 0))
+        ttk.Button(monitor_toolbar, text="조건검색", command=self._open_condition_search).pack(side="left", padx=(6, 0))
         ttk.Label(monitor_toolbar, text="조건검색에서 등록한 종목만 자동 감시합니다.").pack(side="left", padx=(10, 0))
 
         monitor_frame = ttk.PanedWindow(monitor_body, orient="horizontal")
@@ -1713,6 +1713,74 @@ class TraderApp(tk.Tk):
         self.monitor_window.lift()
         self.monitor_window.focus_force()
 
+    def _open_condition_search(self) -> None:
+        if self.service.connection_mode != "ACTIVEX" or not self.service.account_info.connected:
+            messagebox.showwarning("조건검색", "키움 OpenAPI+ 로그인 후 조건검색을 사용할 수 있습니다.")
+            return
+        try:
+            conditions = self.service.list_saved_conditions()
+        except RuntimeError as exc:
+            messagebox.showerror("조건검색", str(exc))
+            return
+        window = tk.Toplevel(self)
+        window.title("키움 조건검색")
+        window.geometry("550x560")
+        body = ttk.Frame(window, padding=10)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
+        selection = tk.StringVar()
+        choices = [f"{index} · {name}" for index, name in conditions]
+        ttk.Combobox(body, textvariable=selection, values=choices, state="readonly").grid(row=0, column=0, sticky="ew")
+        if choices:
+            selection.set(choices[0])
+        status = tk.StringVar(value="조건식을 선택하고 조회해 주세요.")
+        ttk.Label(body, textvariable=status).grid(row=1, column=0, sticky="w", pady=6)
+        table = ttk.Treeview(body, columns=("symbol",), show="headings")
+        table.heading("symbol", text="검색된 종목코드")
+        table.grid(row=2, column=0, sticky="nsew")
+
+        def search() -> None:
+            choice = selection.get()
+            if choice not in choices:
+                return
+            index, name = conditions[choices.index(choice)]
+            try:
+                symbols = self.service.search_condition(index, name)
+            except RuntimeError as exc:
+                messagebox.showerror("조건검색", str(exc), parent=window)
+                return
+            for item in table.get_children():
+                table.delete(item)
+            for symbol in symbols:
+                table.insert("", "end", values=(symbol,))
+            status.set(f"{name}: {len(symbols)}종목 조회 · 자동 주문 대상 아님")
+
+        def register_selected() -> None:
+            selected = table.selection()
+            if not selected:
+                return
+            symbol = table.item(selected[0], "values")[0]
+            self.service.add_watchlist_symbol(symbol)
+            self._refresh_monitor()
+            status.set(f"{symbol} 관심종목 등록 완료 · 자동 주문 승인과 별개")
+
+        def register_all() -> None:
+            symbols = [table.item(item, "values")[0] for item in table.get_children()]
+            if not symbols:
+                return
+            if not messagebox.askyesno("관심종목 일괄 등록", f"조회된 {len(symbols)}종목을 관심종목에 등록할까요? 최대 20개까지 등록됩니다.", parent=window):
+                return
+            added, skipped = self.service.add_watchlist_symbols(symbols)
+            self._refresh_monitor()
+            status.set(f"{added}종목 등록, {skipped}종목 건너뜀 · 자동 주문 승인과 별개")
+
+        actions = ttk.Frame(body)
+        actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(actions, text="조회", command=search).pack(side="left")
+        ttk.Button(actions, text="선택 종목 등록", command=register_selected).pack(side="left", padx=6)
+        ttk.Button(actions, text="결과 일괄 등록", command=register_all).pack(side="left")
+
     def _refresh_monitor(self) -> None:
         if not hasattr(self, "monitor_table"):
             return
@@ -1745,10 +1813,28 @@ class TraderApp(tk.Tk):
             )
 
     def _show_symbol_source_notice(self) -> None:
-        messagebox.showinfo(
-            "전 종목 로딩",
-            "키움 API에서 제공하는 종목목록 연동 후 전체 KOSPI/KOSDAQ을 불러올 수 있습니다.\n현재는 조건검색 또는 관심종목 등록 항목을 감시 목록으로 사용합니다.",
-        )
+        try:
+            markets = list(self.service.list_market_symbols().items())
+        except (ValueError, RuntimeError) as exc:
+            messagebox.showerror("전 종목 로딩", str(exc))
+            return
+        window = tk.Toplevel(self)
+        window.title("키움 전 종목 목록 · 조회 전용")
+        window.geometry("680x620")
+        frame = ttk.Frame(window, padding=8)
+        frame.pack(fill="both", expand=True)
+        count = sum(len(symbols) for _, symbols in markets)
+        ttk.Label(frame, text=f"KOSPI/KOSDAQ {count:,}종목 · 조회 전용, 자동 주문 대상 아님").pack(anchor="w")
+        table = ttk.Treeview(frame, columns=("market", "symbol"), show="headings")
+        table.heading("market", text="시장")
+        table.heading("symbol", text="종목코드")
+        table.pack(side="left", fill="both", expand=True)
+        scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview)
+        scroll.pack(side="right", fill="y")
+        table.configure(yscrollcommand=scroll.set)
+        for market, symbols in markets:
+            for symbol in symbols:
+                table.insert("", "end", values=(market, symbol))
 
     def _load_strategy_profiles(self) -> None:
         try:

@@ -479,6 +479,23 @@ class AutoTradingService:
         self.storage.log("INFO", "관심종목", self.last_api_message)
         return normalized
 
+    def add_watchlist_symbols(self, symbols: list[str]) -> tuple[int, int]:
+        existing = {symbol for symbol, _name in self.watchlist_items()}
+        added = 0
+        skipped = 0
+        for symbol in symbols:
+            normalized = normalize_symbol(symbol)
+            if not normalized or normalized in existing or len(existing) >= 20:
+                skipped += 1
+                continue
+            if self.add_watchlist_symbol(normalized):
+                existing.add(normalized)
+                added += 1
+            else:
+                skipped += 1
+        self.last_api_message = f"관심종목 {added}개 등록, {skipped}개 건너뜀 (최대 20개)"
+        return added, skipped
+
     def remove_watchlist_symbol(self, symbol: str) -> None:
         normalized = normalize_symbol(symbol)
         if not normalized:
@@ -490,6 +507,30 @@ class AutoTradingService:
 
     def watchlist_items(self) -> list[tuple[str, str]]:
         return self.storage.watchlist_symbols()
+
+    def list_market_symbols(self) -> dict[str, list[str]]:
+        if self.connection_mode != "ACTIVEX" or not self.account_info.connected:
+            raise KiwoomOpenApiError("전 종목 목록은 키움 OpenAPI+ 로그인 후 조회할 수 있습니다.")
+        result = {
+            market: self.kiwoom_api.list_market_symbols(market)
+            for market in ("KOSPI", "KOSDAQ")
+        }
+        self.last_api_message = f"시장별 종목 {sum(map(len, result.values())):,}개 조회 완료"
+        self.storage.log("INFO", "종목", self.last_api_message)
+        return result
+
+    def list_saved_conditions(self) -> list[tuple[int, str]]:
+        if self.connection_mode != "ACTIVEX" or not self.account_info.connected:
+            raise KiwoomOpenApiError("조건검색은 키움 OpenAPI+ 로그인 후 사용할 수 있습니다.")
+        return self.kiwoom_api.list_saved_conditions()
+
+    def search_condition(self, index: int, name: str) -> list[str]:
+        if self.connection_mode != "ACTIVEX" or not self.account_info.connected:
+            raise KiwoomOpenApiError("조건검색은 키움 OpenAPI+ 로그인 후 사용할 수 있습니다.")
+        symbols = self.kiwoom_api.search_condition(index, name)
+        self.last_api_message = f"{name} 조건검색 {len(symbols)}종목 조회 완료"
+        self.storage.log("INFO", "조건검색", self.last_api_message)
+        return symbols
 
     def watchlist_rows(self) -> list[WatchlistQuote]:
         return [

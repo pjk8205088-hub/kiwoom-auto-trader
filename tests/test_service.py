@@ -244,6 +244,53 @@ class FakeWatchlistApi:
 
 
 class AutoTradingServiceTests(unittest.TestCase):
+    def test_bulk_watchlist_registration_skips_duplicates_and_capacity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "bulk-watch.sqlite3"))
+            symbols = [f"{index:06d}" for index in range(1, 23)]
+
+            self.assertEqual(service.add_watchlist_symbols(symbols + [symbols[0]]), (20, 3))
+            self.assertEqual(len(service.watchlist_items()), 20)
+            self.assertEqual(service.add_watchlist_symbols([symbols[0], symbols[20]]), (0, 2))
+
+    def test_condition_search_does_not_register_or_order_symbols(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "conditions.sqlite3"))
+            with self.assertRaises(KiwoomOpenApiError):
+                service.list_saved_conditions()
+
+            class ConditionApi:
+                def list_saved_conditions(self):
+                    return [(0, "장초반")]
+
+                def search_condition(self, index, name):
+                    return ["005930", "000660"]
+
+            service.kiwoom_api = ConditionApi()
+            service.account_info = KiwoomAccountInfo(True, ["1234567890"])
+            self.assertEqual(service.list_saved_conditions(), [(0, "장초반")])
+            self.assertEqual(service.search_condition(0, "장초반"), ["005930", "000660"])
+            self.assertEqual(service.watchlist_items(), [])
+            self.assertEqual(service.storage.recent_orders(10), [])
+
+    def test_market_symbols_are_read_only_and_require_openapi_login(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "markets.sqlite3"))
+            with self.assertRaises(KiwoomOpenApiError):
+                service.list_market_symbols()
+
+            class MarketApi:
+                def list_market_symbols(self, market):
+                    return ["005930"] if market == "KOSPI" else ["035420"]
+
+            service.kiwoom_api = MarketApi()
+            service.account_info = KiwoomAccountInfo(True, ["1234567890"])
+            self.assertEqual(
+                service.list_market_symbols(),
+                {"KOSPI": ["005930"], "KOSDAQ": ["035420"]},
+            )
+            self.assertEqual(service.watchlist_items(), [])
+
     def test_start_records_time_once_and_snapshot_keeps_it_after_stop(self):
         with tempfile.TemporaryDirectory() as directory:
             service = AutoTradingService(

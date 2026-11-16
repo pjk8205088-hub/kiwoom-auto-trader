@@ -55,6 +55,23 @@ class FakeKiwoomApi:
         }
         return values.get(code, "")
 
+    def GetCodeListByMarket(self, market):
+        return {"0": "005930;000660;", "10": "035420;"}.get(market, "")
+
+    def GetConditionLoad(self):
+        self.condition_client._condition_load_result = (True, "OK")
+        return 1
+
+    def GetConditionNameList(self):
+        return "0^장초반;2^단기추세;잘못된항목;"
+
+    def SendCondition(self, screen, name, index, search_type):
+        if search_type == 0:
+            self.condition_client._condition_search_events.append((screen, "005930;000660;", name, index, 2))
+        else:
+            self.condition_client._condition_search_events.append((screen, "000660;035420;", name, index, 0))
+        return 1
+
     def SetInputValue(self, key, value):
         self.inputs[key] = value
 
@@ -118,6 +135,58 @@ class FakeKiwoomApi:
 
 
 class KiwoomOpenApiClientTests(unittest.TestCase):
+    def test_condition_search_collects_all_pages_without_duplicate_orders(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+        fake.condition_client = client
+
+        self.assertEqual(client.search_condition(0, "장초반"), ["005930", "000660", "035420"])
+        self.assertEqual(fake.order_calls, [])
+
+    def test_condition_search_rejects_unknown_saved_condition(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+        fake.condition_client = client
+
+        with self.assertRaises(KiwoomOpenApiError):
+            client.search_condition(9, "없음")
+
+    def test_loads_saved_conditions_after_success_event(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+        fake.condition_client = client
+
+        self.assertEqual(client.list_saved_conditions(), [(0, "장초반"), (2, "단기추세")])
+
+    def test_rejects_failed_condition_load(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+        fake.condition_client = client
+        fake.GetConditionLoad = lambda: 0
+
+        with self.assertRaises(KiwoomOpenApiError):
+            client.list_saved_conditions()
+
+    def test_lists_kospi_and_kosdaq_symbols(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        self.assertEqual(client.list_market_symbols("KOSPI"), ["005930", "000660"])
+        self.assertEqual(client.list_market_symbols("kosdaq"), ["035420"])
+
+    def test_market_symbol_list_requires_login_and_valid_market(self):
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: FakeKiwoomApi())
+
+        with self.assertRaises(KiwoomOpenApiError):
+            client.list_market_symbols("KOSPI")
+        with self.assertRaises(ValueError):
+            client.list_market_symbols("UNKNOWN")
+
     def test_starts_login_with_comm_connect(self):
         fake = FakeKiwoomApi()
         nudged = []
