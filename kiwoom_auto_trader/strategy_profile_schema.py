@@ -18,6 +18,16 @@ _PROFILE = {
     "name": "기본",
     "buyEnabled": True,
     "sellEnabled": True,
+    "pdf": {
+        "enabled": False, "conditionCombine": "AND", "shortOnly": False,
+        "minuteInterval": 1,
+        "dailyMaEnabled": True, "dailyShortPeriod": 5, "dailyLongPeriod": 7,
+        "buyStart": "09:00", "buyEnd": "15:20",
+        "sellStart": "09:00", "sellEnd": "15:20",
+        "buyTimeLimit": False, "sellTimeLimit": False,
+        "reboundPct": 0.0, "openReclaimPct": 0.0, "dropFromOpenPct": 0.0,
+        "targetPct": 0.0, "stopLossPct": 2.5,
+    },
     "bar": {"combine": "BOTH", "minute": _line(True), "daily": _line(),
             "candle": {"buyRequireBullish": True, "sellRequireBearish": True, "dojiCountsAs": "NEITHER"},
             "pivot": {"lookback": 2, "compareCount": 2, "enabled": True}},
@@ -55,6 +65,7 @@ _PROFILE = {
 }
 
 GROUP_LABELS = {
+    "pdf": "기획서 매매 조건",
     "bar": "요즘 평균 가격", "buy": "매수 조건", "buyBlock": "매수 제한 조건",
     "sell": "매도 조건", "sellBlock": "매도 제한 조건", "order": "주문 방법",
     "minute": "분봉 가격 흐름", "daily": "일봉 가격 흐름", "candle": "캔들 모양",
@@ -62,6 +73,17 @@ GROUP_LABELS = {
     "buyEnabled": "매수 허용", "sellEnabled": "매도 허용",
 }
 FIELD_LABELS = {
+    "buyStart": "매수 시작 시각", "buyEnd": "매수 종료 시각",
+    "conditionCombine": "전일 종가·시초가 조합",
+    "minuteInterval": "분봉 간격(1 또는 3분)",
+    "dailyMaEnabled": "분봉 진입 시 일자별 이평선 확인",
+    "dailyShortPeriod": "일자별 짧은 이평선 기간",
+    "dailyLongPeriod": "일자별 긴 이평선 기간",
+    "sellStart": "매도 시작 시각", "sellEnd": "매도 종료 시각",
+    "buyTimeLimit": "매수 시간 제한", "sellTimeLimit": "매도 시간 제한",
+    "reboundPct": "저점 반등률(%)", "openReclaimPct": "시초가 재돌파 상승률(%)",
+    "dropFromOpenPct": "시초가 하락 매도율(%)",
+    "stopLossPct": "보유 종목 손실 제한(%)",
     "combine": "함께 확인할 자료", "shortPeriod": "짧은 이동평균 기간", "longPeriod": "긴 이동평균 기간",
     "shortEnabled": "짧은 이동평균 사용", "longEnabled": "긴 이동평균 사용", "slopeBars": "기울기 확인 봉 수",
     "slopeEpsilonPct": "기울기 판정 기준(%)", "crossValidBars": "교차 후 인정 봉 수",
@@ -95,6 +117,7 @@ FIELD_LABELS = {
 }
 CHOICES = {
     "combine": {"BOTH": "분봉과 일봉 모두", "MINUTE_ONLY": "분봉만", "DAILY_ONLY": "일봉만"},
+    "conditionCombine": {"AND": "전일 종가와 시초가 모두", "OR": "전일 종가 또는 시초가"},
     "dojiCountsAs": {"NEITHER": "상승·하락 아님", "BULLISH": "양봉으로 판단", "BEARISH": "음봉으로 판단"},
     "sellPriceType": {"LIMIT_CURRENT": "현재가 지정가", "MARKET": "시장가"},
 }
@@ -160,10 +183,32 @@ def validate_profile(profile, index):
                 selected = profile["bar"]["candle"][key]
             elif key == "sellPriceType":
                 selected = profile["order"][key]
+            elif key == "conditionCombine":
+                selected = profile["pdf"][key]
             else:
                 selected = profile["bar"][key]
             if selected not in options:
                 errors.append(f"{FIELD_LABELS[key]} 선택을 확인해 주세요")
+        if profile["bar"]["combine"] not in {"BOTH", "MINUTE_ONLY", "DAILY_ONLY"}:
+            errors.append("분봉/일봉 선택을 확인해 주세요")
+        if profile["pdf"]["conditionCombine"] not in {"AND", "OR"}:
+            errors.append("기획서 매수 조합을 확인해 주세요")
+        if profile["pdf"]["minuteInterval"] not in {1, 3}:
+            errors.append("기획서 분봉 간격: 1 또는 3")
+        daily_short = int(profile["pdf"]["dailyShortPeriod"])
+        daily_long = int(profile["pdf"]["dailyLongPeriod"])
+        if not 2 <= daily_short < daily_long <= 60:
+            errors.append("일자별 이평선은 2~60일이며 짧은 기간이 긴 기간보다 작아야 합니다")
+        for key in ("buyStart", "buyEnd", "sellStart", "sellEnd"):
+            raw = profile["pdf"][key]
+            try:
+                from datetime import time
+                time.fromisoformat(raw)
+            except ValueError:
+                errors.append(f"{FIELD_LABELS[key]}: HH:MM 형식")
+        for key in ("reboundPct", "openReclaimPct", "dropFromOpenPct", "targetPct", "stopLossPct"):
+            if not 0 <= float(profile["pdf"][key]) <= 100:
+                errors.append(f"{FIELD_LABELS[key]}: 0~100")
         for key, section in (("분봉", profile["bar"]["minute"]), ("일봉", profile["bar"]["daily"])):
             short, long = int(section["shortPeriod"]), int(section["longPeriod"])
             if not 1 <= short <= 200 or not 1 <= long <= 200 or short >= long:

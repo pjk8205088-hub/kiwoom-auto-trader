@@ -47,6 +47,24 @@ def response(body):
 
 
 class KiwoomRestApiClientTests(unittest.TestCase):
+    def test_multi_symbol_websocket_registration_keeps_each_quote(self):
+        client = KiwoomRestApiClient(mock=True, rate_limiter=NoopLimiter())
+        client._real_time_symbol = "005930"
+        client._real_time_symbols = ("005930", "000660")
+        registration = client._register_real_time_message()
+        self.assertEqual(registration["data"][0]["item"], ["005930", "000660"])
+        client._handle_websocket_message({
+            "trnm": "REAL",
+            "data": [
+                {"type": "0B", "item": "005930", "values": {"20": "090001", "10": "+70000"}},
+                {"type": "0B", "item": "000660", "values": {"20": "090002", "10": "+200000"}},
+            ],
+        })
+        self.assertEqual(client.latest_real_time_quote("005930").current_price, 70000)
+        self.assertEqual(client.latest_real_time_quote("000660").current_price, 200000)
+        self.assertEqual(len(client.drain_real_time_quotes("005930")), 1)
+        self.assertEqual(len(client.drain_real_time_quotes("000660")), 1)
+
     def test_requests_and_parses_daily_candles(self):
         requester = FakeRequester([
             response({"token": "test-token", "expires_dt": "20991231235959"}),

@@ -82,6 +82,10 @@ class MarketQuote:
     volume: int = 0
     timestamp: str = ""
     message: str = ""
+    open_price: float = 0.0
+    high_price: float = 0.0
+    low_price: float = 0.0
+    trade_value: float = 0.0
 
 
 @dataclass(frozen=True)

@@ -106,13 +106,18 @@ class AutoTradingService:
         self.market_quote: MarketQuote | None = None
         self.balance_summary: BalanceSummary | None = None
         self.real_time_symbol = ""
+        self.profile_real_time_symbols: tuple[str, ...] = ()
         self.real_time_quote: RealTimeQuote | None = None
         self._real_time_registration_logged = False
         self._first_real_time_quote_logged_symbol = ""
         self.watchlist_quotes: dict[str, WatchlistQuote] = {}
         self._watch_engines: dict[str, StrategyEngine] = {}
         self._watch_daily_history: dict[str, tuple[str, list[Candle]]] = {}
+        self._watch_minute_history: dict[str, tuple[int, list[Candle]]] = {}
+        self._watch_realtime_keys: dict[str, tuple[str, float, int]] = {}
+        self._auto_order_keys: set[tuple[str, str, str]] = set()
         self.last_api_message = ""
+        self.last_order_success = False
         self.last_order_account_access_verified: bool | None = None
         self.started_at: datetime | None = None
 
@@ -342,6 +347,7 @@ class AutoTradingService:
         self.market_quote = None
         self.balance_summary = None
         self.real_time_symbol = ""
+        self.profile_real_time_symbols = ()
         self.real_time_quote = None
         self._real_time_registration_logged = False
         self._first_real_time_quote_logged_symbol = ""
@@ -399,7 +405,26 @@ class AutoTradingService:
             except API_ERRORS as exc:
                 self.last_api_message = str(exc)
                 return False
-        return bool(self.real_time_symbol and self.account_info.connected)
+        return bool((self.real_time_symbol or self.profile_real_time_symbols) and self.account_info.connected)
+
+    def register_profile_realtime(self, symbols: tuple[str, ...]) -> str:
+        normalized = tuple(dict.fromkeys(normalize_symbol(item) for item in symbols))
+        normalized = tuple(item for item in normalized if item and item != "000000")
+        if not normalized:
+            raise ValueError("실시간 등록할 설정 종목이 없습니다.")
+        api = self._active_api()
+        try:
+            if self.connection_mode == "ACTIVEX":
+                self.last_api_message = api.register_real_time_prices(list(normalized))
+            else:
+                self.last_api_message = api.register_real_time_prices(list(normalized))
+            self.profile_real_time_symbols = normalized
+            self.storage.log("INFO", "다중 실시간", self.last_api_message)
+        except API_ERRORS as exc:
+            self.profile_real_time_symbols = ()
+            self.last_api_message = str(exc)
+            self.storage.log("ERROR", "다중 실시간", self.last_api_message)
+        return self.last_api_message
 
     def lookup_symbol_name(self, symbol: str | None = None) -> str:
         target = normalize_symbol(symbol or self.symbol)
@@ -450,6 +475,11 @@ class AutoTradingService:
                     current_price=self.market_quote.current_price,
                     change=self.market_quote.change,
                     change_rate=self.market_quote.change_rate,
+                    volume=self.market_quote.volume,
+                    trade_value=self.market_quote.trade_value,
+                    open_price=self.market_quote.open_price,
+                    high_price=self.market_quote.high_price,
+                    low_price=self.market_quote.low_price,
                     timestamp=self.market_quote.timestamp,
                 )
             self.last_api_message = self.market_quote.message
@@ -558,11 +588,14 @@ class AutoTradingService:
             if engine is None or engine.settings != settings:
                 engine = StrategyEngine(settings)
                 self._watch_engines[symbol] = engine
+            profile = settings.profile or {}
             try:
-                candles = api.request_minute_candles(symbol, interval=3, count=120)
+                interval = int(profile.get("pdf", {}).get("minuteInterval", 1)) if profile.get("pdf", {}).get("enabled") else 3
+                candles = api.request_minute_candles(symbol, interval=interval, count=120)
                 daily_candles = None
-                profile = settings.profile or {}
                 needs_daily = profile and (
+                    profile.get("pdf", {}).get("enabled")
+                    or
                     profile.get("bar", {}).get("combine", "BOTH") in {"BOTH", "DAILY_ONLY"}
                     or profile.get("buyBlock", {}).get("X02_overExtended", {}).get("enabled")
                 )
@@ -570,22 +603,63 @@ class AutoTradingService:
                     today = datetime.now().strftime("%Y%m%d")
                     cached = self._watch_daily_history.get(symbol)
                     if cached is None or cached[0] != today:
-                        history = api.request_daily_candles(symbol, count=61)
+                        try:
+                            history = api.request_daily_candles(symbol, count=61)
+                        except API_ERRORS:
+                            if not profile.get("pdf", {}).get("enabled") or holdings.get(symbol, 0) <= 0:
+                                raise
+                            history = []
                         self._watch_daily_history[symbol] = (today, history)
                     daily_candles = self._watch_daily_history[symbol][1]
             except API_ERRORS as exc:
+                engine.last_pdf_state = None
                 self.storage.log("ERROR", "다중 감시", f"{symbol} 차트 조회 실패: {exc}")
                 results[symbol] = None
                 continue
-            required = settings.dmi_period + 1
+            required = 1 if profile.get("pdf", {}).get("enabled") else settings.dmi_period + 1
+            ordered = list(reversed(candles))
+            self._watch_minute_history[symbol] = (interval, ordered)
+            if len(candles) < required:
+                engine.last_pdf_state = None
             results[symbol] = (
                 engine.evaluate(
-                    list(reversed(candles)), daily_candles,
+                    ordered, daily_candles,
                     entry_price=holdings.get(symbol, 0.0),
+                    day_open=self.watchlist_quotes.get(symbol).open_price if symbol in self.watchlist_quotes else 0.0,
+                    day_low=self.watchlist_quotes.get(symbol).low_price if symbol in self.watchlist_quotes else 0.0,
                 )
                 if len(candles) >= required else None
             )
         return results
+
+    def request_monitor_candles(self, symbol: str, interval: int = 1) -> list[Candle]:
+        target = normalize_symbol(symbol)
+        if not target or interval not in {1, 3}:
+            return []
+        try:
+            return list(reversed(self._active_api().request_minute_candles(
+                target, interval=interval, count=120
+            )))
+        except API_ERRORS as exc:
+            self.storage.log("ERROR", "모니터 차트", f"{target}: {exc}")
+            return []
+
+    def request_monitor_daily_averages(
+        self, symbol: str, intraday: list[Candle], periods: tuple[int, ...]
+    ) -> dict[int, float]:
+        target = normalize_symbol(symbol)
+        if not target or not intraday or not periods or any(not 2 <= item <= 60 for item in periods):
+            return {}
+        try:
+            history = self._active_api().request_daily_candles(target, count=61)
+        except API_ERRORS as exc:
+            self.storage.log("ERROR", "모니터 차트", f"{target} 일봉 조회 실패: {exc}")
+            return {}
+        closes = StrategyEngine.daily_closes_with_intraday(history, intraday)
+        return {
+            period: sum(closes[-period:]) / period
+            for period in periods if len(closes) >= period
+        }
 
     def order_candidates(
         self,
@@ -595,7 +669,7 @@ class AutoTradingService:
         """Return eligible signal sides; never submit an order."""
         if not self.balance_summary:
             return {}
-        holdings = {item.symbol: item.quantity for item in self.balance_summary.holdings}
+        holdings = {normalize_symbol(item.symbol): item.quantity for item in self.balance_summary.holdings}
         candidates: dict[str, str] = {}
         for raw_symbol, decision in decisions.items():
             symbol = normalize_symbol(raw_symbol)
@@ -610,12 +684,16 @@ class AutoTradingService:
                 candidates[symbol] = "SELL"
         return candidates
 
+    def pdf_indicator_state(self, symbol: str) -> tuple[bool, bool, bool] | None:
+        engine = self._watch_engines.get(normalize_symbol(symbol))
+        return engine.last_pdf_state if engine is not None else None
+
     def plan_candidate_quantities(self, candidates: dict[str, str]) -> dict[str, int]:
         """Size candidate orders against current account data without submitting them."""
         balance = self.balance_summary
         if balance is None:
             return {}
-        holdings = {item.symbol: item.quantity for item in balance.holdings}
+        holdings = {normalize_symbol(item.symbol): item.quantity for item in balance.holdings}
         buys = [symbol for symbol, side in candidates.items() if side == "BUY"]
         available = max(0.0, min(
             balance.orderable_amount,
@@ -633,6 +711,177 @@ class AutoTradingService:
                 if quantity > 0:
                     plan[symbol] = quantity
         return plan
+
+    def execute_profile_orders(
+        self,
+        settings_by_symbol: dict[str, StrategySettings],
+        account: str,
+        account_password: str = "",
+        allow_real_order: bool = False,
+        regular_market_open: bool = False,
+    ) -> dict[str, str]:
+        """Run one guarded scan of explicitly enabled per-symbol PDF strategies."""
+        if not self.running or not self.account_info.connected:
+            return {}
+        real_account = self.account_info.server_type == "실거래"
+        if real_account and (not allow_real_order or not regular_market_open):
+            self.storage.log("WARN", "다중 자동주문", "실거래 승인 또는 정규장 확인이 없어 주문을 차단했습니다.")
+            return {}
+        if self.account_info.server_type not in {"실거래", "모의투자"}:
+            return {}
+        active = {
+            normalize_symbol(symbol): settings
+            for symbol, settings in settings_by_symbol.items()
+            if normalize_symbol(symbol) not in {"", "000000"}
+            and (settings.profile or {}).get("pdf", {}).get("enabled")
+        }
+        if not active or self.request_balance(account, password=account_password) is None:
+            return {}
+        self.refresh_watchlist_quotes(tuple(active))
+        fresh_quotes = {
+            symbol: quote for symbol, quote in self.watchlist_quotes.items()
+            if symbol in active and quote.current_price > 0
+        }
+        decisions = self.evaluate_watch_symbols(active)
+        return self._submit_profile_decisions(
+            active, decisions, fresh_quotes, account, account_password, allow_real_order
+        )
+
+    def execute_profile_tick_orders(
+        self,
+        settings_by_symbol: dict[str, StrategySettings],
+        account: str,
+        account_password: str = "",
+        allow_real_order: bool = False,
+        regular_market_open: bool = False,
+    ) -> dict[str, str]:
+        """Evaluate new live trades against the last verified minute/daily snapshot."""
+        if not self.running or not self.account_info.connected or self.balance_summary is None:
+            return {}
+        if self.account_info.server_type == "실거래" and (not allow_real_order or not regular_market_open):
+            return {}
+        if self.account_info.server_type not in {"실거래", "모의투자"}:
+            return {}
+        api = self._active_api()
+        today = datetime.now().strftime("%Y%m%d")
+        active: dict[str, StrategySettings] = {}
+        decisions: dict[str, TradeDecision | None] = {}
+        fresh_quotes: dict[str, WatchlistQuote] = {}
+        holdings = {
+            normalize_symbol(item.symbol): item.average_price
+            for item in self.balance_summary.holdings
+        }
+        for raw_symbol, settings in settings_by_symbol.items():
+            symbol = normalize_symbol(raw_symbol)
+            profile = settings.profile or {}
+            history = self._watch_minute_history.get(symbol)
+            daily = self._watch_daily_history.get(symbol)
+            quote_snapshot = self.watchlist_quotes.get(symbol)
+            if (not profile.get("pdf", {}).get("enabled") or history is None
+                    or daily is None or daily[0] != today or quote_snapshot is None):
+                continue
+            try:
+                live = api.latest_real_time_quote(symbol)
+            except API_ERRORS:
+                continue
+            if live is None or live.current_price <= 0:
+                continue
+            traded_at = RealTimeCandleAggregator._quote_datetime(live.timestamp, None)
+            if traded_at.strftime("%Y%m%d") != today:
+                continue
+            key = (live.timestamp, live.current_price, live.volume)
+            if self._watch_realtime_keys.get(symbol) == key:
+                continue
+            interval, bars = history
+            if interval != int(profile["pdf"].get("minuteInterval", 1)) or not bars:
+                continue
+            minute = (traded_at.minute // interval) * interval
+            bucket = traded_at.replace(minute=minute, second=0, microsecond=0).strftime("%Y%m%d%H%M%S")
+            previous_digits = "".join(char for char in bars[-1].timestamp if char.isdigit())
+            if len(previous_digits) < 12:
+                continue
+            previous_bucket = previous_digits[:12] + "00"
+            if bucket < previous_bucket:
+                continue
+            if bucket == previous_bucket:
+                last = bars[-1]
+                bars[-1] = Candle(
+                    open=last.open, high=max(last.high, live.current_price),
+                    low=min(last.low, live.current_price), close=live.current_price,
+                    volume=last.volume + abs(live.volume), timestamp=bucket,
+                )
+            else:
+                bars.append(Candle(
+                    open=live.current_price, high=live.current_price,
+                    low=live.current_price, close=live.current_price,
+                    volume=abs(live.volume), timestamp=bucket,
+                ))
+                del bars[:-120]
+            self._watch_realtime_keys[symbol] = key
+            fresh = replace(
+                quote_snapshot, current_price=live.current_price,
+                change=live.change if live.change else quote_snapshot.change,
+                change_rate=live.change_rate if live.change_rate else quote_snapshot.change_rate,
+                high_price=max(quote_snapshot.high_price, live.current_price),
+                low_price=min(quote_snapshot.low_price, live.current_price)
+                if quote_snapshot.low_price > 0 else live.current_price,
+                timestamp=live.timestamp,
+            )
+            self.watchlist_quotes[symbol] = fresh
+            engine = self._watch_engines.get(symbol)
+            if engine is None or engine.settings != settings:
+                engine = StrategyEngine(settings)
+                self._watch_engines[symbol] = engine
+            decisions[symbol] = engine.evaluate(
+                bars, daily[1], entry_price=holdings.get(symbol, 0.0),
+                day_open=fresh.open_price, day_low=fresh.low_price,
+            )
+            active[symbol] = settings
+            fresh_quotes[symbol] = fresh
+        return self._submit_profile_decisions(
+            active, decisions, fresh_quotes, account, account_password, allow_real_order
+        )
+
+    def _submit_profile_decisions(
+        self,
+        active: dict[str, StrategySettings],
+        decisions: dict[str, TradeDecision | None],
+        fresh_quotes: dict[str, WatchlistQuote],
+        account: str,
+        account_password: str,
+        allow_real_order: bool,
+    ) -> dict[str, str]:
+        candidates = self.order_candidates(decisions, active)
+        plan = self.plan_candidate_quantities(candidates)
+        results: dict[str, str] = {}
+        today = datetime.now().strftime("%Y%m%d")
+        for symbol, side in candidates.items():
+            if not self.running:
+                break
+            quantity = plan.get(symbol, 0)
+            quote = fresh_quotes.get(symbol)
+            decision = decisions.get(symbol)
+            key = (symbol, side, today)
+            if (not quantity or quote is None or quote.current_price <= 0
+                    or key in self._auto_order_keys
+                    or self.storage.successful_order_on_day(symbol, side, datetime.now().date().isoformat())):
+                continue
+            if decision is None or not decision.candle_timestamp.startswith(today):
+                self.storage.log("WARN", "다중 자동주문", f"{symbol} 오늘 분봉이 없어 주문하지 않았습니다.")
+                continue
+            results[symbol] = self.send_kiwoom_order(
+                account=account,
+                side=side,
+                quantity=quantity,
+                allow_real_order=allow_real_order,
+                account_password=account_password,
+                symbol=symbol,
+                reference_price=quote.current_price,
+                symbol_name=quote.name,
+            )
+            if self.last_order_success:
+                self._auto_order_keys.add(key)
+        return results
 
     def refresh_watchlist_quotes(self, extra_symbols: tuple[str, ...] = ()) -> list[WatchlistQuote]:
         items = self.watchlist_items()
@@ -782,19 +1031,64 @@ class AutoTradingService:
         self,
         symbol: str | None = None,
     ) -> TradeDecision | None:
-        candles = self.request_three_minute_candles(symbol)
-        required = self.strategy.settings.dmi_period + 1
+        profile = self.strategy.settings.profile or {}
+        pdf_mode = bool(profile.get("pdf", {}).get("enabled"))
+        if pdf_mode:
+            fresh_quote = self.request_current_price(symbol)
+            if fresh_quote is None or fresh_quote.current_price <= 0:
+                return None
+            interval = int(profile["pdf"].get("minuteInterval", 1))
+            try:
+                candles = self._active_api().request_minute_candles(
+                    normalize_symbol(symbol or self.symbol), interval=interval, count=120
+                )
+            except API_ERRORS as exc:
+                self.last_api_message = f"{interval}분봉 조회 실패: {exc}"
+                self.storage.log("ERROR", "전략", self.last_api_message)
+                return None
+        else:
+            interval = 3
+            candles = self.request_three_minute_candles(symbol)
+        required = 1 if pdf_mode else self.strategy.settings.dmi_period + 1
         if len(candles) < required:
-            self.last_api_message = f"DMI 전략 판단에 필요한 3분봉이 부족합니다({len(candles)}/{required})."
+            self.last_api_message = f"전략 판단에 필요한 {interval}분봉이 부족합니다({len(candles)}/{required})."
             self.storage.log("WARN", "전략", self.last_api_message)
             return None
         ordered_candles = list(reversed(candles))
-        decision = self.strategy.evaluate(ordered_candles)
+        daily_candles = None
+        entry_price = 0.0
+        if pdf_mode:
+            try:
+                daily_candles = self._active_api().request_daily_candles(
+                    normalize_symbol(symbol or self.symbol), count=61
+                )
+            except API_ERRORS as exc:
+                if not self.balance_summary or not any(
+                    normalize_symbol(item.symbol) == normalize_symbol(symbol or self.symbol)
+                    and item.quantity > 0 for item in self.balance_summary.holdings
+                ):
+                    self.last_api_message = f"전일 종가 조회 실패: {exc}"
+                    self.storage.log("ERROR", "전략", self.last_api_message)
+                    return None
+                daily_candles = []
+                self.storage.log("WARN", "전략", "일봉 조회 실패: 보유 종목의 손절/익절만 판단합니다.")
+            if self.balance_summary:
+                entry_price = next((
+                    item.average_price for item in self.balance_summary.holdings
+                    if normalize_symbol(item.symbol) == normalize_symbol(symbol or self.symbol)
+                ), 0.0)
+        quote = self.market_quote if self.market_quote and normalize_symbol(self.market_quote.symbol) == normalize_symbol(symbol or self.symbol) else None
+        decision = self.strategy.evaluate(
+            ordered_candles, daily_candles, entry_price,
+            day_open=quote.open_price if quote else 0.0,
+            day_low=quote.low_price if quote else 0.0,
+        )
         self.latest_dmi = self.strategy.last_dmi
         self.pattern_state = decision.pattern_state
         self.last_decision = decision
         adx_text = "계산 중" if decision.adx is None else f"{decision.adx:.2f}"
         self.last_api_message = (
+            f"{interval}분봉 기획서 전략 판단: {decision.action} / {decision.reason}" if pdf_mode else
             f"3분봉 DMI({self.strategy.settings.dmi_period}) 전략 판단: {decision.action} / "
             f"+DI {decision.dmi_plus or 0.0:.2f}, -DI {decision.dmi_minus or 0.0:.2f}, "
             f"ADX {adx_text} / {decision.reason}"
@@ -902,6 +1196,7 @@ class AutoTradingService:
         try:
             self.last_api_message = api.unregister_real_time()
             self.real_time_symbol = ""
+            self.profile_real_time_symbols = ()
             self.real_time_quote = None
             self._real_time_registration_logged = False
             self._first_real_time_quote_logged_symbol = ""
@@ -918,25 +1213,38 @@ class AutoTradingService:
         quantity: int,
         allow_real_order: bool = False,
         account_password: str = "",
+        symbol: str | None = None,
+        reference_price: float | None = None,
+        symbol_name: str | None = None,
     ) -> str:
         account = clean_account_number(account)
-        self.symbol = normalize_symbol(self.symbol) or self.symbol
-        result_side = "BUY" if side == "BUY" else "SELL"
+        target_symbol = normalize_symbol(symbol if symbol is not None else self.symbol)
+        result_side = str(side).upper()
+        if result_side not in {"BUY", "SELL"}:
+            raise ValueError("주문 방향은 BUY 또는 SELL이어야 합니다.")
         api = self._active_api()
-        order_price = float(self.current_price)
+        order_price = float(self.current_price if reference_price is None else reference_price)
         order_total = max(0, int(quantity)) * max(0.0, order_price)
-        order_symbol_name = self.symbol_name or known_symbol_name(self.symbol)
+        order_symbol_name = (
+            symbol_name or known_symbol_name(target_symbol)
+            or (self.symbol_name if target_symbol == normalize_symbol(self.symbol) else "")
+        )
         order_mode = self.account_info.server_type or ("실거래" if allow_real_order else "모의투자")
         order_no = ""
+        self.last_order_success = False
         self.last_order_account_access_verified = None
         try:
+            if allow_real_order and (
+                not self.account_info.connected or self.account_info.server_type != "실거래"
+            ):
+                raise KiwoomOpenApiError("실거래 계좌 연결 확인 전에는 실제 주문을 보낼 수 없습니다.")
             if not account:
                 raise KiwoomOpenApiError("주문할 계좌번호를 입력해 주세요.")
-            if not self.symbol:
+            if not target_symbol:
                 raise KiwoomOpenApiError("주문할 종목번호를 입력해 주세요.")
             if quantity <= 0:
                 raise KiwoomOpenApiError("주문 수량은 1주 이상 선택해 주세요.")
-            if self.symbol == "000000":
+            if target_symbol == "000000":
                 raise KiwoomOpenApiError("종목 세팅을 먼저 완료해 주세요.")
 
             if self.account_info.connection_method != "REST API":
@@ -968,11 +1276,11 @@ class AutoTradingService:
                     f"{mask_account_number(account)} REST 주문 전 최신 잔고와 주문가능금액을 재확인했습니다.",
                 )
 
-            holding_quantity = self._holding_quantity(self.symbol)
+            holding_quantity = self._holding_quantity(target_symbol)
             if result_side == "BUY":
                 if self.balance_summary is not None and self.total_capital_limit > 0:
                     current_evaluation = max(0.0, float(self.balance_summary.total_evaluation))
-                    estimated_cost = quantity * self.current_price
+                    estimated_cost = quantity * order_price
                     if current_evaluation + estimated_cost > self.total_capital_limit:
                         raise KiwoomOpenApiError(
                             f"계좌 총 운용 한도 {self.total_capital_limit:,.0f}원을 초과합니다. "
@@ -981,7 +1289,7 @@ class AutoTradingService:
                         )
                 risk_check = self.risk.approve_buy(
                     self.max_capital,
-                    self.current_price,
+                    order_price,
                     holding_quantity,
                 )
                 if not risk_check.approved:
@@ -997,7 +1305,7 @@ class AutoTradingService:
                         if self.balance_summary.orderable_amount > 0
                         else self.balance_summary.deposit
                     )
-                    estimated_cost = quantity * self.current_price
+                    estimated_cost = quantity * order_price
                     if estimated_cost > available_funds:
                         raise KiwoomOpenApiError(
                             f"예상 매수금액 {estimated_cost:,.0f}원이 계좌 주문가능금액 "
@@ -1009,7 +1317,7 @@ class AutoTradingService:
                 )
             request = KiwoomOrderRequest(
                 account=account,
-                symbol=self.symbol,
+                symbol=target_symbol,
                 side=result_side,
                 quantity=quantity,
                 price=0,
@@ -1039,10 +1347,10 @@ class AutoTradingService:
                     )
             self.storage.save_order_result(
                 OrderResult(
-                    self.symbol,
+                    target_symbol,
                     result_side,
                     quantity,
-                    self.current_price,
+                    order_price,
                     True,
                     self.last_api_message,
                     datetime.now(),
@@ -1052,15 +1360,16 @@ class AutoTradingService:
                     order_mode=order_mode,
                 )
             )
+            self.last_order_success = True
             self.storage.log("WARN" if allow_real_order else "INFO", "주문", self.last_api_message)
         except API_ERRORS as exc:
             self.last_api_message = str(exc)
             self.storage.save_order_result(
                 OrderResult(
-                    self.symbol,
+                    target_symbol,
                     result_side,
                     quantity,
-                    self.current_price,
+                    order_price,
                     False,
                     self.last_api_message,
                     datetime.now(),
@@ -1079,17 +1388,27 @@ class AutoTradingService:
         quantity: int,
         allow_real_order: bool = False,
         account_password: str = "",
+        auto: bool = False,
     ) -> TradeDecision | None:
         if quantity <= 0:
             self.last_api_message = "주문 수량은 1주 이상 선택해 주세요."
             self.storage.log("WARN", "주문", self.last_api_message)
             return None
+        if (self.strategy.settings.profile or {}).get("pdf", {}).get("enabled"):
+            if self.request_balance(account, password=account_password) is None:
+                return None
         decision = self.evaluate_strategy_with_market_data(self.symbol)
         if decision is None:
             return None
 
         if decision.action == "HOLD":
             self.storage.log("INFO", "자동주문", "전략 판단 결과 대기라 주문하지 않았습니다.")
+            return decision
+
+        if auto and self.storage.successful_order_on_day(
+            normalize_symbol(self.symbol), decision.action, datetime.now().date().isoformat()
+        ):
+            self.storage.log("INFO", "자동주문", "오늘 접수된 같은 종목·방향 주문이 있어 중복 주문을 막았습니다.")
             return decision
 
         if decision.action == "BUY":
@@ -1101,7 +1420,14 @@ class AutoTradingService:
                 return decision
             order_quantity = quantity
         else:
-            order_quantity = quantity
+            order_quantity = (
+                self._holding_quantity(self.symbol)
+                if (self.strategy.settings.profile or {}).get("pdf", {}).get("enabled")
+                else quantity
+            )
+            if order_quantity <= 0:
+                self.storage.log("WARN", "자동주문", "보유 수량을 확인할 수 없어 매도하지 않았습니다.")
+                return decision
 
         self.send_kiwoom_order(
             account=account,

@@ -32,6 +32,9 @@ class StorageTests(unittest.TestCase):
                     order_mode="실거래",
                 )
             )
+            self.assertTrue(storage.successful_order_on_day("005930", "BUY", "2026-07-20"))
+            self.assertFalse(storage.successful_order_on_day("005930", "SELL", "2026-07-20"))
+            self.assertFalse(storage.successful_order_on_day("005930", "BUY", "2026-07-21"))
 
             self.assertEqual(
                 storage.recent_trade_history(1)[0],

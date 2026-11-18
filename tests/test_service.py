@@ -1,6 +1,8 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo, KiwoomOpenApiError
 from kiwoom_auto_trader.models import (
@@ -245,6 +247,224 @@ class FakeWatchlistApi:
 
 
 class AutoTradingServiceTests(unittest.TestCase):
+    def test_live_profile_tick_can_trigger_order_between_chart_polls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "live-tick.sqlite3"))
+            service.running = True
+            service.max_capital = service.total_capital_limit = 1000
+            service.account_info = KiwoomAccountInfo(True, ["1234567890"], server_type="모의투자")
+            service.balance_summary = BalanceSummary(
+                account="1234567890", deposit=1000, orderable_amount=1000
+            )
+            today = datetime.now().strftime("%Y%m%d")
+            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+            service._watch_minute_history["005930"] = (1, [
+                Candle(open=100, high=100, low=99, close=99, timestamp=today + "090000"),
+                Candle(open=99, high=100, low=99, close=99, timestamp=today + "090100"),
+            ])
+            service._watch_daily_history["005930"] = (
+                today, [Candle(high=99, low=97, close=98, timestamp=yesterday)]
+            )
+            service.watchlist_quotes["005930"] = WatchlistQuote(
+                symbol="005930", name="삼성전자", current_price=99,
+                open_price=100, low_price=99,
+            )
+
+            class Api:
+                last_order_no = "TEST-2"
+                orders = []
+
+                def latest_real_time_quote(self, symbol):
+                    return RealTimeQuote(symbol, current_price=101, timestamp=today + "090200")
+
+                def request_balance(self, account, password=""):
+                    return BalanceSummary(account=account, deposit=1000, orderable_amount=1000)
+
+                def send_order(self, request):
+                    self.orders.append(request)
+                    return "모의 실시간 주문 접수"
+
+            api = Api()
+            service.kiwoom_api = api
+            profile = new_profile(0)
+            profile["pdf"].update(enabled=True, shortOnly=True, dailyMaEnabled=False,
+                                  conditionCombine="OR")
+            profile["bar"]["minute"].update(shortPeriod=2, longPeriod=3)
+            settings = {"005930": StrategySettings(profile=profile)}
+
+            first = service.execute_profile_tick_orders(settings, "1234567890", account_password="1234")
+            second = service.execute_profile_tick_orders(settings, "1234567890", account_password="1234")
+
+            self.assertIn("005930", first)
+            self.assertEqual(second, {})
+            self.assertEqual(len(api.orders), 1)
+            self.assertEqual(service._watch_minute_history["005930"][1][-1].close, 101)
+
+    def test_profile_order_flow_uses_configured_symbol_without_watchlist_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "profile-flow.sqlite3"))
+            service.running = True
+            service.symbol = "035420"
+            service.max_capital = service.total_capital_limit = 1000
+            service.account_info = KiwoomAccountInfo(
+                True, ["1234567890"], server_type="모의투자"
+            )
+            today = datetime.now().strftime("%Y%m%d")
+            yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+            bars = [
+                Candle(open=100, high=100, low=99, close=99, timestamp=today + "090000"),
+                Candle(open=99, high=100, low=99, close=99, timestamp=today + "090100"),
+                Candle(open=99, high=102, low=99, close=101, timestamp=today + "090200"),
+            ]
+
+            class Api:
+                last_order_no = "TEST-1"
+                orders = []
+
+                def request_balance(self, account, password=""):
+                    return BalanceSummary(account=account, deposit=1000, orderable_amount=1000)
+
+                def request_watchlist_quotes(self, symbols):
+                    return [WatchlistQuote(symbol="005930", name="삼성전자", current_price=101)]
+
+                def request_minute_candles(self, symbol, interval=1, count=120):
+                    return list(reversed(bars))
+
+                def request_daily_candles(self, symbol, count=61):
+                    return [Candle(high=99, low=97, close=98, timestamp=yesterday)]
+
+                def send_order(self, request):
+                    self.orders.append(request)
+                    return "모의 주문 접수"
+
+            api = Api()
+            service.kiwoom_api = api
+            profile = new_profile(0)
+            profile["pdf"].update(enabled=True, shortOnly=True, dailyMaEnabled=False,
+                                  conditionCombine="OR")
+            profile["bar"]["minute"].update(shortPeriod=2, longPeriod=3)
+            settings = {"005930": StrategySettings(profile=profile)}
+
+            first = service.execute_profile_orders(settings, "1234567890", account_password="1234")
+            second = service.execute_profile_orders(settings, "1234567890", account_password="1234")
+
+            self.assertIn("005930", first)
+            self.assertEqual(second, {})
+            self.assertEqual(len(api.orders), 1)
+            self.assertEqual(api.orders[0].symbol, "005930")
+            self.assertEqual(service.symbol, "035420")
+            self.assertTrue(service.storage.successful_order_on_day(
+                "005930", "BUY", datetime.now().date().isoformat()
+            ))
+
+    def test_register_profile_realtime_does_not_replace_selected_symbol(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "realtime-profiles.sqlite3"))
+            service.symbol = "035420"
+            service.kiwoom_api.register_real_time_prices = lambda symbols: f"{len(symbols)}종목 등록"
+
+            message = service.register_profile_realtime(("005930", "000660"))
+
+            self.assertIn("2종목", message)
+            self.assertEqual(service.profile_real_time_symbols, ("005930", "000660"))
+            self.assertEqual(service.symbol, "035420")
+
+    def test_monitor_chart_does_not_replace_selected_trading_symbol(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "monitor-chart.sqlite3"))
+            service.symbol = "035420"
+
+            class ChartApi:
+                def request_minute_candles(self, symbol, interval=1, count=120):
+                    self.requested = (symbol, interval, count)
+                    return list(reversed(dmi_buy_transition_candles()))
+
+            api = ChartApi()
+            service.kiwoom_api = api
+            candles = service.request_monitor_candles("005930", 1)
+
+            self.assertEqual(api.requested, ("005930", 1, 120))
+            self.assertEqual(candles[0].timestamp, "20260711090000")
+            self.assertEqual(service.symbol, "035420")
+
+    def test_monitor_daily_averages_include_latest_intraday_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "monitor-daily.sqlite3"))
+            service.symbol = "035420"
+
+            class ChartApi:
+                def request_daily_candles(self, symbol, count=61):
+                    return [
+                        Candle(high=12, low=10, close=11, timestamp="20261113"),
+                        Candle(high=11, low=9, close=10, timestamp="20261112"),
+                    ]
+
+            service.kiwoom_api = ChartApi()
+            minute = [Candle(high=14, low=12, close=13, timestamp="20261116090100")]
+            averages = service.request_monitor_daily_averages("005930", minute, (2, 3))
+            self.assertEqual(averages, {2: 12.0, 3: 34 / 3})
+            self.assertEqual(service.symbol, "035420")
+
+    def test_profile_orders_require_live_authorization_and_deduplicate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "profile-orders.sqlite3"))
+            service.running = True
+            service.account_info = KiwoomAccountInfo(
+                True, ["1234567890"], server_type="실거래"
+            )
+            profile = new_profile(0)
+            profile["pdf"]["enabled"] = True
+            settings = {"005930": StrategySettings(profile=profile)}
+            today = datetime.now().strftime("%Y%m%d")
+            decision = TradeDecision("BUY", "조건 충족", "NONE", candle_timestamp=today + "090000")
+            quote = WatchlistQuote(symbol="005930", name="삼성전자", current_price=70000)
+
+            def successful_order(**kwargs):
+                service.last_order_success = True
+                return "모의 주문 성공"
+
+            with patch.object(service, "request_balance", return_value=BalanceSummary(account="1234567890")), \
+                 patch.object(service, "refresh_watchlist_quotes", side_effect=lambda _symbols: service.watchlist_quotes.update({"005930": quote})), \
+                 patch.object(service, "evaluate_watch_symbols", return_value={"005930": decision}), \
+                 patch.object(service, "order_candidates", return_value={"005930": "BUY"}), \
+                 patch.object(service, "plan_candidate_quantities", return_value={"005930": 2}), \
+                 patch.object(service, "send_kiwoom_order", side_effect=successful_order) as send:
+                self.assertEqual(service.execute_profile_orders(settings, "1234567890"), {})
+                self.assertEqual(send.call_count, 0)
+                first = service.execute_profile_orders(
+                    settings, "1234567890", allow_real_order=True, regular_market_open=True
+                )
+                second = service.execute_profile_orders(
+                    settings, "1234567890", allow_real_order=True, regular_market_open=True
+                )
+                self.assertIn("005930", first)
+                self.assertEqual(second, {})
+                self.assertEqual(send.call_count, 1)
+                self.assertEqual(send.call_args.kwargs["symbol"], "005930")
+
+    def test_targeted_order_keeps_selected_symbol_and_price(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "target-order.sqlite3"))
+            fake_rest = FakeRestApi()
+            service.rest_api = fake_rest
+            service.start_rest_connection("app-key", "secret-key")
+            service.symbol = "005930"
+            service.symbol_name = "삼성전자"
+            service.current_price = 72_000
+            service.max_capital = 1_000_000
+            service.total_capital_limit = 1_000_000
+
+            service.send_kiwoom_order(
+                "1234567890", "BUY", 1, symbol="000660",
+                reference_price=100_000, symbol_name="SK하이닉스",
+            )
+
+            self.assertTrue(service.last_order_success)
+            self.assertEqual(fake_rest.order_requests[-1].symbol, "000660")
+            self.assertEqual(service.symbol, "005930")
+            self.assertEqual(service.current_price, 72_000)
+            self.assertEqual(service.storage.recent_orders(1)[0][1], "000660")
+
     def test_configured_quote_refresh_does_not_register_symbol_as_watchlist(self):
         with tempfile.TemporaryDirectory() as directory:
             service = AutoTradingService(storage=Storage(Path(directory) / "configured-quote.sqlite3"))
@@ -379,6 +599,32 @@ class AutoTradingServiceTests(unittest.TestCase):
             self.assertEqual(api.daily_calls, 1)
             self.assertEqual(first["005930"].action, "HOLD")
             self.assertEqual(second["005930"].action, "HOLD")
+            self.assertEqual(service.storage.recent_orders(10), [])
+
+    def test_pdf_watch_mode_fetches_selected_minute_interval_and_daily_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "pdf-watch.sqlite3"))
+
+            class ChartApi:
+                intervals = []
+
+                def request_minute_candles(self, symbol, interval=3, count=120):
+                    self.intervals.append(interval)
+                    return list(reversed(dmi_buy_transition_candles()))
+
+                def request_daily_candles(self, symbol, count=61):
+                    return [Candle(high=10, low=8, close=9, timestamp="20260710")]
+
+            api = ChartApi()
+            service.kiwoom_api = api
+            profile = new_profile(0)
+            profile["pdf"].update(enabled=True, minuteInterval=1)
+            results = service.evaluate_watch_symbols({
+                "005930": StrategySettings(dmi_period=99, profile=profile)
+            })
+
+            self.assertEqual(api.intervals, [1])
+            self.assertIsNotNone(results["005930"])
             self.assertEqual(service.storage.recent_orders(10), [])
 
     def test_watch_strategy_uses_manual_holding_average_for_stop_loss(self):
@@ -704,6 +950,27 @@ class AutoTradingServiceTests(unittest.TestCase):
         self.assertEqual(fake_rest.balance_calls, [("1234567890", "")])
         self.assertTrue(fake_rest.order_requests[0].allow_real_order)
         self.assertFalse(fake_rest.order_requests[0].require_mock_server)
+
+    def test_real_order_requires_verified_live_account_before_balance_or_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = AutoTradingService(storage=Storage(Path(directory) / "live-guard.sqlite3"))
+            api = FakeRestApi()
+            service.rest_api = api
+            service.connection_mode = "REST"
+            service.symbol = "005930"
+            service.current_price = 72_000
+            service.max_capital = 1_000_000
+            service.account_info = KiwoomAccountInfo(
+                True, ["1234567890"], server_type="모의투자", connection_method="REST API"
+            )
+
+            message = service.send_kiwoom_order(
+                "1234567890", "BUY", 1, allow_real_order=True
+            )
+
+            self.assertIn("실거래 계좌 연결 확인 전", message)
+            self.assertEqual(api.balance_calls, [])
+            self.assertEqual(api.order_requests, [])
 
     def test_market_strategy_calculates_dmi_transitions_from_real_candles(self):
         db = Path(tempfile.gettempdir()) / "kiwoom_auto_trader_service_pattern_test.sqlite3"

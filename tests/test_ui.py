@@ -8,6 +8,7 @@ from kiwoom_auto_trader.kiwoom_api import KiwoomAccountInfo
 from kiwoom_auto_trader.models import (
     BalanceSummary,
     Candle,
+    Holding,
     MarketSessionStatus,
     RealTimeQuote,
     TradingBaseline,
@@ -34,6 +35,74 @@ from kiwoom_auto_trader.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_dashboard_shows_configured_and_held_symbols_without_orders(self):
+        profiles = [new_profile(index) for index in range(3)]
+        profiles[0].update(symbol="005930", symbol_name="삼성전자")
+        service = SimpleNamespace(
+            watchlist_rows=MagicMock(return_value=[]),
+            watchlist_quotes={"005930": WatchlistQuote(
+                symbol="005930", name="삼성전자", current_price=100,
+                open_price=98, change=3,
+            )},
+            storage=SimpleNamespace(trading_baseline=MagicMock(return_value=None)),
+            balance_summary=BalanceSummary(account="test", holdings=(
+                Holding("005930", "삼성전자", 2, 90, 100, 20, 11.1),
+            )),
+        )
+        app = SimpleNamespace(
+            dashboard_watch_table=MagicMock(), dashboard_hold_table=MagicMock(),
+            dashboard_profile_buttons=[MagicMock() for _ in range(3)],
+            dashboard_conditions_var=MagicMock(), dashboard_averages_var=MagicMock(),
+            service=service, _strategy_profiles=profiles, _active_strategy_profile=0,
+        )
+        app.dashboard_watch_table.get_children.return_value = ()
+        app.dashboard_hold_table.get_children.return_value = ()
+
+        TraderApp._refresh_dashboard(app)
+
+        watch_row = app.dashboard_watch_table.insert.call_args.kwargs["values"]
+        holding_row = app.dashboard_hold_table.insert.call_args.kwargs["values"]
+        self.assertEqual(watch_row[:2], ("005930", "삼성전자"))
+        self.assertEqual(holding_row[0], "005930")
+        self.assertEqual(holding_row[-1], "2")
+
+    def test_connection_badge_distinguishes_live_from_mock(self):
+        for mode, label, color in (
+            ("실거래", "ON 실거래 연결됨", "#b32626"),
+            ("모의투자", "ON 모의투자 연결됨", "#16833a"),
+        ):
+            with self.subTest(mode=mode):
+                app = SimpleNamespace(
+                    service=SimpleNamespace(account_info=SimpleNamespace(server_type=mode)),
+                    connection_state_var=MagicMock(), connection_badge=MagicMock(),
+                    connection_light=MagicMock(), _connection_light_id=1,
+                )
+                TraderApp._update_connection_badge(app, True, "REST API")
+                app.connection_state_var.set.assert_called_once_with(label)
+                self.assertEqual(app.connection_badge.configure.call_args.kwargs["bg"], color)
+
+    def test_profile_trading_ready_rejects_duplicate_or_missing_symbols(self):
+        first = new_profile(0)
+        second = new_profile(1)
+        for profile in (first, second):
+            profile["pdf"]["enabled"] = True
+            profile["symbol"] = "005930"
+            profile["symbol_name"] = "삼성전자"
+        app = SimpleNamespace(
+            _strategy_profiles=[first, second],
+            service=SimpleNamespace(account_info=KiwoomAccountInfo(True, ["1234567890"], server_type="모의투자")),
+            _account_connection_confirmed=lambda _info: True,
+            _account_for_api=lambda: "1234567890",
+            _operating_capital=lambda: 1000000,
+            _real_trading_account=lambda: False,
+        )
+        settings = TraderApp._active_pdf_profile_settings(app)
+        self.assertFalse(TraderApp._profile_trading_ready(app, settings))
+        second["symbol"] = "000660"
+        second["symbol_name"] = "SK하이닉스"
+        settings = TraderApp._active_pdf_profile_settings(app)
+        self.assertTrue(TraderApp._profile_trading_ready(app, settings))
+
     def test_monitor_shows_configured_symbol_without_watchlist_registration(self):
         table = MagicMock()
         table.get_children.return_value = []
@@ -112,6 +181,7 @@ class UiHelperTests(unittest.TestCase):
             timestamp="20260721143001",
         )
         service = SimpleNamespace(
+            running=False,
             real_time_symbol="012200",
             refresh_real_time_quote=MagicMock(return_value=quote),
         )

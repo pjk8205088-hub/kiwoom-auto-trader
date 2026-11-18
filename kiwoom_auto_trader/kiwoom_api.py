@@ -474,6 +474,10 @@ class KiwoomOpenApiClient:
                     change=quote.change,
                     change_rate=quote.change_rate,
                     volume=quote.volume,
+                    trade_value=quote.trade_value,
+                    open_price=quote.open_price,
+                    high_price=quote.high_price,
+                    low_price=quote.low_price,
                     timestamp=quote.timestamp,
                 )
             )
@@ -575,6 +579,26 @@ class KiwoomOpenApiClient:
         if market_result not in (0, None):
             raise KiwoomOpenApiError(f"장시작시간 등록 실패: {market_result}")
         return f"{symbol} 실시간 시세와 장시작시간을 등록했습니다."
+
+    def register_real_time_prices(self, symbols: list[str], screen_no: str = "9001") -> str:
+        normalized = list(dict.fromkeys(
+            symbol for symbol in (normalize_symbol(value) for value in symbols) if symbol
+        ))
+        if not normalized or len(normalized) > 100:
+            raise KiwoomOpenApiError("실시간 등록은 종목 1~100개만 가능합니다.")
+        api = self._ensure_api()
+        for symbol in normalized:
+            self._real_quotes.pop(symbol, None)
+        self._real_quote_events.clear()
+        self._market_session_status = None
+        result = api.SetRealReg(screen_no, ";".join(normalized), "10;11;12;13;15;20", "0")
+        if result not in (0, None):
+            raise KiwoomOpenApiError(f"다종목 실시간 시세 등록 실패: {result}")
+        market_result = api.SetRealReg("9002", "", "20;214;215", "0")
+        if market_result not in (0, None):
+            api.SetRealRemove(screen_no, "ALL")
+            raise KiwoomOpenApiError(f"장시작시간 등록 실패: {market_result}")
+        return f"{len(normalized)}종목 실시간 시세와 장시작시간을 등록했습니다."
 
     def unregister_real_time(self, screen_no: str = "9001") -> str:
         api = self._ensure_api()
@@ -862,6 +886,10 @@ class KiwoomOpenApiClient:
                 or self._get_comm_data(trcode, record_name, 0, "등락률")
             ),
             volume=_to_int(self._get_comm_data(trcode, record_name, 0, "거래량")),
+            open_price=_to_price(self._get_comm_data(trcode, record_name, 0, "시가")),
+            high_price=_to_price(self._get_comm_data(trcode, record_name, 0, "고가")),
+            low_price=_to_price(self._get_comm_data(trcode, record_name, 0, "저가")),
+            trade_value=_to_number(self._get_comm_data(trcode, record_name, 0, "거래대금")),
             message="현재가 조회 완료",
         )
 

@@ -284,6 +284,8 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertEqual(quote.symbol, "005930")
         self.assertEqual(quote.name, "삼성전자")
         self.assertEqual(quote.current_price, 72000)
+        self.assertEqual(quote.open_price, 71500)
+        self.assertEqual(quote.high_price, 73000)
 
     def test_parses_balance_tr(self):
         fake = FakeKiwoomApi()
@@ -352,6 +354,19 @@ class KiwoomOpenApiClientTests(unittest.TestCase):
         self.assertIn("등록", message)
         self.assertEqual(fake.real_reg_calls[0][1], "005930")
         self.assertEqual(fake.real_reg_calls[1], ("9002", "", "20;214;215", "0"))
+
+    def test_registers_profile_symbols_without_exceeding_screen_limit(self):
+        fake = FakeKiwoomApi()
+        fake.connected = 1
+        client = KiwoomOpenApiClient(dispatch_factory=lambda: fake)
+
+        message = client.register_real_time_prices(["005930", "000660", "005930"])
+
+        self.assertIn("2종목", message)
+        self.assertEqual(fake.real_reg_calls[0][1], "005930;000660")
+        self.assertEqual(fake.real_reg_calls[1][0], "9002")
+        with self.assertRaises(KiwoomOpenApiError):
+            client.register_real_time_prices([f"{index:06d}" for index in range(101)])
 
     def test_parses_openapi_market_open_status(self):
         fake = FakeKiwoomApi()

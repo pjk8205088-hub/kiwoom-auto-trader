@@ -9,21 +9,44 @@ class StrategyEngine:
     # Every daily period from 2 to 60 is available to the strategy layer.
     DAILY_DETAIL_PERIODS = tuple(range(2, 61))
 
+    @staticmethod
+    def pdf_buy_matrix(ma_up: bool, open_break: bool, previous_close_break: bool, mode: str) -> bool:
+        # The PDF's O/X table explicitly holds (O, X, O) until the opening price is reclaimed.
+        if ma_up and not open_break and previous_close_break:
+            return False
+        if mode == "AND":
+            return ma_up and open_break and previous_close_break
+        if mode == "OR":
+            return ma_up and (open_break or previous_close_break)
+        return False
+
     def __init__(self, settings: StrategySettings | None = None) -> None:
         self.settings = settings or StrategySettings()
         self.previous_pattern: PatternState = "NONE"
         self.last_dmi: DmiPoint | None = None
+        self.last_pdf_state: tuple[bool, bool, bool] | None = None
         self._last_signal_candle_key = ""
 
     def reset(self) -> None:
         self.previous_pattern = "NONE"
         self.last_dmi = None
+        self.last_pdf_state = None
         self._last_signal_candle_key = ""
 
     def evaluate(
         self, candles: list[Candle], daily_candles: list[Candle] | None = None,
         entry_price: float = 0.0,
+        day_open: float = 0.0, day_low: float = 0.0,
     ) -> TradeDecision:
+        profile = self.settings.profile or {}
+        if profile.get("pdf", {}).get("enabled"):
+            decision = self._pdf_signal(candles, daily_candles or [], entry_price, day_open, day_low)
+            if decision.action != "HOLD":
+                key = f"{candles[-1].timestamp}:{decision.action}"
+                if key == self._last_signal_candle_key:
+                    return TradeDecision("HOLD", "이미 판단한 봉이라 중복 주문을 방지했습니다.", "NONE")
+                self._last_signal_candle_key = key
+            return decision
         points = self.calculate_dmi_series(candles)
         if not points:
             self.last_dmi = None
@@ -69,6 +92,128 @@ class StrategyEngine:
                 )
 
         return self._decision("HOLD", "새로운 DMI 강세/약세 전환이 없습니다.", current)
+
+    def _pdf_signal(
+        self, candles: list[Candle], daily_candles: list[Candle], entry_price: float,
+        day_open: float, day_low: float,
+    ) -> TradeDecision:
+        """Evaluate only the PDF's explicitly described indicator combination."""
+        profile = self.settings.profile or {}
+        spec = profile["pdf"]
+        self.last_pdf_state = None
+
+        def result(action: Action, reason: str) -> TradeDecision:
+            return TradeDecision(action, reason, "NONE", candle_timestamp=candles[-1].timestamp if candles else "")
+
+        if not candles or candles[-1].close <= 0:
+            return result("HOLD", "현재가를 확인할 수 없습니다.")
+        current = candles[-1].close
+        if entry_price > 0 and profile.get("sellEnabled", True):
+            profit_pct = (current / entry_price - 1) * 100
+            if float(spec["stopLossPct"]) > 0 and profit_pct <= -float(spec["stopLossPct"]):
+                return result("SELL", f"손실 제한 매도 {profit_pct:.2f}% (시간 제한 예외)")
+            if float(spec["targetPct"]) > 0 and profit_pct >= float(spec["targetPct"]):
+                return result("SELL", f"목표 수익 매도 {profit_pct:.2f}% (시간 제한 예외)")
+        if len(candles) < 2:
+            return result("HOLD", "분봉이 부족합니다.")
+        today = self._day_key(candles[-1].timestamp, len(candles) - 1)
+        intraday = [
+            bar for index, bar in enumerate(candles)
+            if self._day_key(bar.timestamp, index) == today
+        ]
+        first_bar_time = "".join(char for char in intraday[0].timestamp if char.isdigit()) if intraday else ""
+        opening_price = day_open if day_open > 0 else (
+            intraday[0].open if len(first_bar_time) >= 12 and first_bar_time[8:12] == "0900" else 0.0
+        )
+        if opening_price <= 0:
+            return result("HOLD", "시초가를 확인할 수 없습니다.")
+        prior = [
+            bar for index, bar in enumerate(daily_candles)
+            if self._day_key(bar.timestamp, index) < today and bar.close > 0
+        ]
+        if not prior:
+            return result("HOLD", "전일 종가를 확인할 수 없습니다.")
+        previous_close = max(prior, key=lambda bar: self._day_key(bar.timestamp, 0)).close
+        previous = candles[-2].close
+        time_text = "".join(char for char in candles[-1].timestamp if char.isdigit())
+        bar_time = time_text[8:12] if len(time_text) >= 12 else ""
+
+        def in_window(start: str, end: str) -> bool:
+            return bool(bar_time) and start.replace(":", "") <= bar_time <= end.replace(":", "")
+
+        if entry_price <= 0 and not profile.get("buyEnabled", True):
+            return result("HOLD", "이 종목의 매수가 금지되어 있습니다.")
+        if entry_price > 0 and not profile.get("sellEnabled", True):
+            return result("HOLD", "이 종목의 매도가 금지되어 있습니다.")
+        if entry_price <= 0 and spec["buyTimeLimit"] and not in_window(spec["buyStart"], spec["buyEnd"]):
+            return result("HOLD", "매수 허용 시간 밖입니다.")
+        if entry_price > 0 and spec["sellTimeLimit"] and not in_window(spec["sellStart"], spec["sellEnd"]):
+            return result("HOLD", "매도 허용 시간 밖입니다.")
+
+        minute = profile.get("bar", {}).get("minute", {})
+        short = int(minute.get("shortPeriod", 5))
+        long = int(minute.get("longPeriod", 20))
+        short_only = bool(spec["shortOnly"])
+        required = short if short_only else long
+        if len(candles) < required + 1 or short < 1 or long <= short:
+            return result("HOLD", "이동평균 계산에 필요한 분봉이 부족하거나 설정이 잘못되었습니다.")
+
+        def ma(period: int, offset: int = 0) -> float:
+            end = len(candles) - offset
+            return sum(bar.close for bar in candles[end - period:end]) / period
+
+        short_now, short_before = ma(short), ma(short, 1)
+        long_now, long_before = (ma(long), ma(long, 1)) if not short_only else (0.0, 0.0)
+        trend_up = short_now > short_before and (short_only or short_now > long_now)
+        trend_down = short_now < short_before and (short_only or short_now < long_now)
+        daily_text = ""
+        if spec.get("dailyMaEnabled", False):
+            closes = self.daily_closes_with_intraday(daily_candles, candles)
+            day_short = int(spec.get("dailyShortPeriod", 5))
+            day_long = int(spec.get("dailyLongPeriod", 7))
+            if not 2 <= day_short < day_long <= 60 or len(closes) < day_long + 1:
+                return result("HOLD", "일자별 이평선 계산에 필요한 거래일이 부족합니다.")
+
+            def daily_ma(period: int, offset: int = 0) -> float:
+                end = len(closes) - offset
+                return sum(closes[end - period:end]) / period
+
+            daily_short_now, daily_short_before = daily_ma(day_short), daily_ma(day_short, 1)
+            daily_long_now = daily_ma(day_long)
+            daily_up = daily_short_now > daily_long_now and daily_short_now >= daily_short_before
+            trend_up = trend_up and daily_up
+            daily_text = f" · 일자별 {day_short}/{day_long}일선 {'O' if daily_up else 'X'}"
+        open_break = current > opening_price
+        reclaim_ready = current > opening_price * (1 + float(spec.get("openReclaimPct", 0.0)) / 100)
+        close_break = current > previous_close
+        self.last_pdf_state = (trend_up, open_break, close_break)
+        combine = spec["conditionCombine"]
+        indicator_text = (
+            f"이평선 {'O' if trend_up else 'X'} · "
+            f"시초가 {'O' if open_break else 'X'} · "
+            f"전일 종가 {'O' if close_break else 'X'}{daily_text}"
+        )
+        if entry_price <= 0:
+            known_low = day_low if day_low > 0 else (
+                min(bar.low for bar in intraday if bar.low > 0)
+                if len(first_bar_time) >= 12 and first_bar_time[8:12] == "0900"
+                and any(bar.low > 0 for bar in intraday) else 0.0
+            )
+            if spec["reboundPct"] > 0 and known_low <= 0:
+                return result("HOLD", "당일 저가가 없어 반등 조건을 판단할 수 없습니다.")
+            rebound = (current / known_low - 1) * 100 if known_low > 0 else 0.0
+            if (self.pdf_buy_matrix(trend_up, open_break, close_break, combine)
+                    and reclaim_ready and rebound >= float(spec["reboundPct"])):
+                return result("BUY", f"{indicator_text} · {combine} 돌파")
+        else:
+            drop_pct = (current / opening_price - 1) * 100
+            if spec["dropFromOpenPct"] > 0 and drop_pct <= -float(spec["dropFromOpenPct"]):
+                return result("SELL", f"시초가 대비 하락 {drop_pct:.2f}%")
+            if previous >= opening_price > current:
+                return result("SELL", f"시초가 하향 이탈 · {indicator_text}")
+            if trend_down or (not short_only and short_before >= long_before and short_now < long_now):
+                return result("SELL", f"이동평균선 하락/데드크로스 매도 · {indicator_text}")
+        return result("HOLD", f"조건 대기: {indicator_text}")
 
     def _profile_signal(
         self, candles: list[Candle], daily_candles: list[Candle] | None = None,

@@ -104,6 +104,14 @@ class Storage:
                 )
             )
 
+    def successful_order_on_day(self, symbol: str, side: str, day: str) -> bool:
+        with self._connection() as conn:
+            return conn.execute(
+                "select 1 from orders where symbol = ? and side = ? and success = 1 "
+                "and substr(timestamp, 1, 10) = ? limit 1",
+                (symbol, side, day),
+            ).fetchone() is not None
+
     def recent_trade_history(self, limit: int = 200) -> list[tuple]:
         with self._connection() as conn:
             return list(

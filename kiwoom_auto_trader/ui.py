@@ -7,6 +7,7 @@ import webbrowser
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from time import monotonic
 from tkinter import filedialog, messagebox, ttk
 
 from .charting import moving_average, timeframe_label
@@ -32,6 +33,7 @@ from .storage import Storage
 from .symbols import (
     clean_account_number,
     display_account_number,
+    known_symbol_name,
     mask_account_number,
     normalize_symbol,
 )
@@ -250,15 +252,9 @@ class KiwoomRestLoginDialog(tk.Toplevel):
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 14)
         )
         ttk.Label(body, text="연결 환경").grid(row=1, column=0, sticky="w", pady=(0, 8))
-        environment = ttk.Combobox(
-            body,
-            textvariable=self.environment_var,
-            values=(REST_LIVE_LABEL, REST_MOCK_LABEL),
-            state="readonly",
-            width=28,
+        ttk.Label(body, text=REST_LIVE_LABEL).grid(
+            row=1, column=1, columnspan=2, sticky="w", pady=(0, 8)
         )
-        environment.grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 8))
-        environment.bind("<<ComboboxSelected>>", self._sync_environment_text)
 
         ttk.Label(body, text="AppKey").grid(row=2, column=0, sticky="w", pady=(0, 8))
         app_key_entry = ttk.Entry(body, textvariable=self.app_key_var, width=42, show="*")
@@ -333,7 +329,7 @@ class KiwoomRestLoginDialog(tk.Toplevel):
         self.help_var.set(
             "실전투자 AppKey와 SecretKey를 사용하세요. 키움 포털에 현재 공인 IP가 "
             "등록되어 있어야 합니다. 연결 후 계좌·잔고·시세를 조회할 수 있습니다. "
-            "모의투자 연결 없이 실전투자로 바로 설정할 수 있습니다. 실제 주문은 자동매수·자동매도 "
+            "실제 주문은 자동매수·자동매도 "
             "설정 시 실행 세션을 승인하고, 키움 정규장 장중 신호가 확인된 경우에만 활성화됩니다."
         )
 
@@ -432,6 +428,8 @@ class StrategySettingsPanel(ttk.Frame):
         self.field_vars: dict[tuple[int, tuple[str, ...]], tuple[tk.Variable, type, dict | None]] = {}
         self.profile_pages: list[ttk.Frame] = []
         self.built_profiles: set[int] = set()
+        self.profile_editor_windows: dict[int, tk.Toplevel] = {}
+        self.profile_summaries: list[tk.StringVar] = []
         self.profile_style = ttk.Style(self)
         self.profile_style.configure("ConfiguredProfile.TButton", foreground="#0b6b35")
         self.profile_style.configure("EmptyProfile.TButton", foreground="#333333")
@@ -453,7 +451,7 @@ class StrategySettingsPanel(ttk.Frame):
         check = ttk.LabelFrame(self, text="설정 확인", padding=5)
         check.pack(fill="x", padx=12, pady=(0, 4))
         self.check_title = tk.StringVar()
-        self.check_detail = tk.StringVar(value="20개 설정은 각각 저장됩니다. V8 매매 엔진에 실제 적용되는 항목은 DMI 기간입니다.")
+        self.check_detail = tk.StringVar(value="기획서 조건은 설정 편집에서 활성화한 종목에만 적용됩니다.")
         check_actions = ttk.Frame(check)
         check_actions.pack(side="right", anchor="ne", padx=(12, 0))
         ttk.Button(check_actions, text="설정 확정", width=12, command=self.confirm_selected_profile).pack(side="left", padx=(4, 0))
@@ -464,22 +462,8 @@ class StrategySettingsPanel(ttk.Frame):
         self.check_label.pack(fill="x")
         ttk.Label(check, textvariable=self.check_detail, anchor="w").pack(fill="x")
 
-        self.profile_nav = ttk.Frame(self, padding=(12, 0, 12, 2))
-        self.profile_nav.pack(fill="x")
         self.profile_buttons: list[ttk.Button] = []
         self.selected_profile_label = tk.StringVar()
-        for index in range(3):
-            button = ttk.Button(
-                self.profile_nav,
-                text=f"설정 {index + 1}",
-                command=lambda i=index: self.select_profile(i),
-            )
-            button.grid(row=0, column=index, sticky="ew", padx=3, pady=1)
-            self.profile_buttons.append(button)
-        self._refresh_profile_buttons()
-        for column in range(3):
-            self.profile_nav.columnconfigure(column, weight=1, uniform="profile")
-
         self.profile_grid = ttk.Frame(self, padding=(12, 0, 12, 8))
         self.profile_grid.pack(fill="both", expand=True)
         self.profile_grid.columnconfigure(0, weight=1, uniform="settings")
@@ -487,16 +471,17 @@ class StrategySettingsPanel(ttk.Frame):
         self.profile_grid.columnconfigure(2, weight=1, uniform="settings")
         self.profile_grid.rowconfigure(0, weight=1)
         for index in range(3):
-            page = ttk.LabelFrame(self.profile_grid, text=f"설정 {index + 1}", padding=2)
+            page = ttk.LabelFrame(self.profile_grid, text=f"설정 {index + 1}", padding=12)
             page.grid(row=0, column=index, sticky="nsew", padx=3)
             self.profile_pages.append(page)
+            self._ensure_profile_page(index)
+        self._refresh_profile_buttons()
         self.active_symbol_status = tk.StringVar()
 
         editor = ttk.Frame(self, padding=(12, 0, 12, 8))
         editor.pack(fill="x")
         self.status = tk.StringVar(value="설정 값을 확인해 주세요.")
         ttk.Label(editor, textvariable=self.status, foreground="#596579").pack(anchor="w")
-        self._ensure_profile_page(self.selected)
         self.select_profile(self.selected, store_current=False)
 
     def _refresh_profile_buttons(self) -> None:
@@ -505,9 +490,19 @@ class StrategySettingsPanel(ttk.Frame):
             symbol = str(profile.get("symbol", "")).strip()
             name = str(profile.get("symbol_name", "")).strip()
             configured = len(symbol) == 6 and symbol.isdigit() and bool(name)
+            unsupported_count = len(StrategyEngine.unsupported_profile_rules(profile))
+            status = f"미구현 조건 {unsupported_count}개" if configured else "종목을 연결해 주세요"
             button.configure(
-                text=f"설정 {index + 1} · {name}" if configured else f"설정 {index + 1}",
-                style="ConfiguredProfile.TButton" if configured else "EmptyProfile.TButton",
+                text="설정 편집",
+                style="ConfiguredProfile.TButton" if configured and not unsupported_count else "EmptyProfile.TButton",
+            )
+            self.profile_summaries[index].set(
+                f"{name or '종목 미설정'}\n"
+                f"{symbol or '종목코드 없음'}\n"
+                f"DMI {profile.get('dmi_period', 14)}일\n"
+                f"매수 {'허용' if profile.get('buyEnabled', True) else '금지'} · "
+                f"매도 {'허용' if profile.get('sellEnabled', True) else '금지'}\n"
+                f"{status}"
             )
 
     def _ensure_profile_page(self, index: int) -> None:
@@ -516,59 +511,115 @@ class StrategySettingsPanel(ttk.Frame):
             self.built_profiles.add(index)
 
     def _build_profile_page(self, page: ttk.Frame, index: int) -> None:
-        canvas = tk.Canvas(page, highlightthickness=0, borderwidth=0)
-        scrollbar = ttk.Scrollbar(page, orient="vertical", command=canvas.yview)
+        summary = tk.StringVar()
+        self.profile_summaries.append(summary)
+        ttk.Label(page, textvariable=summary, font=("Malgun Gothic", 12), justify="center", anchor="center").pack(fill="x")
+        button = ttk.Button(page, text="설정 편집", command=lambda i=index: self._open_profile_editor(i))
+        button.pack(fill="x", pady=(8, 0))
+        self.profile_buttons.append(button)
+
+    def _open_profile_editor(self, index: int) -> None:
+        self.select_profile(index)
+        window = self.profile_editor_windows.get(index)
+        if window is None or not window.winfo_exists():
+            window = tk.Toplevel(self)
+            window.title(f"설정 {index + 1} 편집")
+            screen_width = window.winfo_screenwidth()
+            screen_height = window.winfo_screenheight()
+            width = min(960, max(640, screen_width - 80))
+            height = min(740, max(460, screen_height - 100))
+            x = max(0, (screen_width - width) // 2)
+            y = max(0, (screen_height - height) // 2)
+            window.geometry(f"{width}x{height}+{x}+{y}")
+            window.minsize(640, 460)
+            window.transient(self.winfo_toplevel())
+            window.protocol("WM_DELETE_WINDOW", window.withdraw)
+            self.profile_editor_windows[index] = window
+            self._build_profile_editor(window, index)
+        window.deiconify()
+        window.lift()
+        window.focus_set()
+
+    def _editor_tab(self, notebook: ttk.Notebook, title: str) -> tuple[ttk.Frame, tk.Canvas]:
+        tab = ttk.Frame(notebook)
+        notebook.add(tab, text=title)
+        canvas = tk.Canvas(tab, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(tab, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         canvas.pack(side="left", fill="both", expand=True)
-        body = ttk.Frame(canvas, padding=3)
+        body = ttk.Frame(canvas, padding=12)
         window_id = canvas.create_window((0, 0), window=body, anchor="nw")
         body.bind("<Configure>", lambda _event, c=canvas: c.configure(scrollregion=c.bbox("all")))
         canvas.bind("<Configure>", lambda event, c=canvas, item=window_id: c.itemconfigure(item, width=event.width))
+        body.columnconfigure(0, weight=1)
+        return body, canvas
+
+    def _build_profile_editor(self, window: tk.Toplevel, index: int) -> None:
         profile = self.profiles[index]
-        basics = ttk.LabelFrame(body, text="DMI 기준", padding=5)
-        basics.grid(row=0, column=0, columnspan=5, sticky="ew", padx=2, pady=(0, 2))
-        ttk.Label(basics, text="연결 종목번호").pack(side="left", padx=(0, 5))
-        symbol_var = tk.StringVar(value=str(profile.get("symbol", "")))
-        ttk.Entry(basics, textvariable=symbol_var, width=9, justify="center").pack(side="left", padx=(0, 12))
-        self.field_vars[(index, ("symbol",))] = (symbol_var, str, None)
-        ttk.Label(basics, text="회사명").pack(side="left", padx=(0, 5))
-        name_var = tk.StringVar(value=str(profile.get("symbol_name", "")))
-        ttk.Entry(basics, textvariable=name_var, width=14).pack(side="left", padx=(0, 14))
-        self.field_vars[(index, ("symbol_name",))] = (name_var, str, None)
-        buy_enabled_var = tk.BooleanVar(value=bool(profile.get("buyEnabled", True)))
-        ttk.Checkbutton(basics, text="매수 허용", variable=buy_enabled_var).pack(side="left", padx=(0, 6))
-        self.field_vars[(index, ("buyEnabled",))] = (buy_enabled_var, bool, None)
-        sell_enabled_var = tk.BooleanVar(value=bool(profile.get("sellEnabled", True)))
-        ttk.Checkbutton(basics, text="매도 허용", variable=sell_enabled_var).pack(side="left", padx=(0, 10))
-        self.field_vars[(index, ("sellEnabled",))] = (sell_enabled_var, bool, None)
-        dmi_var = tk.StringVar(value=str(profile.get("dmi_period", 14)))
-        ttk.Label(basics, text="DMI 계산 기간(일)").pack(side="left", padx=(0, 8))
-        ttk.Spinbox(basics, from_=1, to=99, textvariable=dmi_var, width=8, justify="right").pack(side="left")
-        self.field_vars[(index, ("dmi_period",))] = (dmi_var, int, None)
-        ttk.Button(basics, text="설정 저장", command=self.save).pack(side="left", padx=(14, 0))
-        for section_index, section in enumerate(("bar", "buy", "buyBlock", "sell", "sellBlock", "order")):
-            box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=5)
-            if section == "bar":
-                box.grid(row=0, column=0, columnspan=5, sticky="ew", padx=2, pady=2)
-            else:
-                row = 1 + (section_index - 1) // 5
-                column = (section_index - 1) % 5
-                box.grid(row=row, column=column, sticky="new", padx=2, pady=2)
-            self._build_fields(box, index, profile[section], (section,), wide=(section == "bar"))
-        for column in range(5):
-            body.columnconfigure(column, weight=1, uniform="profile-column")
-        def scroll_with_wheel(event: tk.Event, target: tk.Canvas = canvas) -> str:
-            target.yview_scroll(-int(event.delta / 120), "units")
-            return "break"
+        actions = ttk.Frame(window, padding=8)
+        actions.pack(fill="x")
+        ttk.Label(actions, text=f"설정 {index + 1}", font=("Malgun Gothic", 14, "bold")).pack(side="left")
+        ttk.Button(actions, text="설정 저장", command=lambda i=index: self._save_profile_editor(i)).pack(side="right", padx=(6, 0))
+        ttk.Button(actions, text="저장값으로 초기화", command=lambda i=index: self._reset_profile_editor(i)).pack(side="right")
+        notebook = ttk.Notebook(window)
+        notebook.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        tab_sections = (
+            ("기본·평균", ("bar",)),
+            ("기획서 조건", ("pdf",)),
+            ("매수", ("buy", "buyBlock")),
+            ("매도", ("sell", "sellBlock")),
+            ("주문", ("order",)),
+        )
+        for tab_title, sections in tab_sections:
+            body, canvas = self._editor_tab(notebook, tab_title)
+            next_row = 0
+            if tab_title == "기본·평균":
+                basics = ttk.LabelFrame(body, text="종목·DMI 기준", padding=10)
+                basics.grid(row=next_row, column=0, sticky="ew", pady=(0, 8))
+                self._build_profile_basics(basics, index, profile)
+                next_row += 1
+            for section in sections:
+                box = ttk.LabelFrame(body, text=GROUP_LABELS[section], padding=10)
+                box.grid(row=next_row, column=0, sticky="ew", pady=(0, 8))
+                self._build_fields(box, index, profile[section], (section,))
+                next_row += 1
 
-        def bind_wheel(widget: tk.Widget) -> None:
-            widget.bind("<MouseWheel>", scroll_with_wheel)
-            for child in widget.winfo_children():
-                bind_wheel(child)
+            def scroll_with_wheel(event: tk.Event, target: tk.Canvas = canvas) -> str:
+                target.yview_scroll(-int(event.delta / 120), "units")
+                return "break"
 
-        canvas.bind("<MouseWheel>", scroll_with_wheel)
-        bind_wheel(body)
+            def bind_wheel(widget: tk.Widget) -> None:
+                widget.bind("<MouseWheel>", scroll_with_wheel)
+                for child in widget.winfo_children():
+                    bind_wheel(child)
+
+            canvas.bind("<MouseWheel>", scroll_with_wheel)
+            bind_wheel(body)
+
+    def _build_profile_basics(self, basics: ttk.LabelFrame, index: int, profile: dict) -> None:
+        fields = (
+            ("연결 종목번호", "symbol", ttk.Entry, {"width": 12}),
+            ("회사명", "symbol_name", ttk.Entry, {"width": 24}),
+            ("DMI 계산 기간(일)", "dmi_period", ttk.Spinbox, {"from_": 1, "to": 99, "width": 8}),
+        )
+        for row, (label, key, widget_type, options) in enumerate(fields):
+            ttk.Label(basics, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=3)
+            variable = tk.StringVar(value=str(profile.get(key, "")))
+            widget_type(basics, textvariable=variable, **options).grid(row=row, column=1, sticky="w", pady=3)
+            self.field_vars[(index, (key,))] = (variable, int if key == "dmi_period" else str, None)
+        for column, (key, label) in enumerate((("buyEnabled", "매수 허용"), ("sellEnabled", "매도 허용"))):
+            variable = tk.BooleanVar(value=bool(profile.get(key, True)))
+            ttk.Checkbutton(basics, text=label, variable=variable).grid(row=3, column=column, sticky="w", pady=(6, 0))
+            self.field_vars[(index, (key,))] = (variable, bool, None)
+
+    def _save_profile_editor(self, index: int) -> None:
+        self.select_profile(index)
+        self.save()
+
+    def _reset_profile_editor(self, index: int) -> None:
+        self.select_profile(index)
+        self.reset_selected_profile()
 
     def _build_fields(
         self,
@@ -602,7 +653,13 @@ class StrategySettingsPanel(ttk.Frame):
                 else:
                     reverse = None
                     variable = tk.StringVar(value=str(value))
-                    widget = ttk.Entry(parent, textvariable=variable, width=15)
+                    if path == ("pdf",) and key in {
+                        "reboundPct", "openReclaimPct", "dropFromOpenPct", "targetPct", "stopLossPct"
+                    }:
+                        widget = ttk.Spinbox(parent, textvariable=variable, from_=0,
+                                             to=100, increment=0.1, width=13)
+                    else:
+                        widget = ttk.Entry(parent, textvariable=variable, width=15)
                 widget.grid(row=row, column=1, sticky="w", padx=5, pady=1)
                 self.field_vars[(index, path + (key,))] = (variable, type(value), reverse)
             row += 1
@@ -647,7 +704,7 @@ class StrategySettingsPanel(ttk.Frame):
         app = self.parent_app
         symbol = normalize_symbol(app.symbol_var.get()) or "종목 미선택"
         mode = app.service.account_info.server_type if app.service.account_info.connected else "계좌 연결 전"
-        self.mode_summary.configure(text=f"실행 환경: {mode} · V8 기존 매매 판단 유지 · 지원 설정: DMI 기간")
+        self.mode_summary.configure(text=f"실행 환경: {mode} · 기획서 조건은 종목별로 선택 적용")
         self.summary.set(
             f"현재 종목: {app.symbol_name_var.get() or symbol} · "
             f"계좌 총 운용 한도: {app.capital_var.get()}원 · "
@@ -719,9 +776,12 @@ class StrategySettingsPanel(ttk.Frame):
             )
 
     def reload_selected(self) -> None:
-        self.profiles = [deepcopy(item) for item in self.parent_app._strategy_profiles]
+        index = self.selected
+        self.profiles[index] = deepcopy(self.parent_app._strategy_profiles[index])
         self._refresh_profile_buttons()
-        for (index, path), (variable, _value_type, _reverse) in self.field_vars.items():
+        for (field_index, path), (variable, _value_type, _reverse) in self.field_vars.items():
+            if field_index != index:
+                continue
             value = self.profiles[index]
             for key in path:
                 value = value[key]
@@ -805,13 +865,16 @@ class TraderApp(tk.Tk):
         self._trading_baseline: TradingBaseline | None = None
         self._real_order_session_armed = False
         self._last_auto_market_state: tuple[str, str, bool] | None = None
+        self._last_profile_scan_at = 0.0
         self._last_realtime_display_key: tuple | None = None
+        self._last_monitor_tick_refresh = 0.0
         self._strategy_profile_path = Path.home() / "Documents" / "KiwoomAutoTrader" / "strategy_profiles.json"
         self._strategy_profiles = [new_profile(index) for index in range(20)]
         self._active_strategy_profile = 0
         self._load_strategy_profiles()
         self._strategy_settings_panel: StrategySettingsPanel | None = None
         self._build_ui()
+        self._build_dashboard()
         self._buy_percent_trace_id = self.buy_percent_var.trace_add(
             "write",
             lambda *_args: self._on_price_trigger_percent_changed("BUY"),
@@ -884,6 +947,12 @@ class TraderApp(tk.Tk):
             row=0,
             column=7,
             padx=(0, 8),
+        )
+        ttk.Button(header, text="거래 현황", command=self._show_dashboard).grid(
+            row=0, column=8, padx=(0, 8)
+        )
+        ttk.Button(header, text="조건검색", command=self._open_condition_search).grid(
+            row=1, column=1, sticky="ew", padx=(0, 8), pady=(4, 0)
         )
         # 긴급 정지 함수와 내부 동작은 유지하되, 요청에 따라 메인 화면에는 표시하지 않습니다.
         self._update_connection_badge(False)
@@ -1386,13 +1455,14 @@ class TraderApp(tk.Tk):
 
         self.monitor_window = tk.Toplevel(self)
         self.monitor_window.title("자동매매 모니터")
-        self.monitor_window.geometry("1320x720")
+        self.monitor_window.geometry("1500x860")
         self.monitor_window.withdraw()
         self.monitor_window.protocol("WM_DELETE_WINDOW", self._close_monitor_window)
         monitor_body = ttk.Frame(self.monitor_window, padding=10)
         monitor_body.pack(fill="both", expand=True)
         monitor_body.columnconfigure(0, weight=1)
-        monitor_body.rowconfigure(1, weight=1)
+        monitor_body.rowconfigure(2, weight=3)
+        monitor_body.rowconfigure(3, weight=2)
         monitor_header = ttk.Frame(monitor_body)
         monitor_header.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         monitor_header.columnconfigure(0, weight=1)
@@ -1420,15 +1490,16 @@ class TraderApp(tk.Tk):
         left_frame.rowconfigure(0, weight=1)
         right_frame.columnconfigure(0, weight=1)
         right_frame.rowconfigure(0, weight=1)
-        watch_columns = ("종목코드", "종목명", "현재가", "등락률", "거래량", "감시상태")
+        watch_columns = ("종목코드", "종목명", "현재가", "시초가", "전일종가", "고가", "등락률", "거래량", "거래대금", "감시상태")
         self.monitor_table = ttk.Treeview(left_frame, columns=watch_columns, show="headings")
-        watch_widths = {"종목코드": 90, "종목명": 150, "현재가": 100, "등락률": 90, "거래량": 110, "감시상태": 120}
+        watch_widths = {"종목코드": 90, "종목명": 150, "현재가": 100, "시초가": 100, "전일종가": 100, "고가": 100, "등락률": 90, "거래량": 110, "거래대금": 120, "감시상태": 260}
         for column in watch_columns:
             self.monitor_table.heading(column, text=column)
             self.monitor_table.column(column, width=watch_widths[column], minwidth=70, stretch=column == "종목명", anchor="center")
         self.monitor_table.tag_configure("ready", foreground="#1769a7")
         self.monitor_table.tag_configure("warning", foreground="#a12622")
         self.monitor_table.grid(row=0, column=0, sticky="nsew")
+        self.monitor_table.bind("<<TreeviewSelect>>", self._load_monitor_chart)
         watch_scroll = ttk.Scrollbar(left_frame, orient="vertical", command=self.monitor_table.yview)
         watch_scroll.grid(row=0, column=1, sticky="ns")
         self.monitor_table.configure(yscrollcommand=watch_scroll.set)
@@ -1441,6 +1512,33 @@ class TraderApp(tk.Tk):
         holding_scroll = ttk.Scrollbar(right_frame, orient="vertical", command=self.monitor_holdings_table.yview)
         holding_scroll.grid(row=0, column=1, sticky="ns")
         self.monitor_holdings_table.configure(yscrollcommand=holding_scroll.set)
+        monitor_chart_frame = ttk.LabelFrame(monitor_body, text="선택 종목 차트")
+        monitor_chart_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        monitor_chart_frame.columnconfigure(0, weight=1)
+        monitor_chart_frame.rowconfigure(1, weight=1)
+        monitor_chart_toolbar = ttk.Frame(monitor_chart_frame)
+        monitor_chart_toolbar.grid(row=0, column=0, sticky="ew")
+        self.monitor_chart_title = tk.StringVar(value="종목을 선택해 주세요")
+        ttk.Label(monitor_chart_toolbar, textvariable=self.monitor_chart_title).pack(side="left", padx=6)
+        self.monitor_indicator_text = tk.StringVar(value="이평선 - · 시초가 - · 전일 종가 -")
+        ttk.Label(monitor_chart_toolbar, textvariable=self.monitor_indicator_text).pack(side="left", padx=12)
+        self.monitor_chart_interval = tk.IntVar(value=1)
+        for label, interval in (("1분", 1), ("3분", 3)):
+            ttk.Radiobutton(
+                monitor_chart_toolbar, text=label, variable=self.monitor_chart_interval,
+                value=interval, command=self._load_monitor_chart,
+            ).pack(side="right", padx=5)
+        self.monitor_chart_canvas = tk.Canvas(monitor_chart_frame, bg="white", highlightthickness=1)
+        self.monitor_chart_canvas.grid(row=1, column=0, sticky="nsew")
+        self.monitor_chart_candles: list[Candle] = []
+        self.monitor_chart_symbol = ""
+        self.monitor_chart_ma_periods = (5, 20)
+        self.monitor_daily_ma_values: dict[int, float] = {}
+        self.monitor_chart_canvas.bind(
+            "<Configure>", lambda _event: self._draw_candle_chart(
+                self.monitor_chart_canvas, self.monitor_chart_candles
+            )
+        )
         self._refresh_monitor()
 
         self.trade_history_window = tk.Toplevel(self)
@@ -1537,6 +1635,187 @@ class TraderApp(tk.Tk):
         )
         self._strategy_settings_panel = StrategySettingsPanel(self, body)
         self._strategy_settings_panel.grid(row=1, column=0, sticky="nsew")
+
+    def _build_dashboard(self) -> None:
+        self._legacy_main_widgets = [
+            widget for widget in self.winfo_children() if widget.winfo_manager() == "grid"
+        ]
+        for widget in self._legacy_main_widgets:
+            widget.grid_remove()
+        dashboard = ttk.Frame(self, padding=10)
+        dashboard.grid(row=0, column=0, rowspan=3, sticky="nsew")
+        dashboard.columnconfigure(0, weight=1)
+        dashboard.rowconfigure(2, weight=3)
+        dashboard.rowconfigure(3, weight=2)
+        self._dashboard = dashboard
+
+        top = ttk.Frame(dashboard)
+        top.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        top.columnconfigure(1, weight=1)
+        ttk.Label(top, text="거래 현황", font=("Malgun Gothic", 16, "bold")).grid(
+            row=0, column=0, sticky="w", padx=(0, 16)
+        )
+        ttk.Label(top, textvariable=self.connection_state_var).grid(row=0, column=1, sticky="w")
+        ttk.Button(top, text="실전투자 로그인", command=self._open_rest_login_dialog).grid(row=0, column=2, padx=3)
+        ttk.Button(top, text="운용 시작", command=self._start).grid(row=0, column=3, padx=3)
+        ttk.Button(top, text="운용 중지", command=self._stop).grid(row=0, column=4, padx=3)
+        ttk.Button(top, text="기타", command=self._show_legacy_main).grid(row=0, column=5, padx=(10, 0))
+
+        summary = ttk.Frame(dashboard)
+        summary.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        summary.columnconfigure(1, weight=1)
+        ttk.Label(summary, text="선택 종목 운용한도").grid(row=0, column=0, sticky="w")
+        ttk.Label(summary, textvariable=self.capital_var, font=("Malgun Gothic", 11, "bold")).grid(
+            row=0, column=1, sticky="w", padx=(8, 16)
+        )
+        ttk.Label(summary, text="종가·시초가 매수 비율").grid(row=0, column=2, sticky="e")
+        ttk.Label(summary, textvariable=self.open_buy_ratio_var).grid(row=0, column=3, padx=(8, 16))
+        ttk.Button(summary, text="설정", command=lambda: self._open_dashboard_profile(0)).grid(row=0, column=4)
+        ttk.Label(summary, textvariable=self.account_summary_var).grid(
+            row=1, column=0, columnspan=5, sticky="w", pady=(4, 0)
+        )
+
+        tables = ttk.PanedWindow(dashboard, orient="horizontal")
+        tables.grid(row=2, column=0, sticky="nsew")
+        left = ttk.LabelFrame(tables, text="거래종목")
+        right = ttk.LabelFrame(tables, text="보유종목")
+        tables.add(left, weight=1)
+        tables.add(right, weight=1)
+        for panel in (left, right):
+            panel.columnconfigure(0, weight=1)
+            panel.rowconfigure(1, weight=1)
+        ttk.Button(left, text="거래종목 불러오기", command=self._open_watchlist_window).grid(
+            row=0, column=0, sticky="w", padx=5, pady=4
+        )
+        ttk.Button(right, text="보유종목 불러오기", command=self._request_balance).grid(
+            row=0, column=0, sticky="w", padx=5, pady=4
+        )
+        self.dashboard_watch_table = ttk.Treeview(
+            left, columns=("종목", "종목명", "운용한도", "현재가", "감시상태"), show="headings"
+        )
+        self.dashboard_hold_table = ttk.Treeview(
+            right, columns=("종목", "종목명", "시초가", "전일종가", "평균가", "보유금액", "보유수량"),
+            show="headings",
+        )
+        for table, panel in ((self.dashboard_watch_table, left), (self.dashboard_hold_table, right)):
+            for column in table["columns"]:
+                table.heading(column, text=column)
+                table.column(column, width=105, minwidth=70, anchor="center", stretch=True)
+            table.grid(row=1, column=0, sticky="nsew")
+            scrollbar = ttk.Scrollbar(panel, orient="vertical", command=table.yview)
+            scrollbar.grid(row=1, column=1, sticky="ns")
+            table.configure(yscrollcommand=scrollbar.set)
+
+        lower = ttk.Frame(dashboard)
+        lower.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
+        for column in range(3):
+            lower.columnconfigure(column, weight=1, uniform="dashboard-lower")
+        lower.rowconfigure(0, weight=1)
+        presets = ttk.LabelFrame(lower, text="기본설정")
+        presets.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        presets.columnconfigure(0, weight=1)
+        self.dashboard_profile_buttons = []
+        for index in range(3):
+            button = ttk.Button(presets, command=lambda i=index: self._open_dashboard_profile(i))
+            button.grid(row=index, column=0, sticky="ew", padx=8, pady=5)
+            self.dashboard_profile_buttons.append(button)
+        conditions = ttk.LabelFrame(lower, text="매매 기준")
+        conditions.grid(row=0, column=1, sticky="nsew", padx=5)
+        self.dashboard_conditions_var = tk.StringVar()
+        ttk.Label(conditions, textvariable=self.dashboard_conditions_var, justify="left", wraplength=350).pack(
+            anchor="nw", padx=10, pady=10
+        )
+        averages = ttk.LabelFrame(lower, text="분봉·이평선 설정")
+        averages.grid(row=0, column=2, sticky="nsew", padx=(5, 0))
+        self.dashboard_averages_var = tk.StringVar()
+        ttk.Label(averages, textvariable=self.dashboard_averages_var, justify="left", wraplength=350).pack(
+            anchor="nw", padx=10, pady=10
+        )
+        ttk.Button(averages, text="선택 설정 편집", command=self._open_selected_dashboard_profile).pack(
+            anchor="w", padx=10
+        )
+        footer = ttk.Frame(dashboard)
+        footer.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(footer, text="조건검색", command=self._open_condition_search).pack(side="left")
+        ttk.Button(footer, text="전 종목", command=self._show_symbol_source_notice).pack(side="left", padx=6)
+        ttk.Label(footer, textvariable=self.market_session_var).pack(side="right")
+
+    def _show_dashboard(self) -> None:
+        for widget in self._legacy_main_widgets:
+            widget.grid_remove()
+        self._dashboard.grid()
+        self._refresh_dashboard()
+
+    def _show_legacy_main(self) -> None:
+        self._dashboard.grid_remove()
+        for widget in self._legacy_main_widgets:
+            widget.grid()
+
+    def _open_dashboard_profile(self, index: int) -> None:
+        self._active_strategy_profile = index
+        self._strategy_settings_panel._open_profile_editor(index)
+        self._refresh_dashboard()
+
+    def _open_selected_dashboard_profile(self) -> None:
+        self._open_dashboard_profile(min(self._active_strategy_profile, 2))
+
+    def _refresh_dashboard(self) -> None:
+        if not hasattr(self, "dashboard_watch_table"):
+            return
+        for table in (self.dashboard_watch_table, self.dashboard_hold_table):
+            for item in table.get_children():
+                table.delete(item)
+        watch = self.service.watchlist_rows()
+        shown = {quote.symbol for quote in watch}
+        for profile in self._strategy_profiles[:3]:
+            symbol = normalize_symbol(profile.get("symbol", ""))
+            if symbol and symbol != "000000" and symbol not in shown:
+                watch.append(self.service.watchlist_quotes.get(symbol) or WatchlistQuote(
+                    symbol=symbol, name=profile.get("symbol_name", "")
+                ))
+                shown.add(symbol)
+        for quote in watch:
+            baseline = self.service.storage.trading_baseline(quote.symbol)
+            self.dashboard_watch_table.insert("", "end", values=(
+                quote.symbol, quote.name or "-",
+                f"{baseline.capital_limit:,.0f}" if baseline else "-",
+                f"{quote.current_price:,.0f}" if quote.current_price > 0 else "-",
+                getattr(self, "_monitor_decisions", {}).get(quote.symbol, "감시 대기"),
+            ))
+        balance = self.service.balance_summary
+        for holding in balance.holdings if balance else ():
+            quote = self.service.watchlist_quotes.get(normalize_symbol(holding.symbol))
+            opening = quote.open_price if quote else 0
+            previous = quote.current_price - quote.change if quote else 0
+            self.dashboard_hold_table.insert("", "end", values=(
+                holding.symbol, holding.name or "-",
+                f"{opening:,.0f}" if opening > 0 else "-",
+                f"{previous:,.0f}" if previous > 0 else "-",
+                f"{holding.average_price:,.0f}",
+                f"{holding.current_price * holding.quantity:,.0f}", f"{holding.quantity:,}",
+            ))
+        for index, button in enumerate(self.dashboard_profile_buttons):
+            profile = self._strategy_profiles[index]
+            name = profile.get("symbol_name") or profile.get("symbol") or "종목 미지정"
+            button.configure(text=f"설정 {index + 1}  ·  {name}")
+        profile = self._strategy_profiles[min(self._active_strategy_profile, 2)]
+        pdf = profile.get("pdf", {})
+        minute = profile.get("bar", {}).get("minute", {})
+        self.dashboard_conditions_var.set(
+            f"종목  {profile.get('symbol_name') or '미지정'}\n"
+            f"매수  {'허용' if profile.get('buyEnabled', True) else '금지'}    "
+            f"매도  {'허용' if profile.get('sellEnabled', True) else '금지'}\n"
+            f"전일 종가·시초가  {pdf.get('conditionCombine', 'AND')}\n"
+            f"저점 반등  {pdf.get('reboundPct', 0)}%    "
+            f"손실 제한  {pdf.get('stopLossPct', 0)}%"
+        )
+        self.dashboard_averages_var.set(
+            f"분봉  {pdf.get('minuteInterval', 1)}분\n"
+            f"짧은 이평선  {minute.get('shortPeriod', 5)}    "
+            f"긴 이평선  {minute.get('longPeriod', 20)}\n"
+            f"일자별 이평선  {pdf.get('dailyShortPeriod', 5)} / "
+            f"{pdf.get('dailyLongPeriod', 7)}일"
+        )
 
     def _field(self, parent: ttk.Frame, label: str, variable: tk.StringVar, column: int) -> None:
         ttk.Label(parent, text=label).grid(row=0, column=column, sticky="w")
@@ -1769,17 +2048,45 @@ class TraderApp(tk.Tk):
         body = ttk.Frame(window, padding=10)
         body.pack(fill="both", expand=True)
         body.columnconfigure(0, weight=1)
-        body.rowconfigure(2, weight=1)
+        body.rowconfigure(3, weight=1)
         selection = tk.StringVar()
         choices = [f"{index} · {name}" for index, name in conditions]
         ttk.Combobox(body, textvariable=selection, values=choices, state="readonly").grid(row=0, column=0, sticky="ew")
         if choices:
             selection.set(choices[0])
+        filter_var = tk.StringVar()
+        filter_row = ttk.Frame(body)
+        filter_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        filter_row.columnconfigure(1, weight=1)
+        ttk.Label(filter_row, text="결과 필터").grid(row=0, column=0, padx=(0, 8))
+        ttk.Entry(filter_row, textvariable=filter_var).grid(row=0, column=1, sticky="ew")
         status = tk.StringVar(value="조건식을 선택하고 조회해 주세요.")
-        ttk.Label(body, textvariable=status).grid(row=1, column=0, sticky="w", pady=6)
-        table = ttk.Treeview(body, columns=("symbol",), show="headings")
+        ttk.Label(body, textvariable=status).grid(row=2, column=0, sticky="w", pady=6)
+        result_frame = ttk.Frame(body)
+        result_frame.grid(row=3, column=0, sticky="nsew")
+        result_frame.columnconfigure(0, weight=1)
+        result_frame.rowconfigure(0, weight=1)
+        table = ttk.Treeview(result_frame, columns=("symbol", "name"), show="headings")
         table.heading("symbol", text="검색된 종목코드")
-        table.grid(row=2, column=0, sticky="nsew")
+        table.heading("name", text="종목명")
+        table.column("symbol", width=130, stretch=False)
+        table.grid(row=0, column=0, sticky="nsew")
+        result_scroll = ttk.Scrollbar(result_frame, orient="vertical", command=table.yview)
+        result_scroll.grid(row=0, column=1, sticky="ns")
+        table.configure(yscrollcommand=result_scroll.set)
+        result_symbols: list[str] = []
+
+        def show_filtered(*_args) -> None:
+            query = filter_var.get().strip().casefold()
+            for item in table.get_children():
+                table.delete(item)
+            for symbol in result_symbols:
+                cached = self.service.watchlist_quotes.get(symbol)
+                name = (cached.name if cached else "") or known_symbol_name(symbol)
+                if not query or query in symbol.casefold() or query in name.casefold():
+                    table.insert("", "end", values=(symbol, name))
+
+        filter_var.trace_add("write", show_filtered)
 
         def search() -> None:
             choice = selection.get()
@@ -1791,10 +2098,8 @@ class TraderApp(tk.Tk):
             except RuntimeError as exc:
                 messagebox.showerror("조건검색", str(exc), parent=window)
                 return
-            for item in table.get_children():
-                table.delete(item)
-            for symbol in symbols:
-                table.insert("", "end", values=(symbol,))
+            result_symbols[:] = symbols
+            show_filtered()
             status.set(f"{name}: {len(symbols)}종목 조회 · 자동 주문 대상 아님")
 
         def register_selected() -> None:
@@ -1817,10 +2122,58 @@ class TraderApp(tk.Tk):
             status.set(f"{added}종목 등록, {skipped}종목 건너뜀 · 자동 주문 승인과 별개")
 
         actions = ttk.Frame(body)
-        actions.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(actions, text="조회", command=search).pack(side="left")
         ttk.Button(actions, text="선택 종목 등록", command=register_selected).pack(side="left", padx=6)
         ttk.Button(actions, text="결과 일괄 등록", command=register_all).pack(side="left")
+
+    def _load_monitor_chart(self, _event=None) -> None:
+        selected = self.monitor_table.selection()
+        if not selected or not self.service.account_info.connected:
+            return
+        values = self.monitor_table.item(selected[0], "values")
+        if not values:
+            return
+        symbol = normalize_symbol(values[0])
+        interval = self.monitor_chart_interval.get()
+        self.monitor_chart_candles = self.service.request_monitor_candles(symbol, interval)
+        self.monitor_chart_symbol = symbol
+        profile = next(
+            (item for item in self._strategy_profiles[:3] if normalize_symbol(item.get("symbol", "")) == symbol),
+            None,
+        )
+        self.monitor_daily_ma_values = {}
+        if profile is not None:
+            minute = profile.get("bar", {}).get("minute", {})
+            self.monitor_chart_ma_periods = (
+                int(minute.get("shortPeriod", 5)), int(minute.get("longPeriod", 20))
+            )
+            pdf = profile.get("pdf", {})
+            if pdf.get("enabled") and pdf.get("dailyMaEnabled"):
+                periods = (int(pdf.get("dailyShortPeriod", 5)), int(pdf.get("dailyLongPeriod", 7)))
+                self.monitor_daily_ma_values = self.service.request_monitor_daily_averages(
+                    symbol, self.monitor_chart_candles, periods
+                )
+        else:
+            self.monitor_chart_ma_periods = (5, 20)
+        self.monitor_chart_title.set(
+            f"{symbol} {values[1]} · {interval}분봉 {len(self.monitor_chart_candles)}개 · "
+            f"분봉 이평 {self.monitor_chart_ma_periods[0]}/{self.monitor_chart_ma_periods[1]}"
+        )
+        self._update_monitor_indicators(symbol)
+        self._draw_candle_chart(self.monitor_chart_canvas, self.monitor_chart_candles)
+
+    def _update_monitor_indicators(self, symbol: str) -> None:
+        getter = getattr(self.service, "pdf_indicator_state", None)
+        state = getter(symbol) if callable(getter) else None
+        if state is None:
+            self.monitor_indicator_text.set("이평선 - · 시초가 - · 전일 종가 -")
+            return
+        self.monitor_indicator_text.set(
+            f"이평선 {'O' if state[0] else 'X'} · "
+            f"시초가 {'O' if state[1] else 'X'} · "
+            f"전일 종가 {'O' if state[2] else 'X'}"
+        )
 
     def _refresh_monitor(self) -> None:
         if not hasattr(self, "monitor_table"):
@@ -1837,7 +2190,7 @@ class TraderApp(tk.Tk):
         tag = "ready" if ready else "warning"
         watch_rows = self.service.watchlist_rows()
         shown = {quote.symbol for quote in watch_rows}
-        profiles = self._strategy_settings_panel.profiles[:3] if self._strategy_settings_panel else self._strategy_profiles[:3]
+        profiles = self._strategy_profiles[:3]
         for profile in profiles:
             configured_symbol = normalize_symbol(profile.get("symbol", ""))
             if configured_symbol and configured_symbol != "000000" and configured_symbol not in shown:
@@ -1847,12 +2200,22 @@ class TraderApp(tk.Tk):
                 shown.add(configured_symbol)
         self.monitor_title_var.set(f"자동매매 모니터 · 표시 {len(watch_rows)}종목 · {connected}")
         if not watch_rows and ready:
-            self.monitor_table.insert("", "end", values=(symbol, name, "-", "-", "-", status), tags=(tag,))
+            self.monitor_table.insert("", "end", values=(symbol, name, "-", "-", "-", "-", "-", "-", "-", status), tags=(tag,))
         for quote in watch_rows:
             has_price = quote.current_price > 0
             self.monitor_table.insert(
                 "", "end",
-                values=(quote.symbol, quote.name or "미조회", f"{quote.current_price:,.0f}" if has_price else "-", self._format_watchlist_change(quote.change) if has_price else "-", f"{quote.volume:,}" if quote.volume else "-", getattr(self, "_monitor_decisions", {}).get(quote.symbol, "관심종목 등록")),
+                values=(
+                    quote.symbol, quote.name or "미조회",
+                    f"{quote.current_price:,.0f}" if has_price else "-",
+                    f"{quote.open_price:,.0f}" if quote.open_price > 0 else "-",
+                    f"{quote.current_price - quote.change:,.0f}" if has_price and quote.current_price - quote.change > 0 else "-",
+                    f"{quote.high_price:,.0f}" if quote.high_price > 0 else "-",
+                    f"{quote.change_rate:+.2f}%" if has_price else "-",
+                    f"{quote.volume:,}" if quote.volume else "-",
+                    f"{quote.trade_value:,.0f}" if quote.trade_value else "-",
+                    getattr(self, "_monitor_decisions", {}).get(quote.symbol, "관심종목 등록"),
+                ),
                 tags=("ready",),
             )
         balance = self.service.balance_summary
@@ -1863,7 +2226,7 @@ class TraderApp(tk.Tk):
             )
 
     def _evaluate_monitor_profiles(self) -> None:
-        profiles = self._strategy_settings_panel.profiles[:3] if self._strategy_settings_panel else self._strategy_profiles[:3]
+        profiles = self._strategy_profiles[:3]
         settings = {
             normalize_symbol(profile.get("symbol", "")): StrategySettings(
                 dmi_period=int(profile.get("dmi_period", 14)), profile=profile
@@ -1888,14 +2251,15 @@ class TraderApp(tk.Tk):
         quantities = self.service.plan_candidate_quantities(candidates)
         self._monitor_decisions = {
             symbol: (
-                f"{candidates[symbol]} {quantities[symbol]:,}주 계획 · 주문 안 함"
+                f"{candidates[symbol]} {quantities[symbol]:,}주 계획 · 주문 안 함 · {decision.reason}"
                 if quantities.get(symbol, 0) > 0
                 else "한도/현재가 부족 · 주문 불가" if symbol in candidates
-                else decision.reason if decision and "미구현 설정" in decision.reason
-                else "신호 없음/주문 불가" if decision else "데이터 부족/조회 실패"
+                else decision.reason if decision else "데이터 부족/조회 실패"
             )
             for symbol, decision in results.items()
         }
+        if self.monitor_chart_symbol in results:
+            self._update_monitor_indicators(self.monitor_chart_symbol)
         self._refresh_monitor()
 
     def _show_symbol_source_notice(self) -> None:
@@ -1905,22 +2269,65 @@ class TraderApp(tk.Tk):
             messagebox.showerror("전 종목 로딩", str(exc))
             return
         window = tk.Toplevel(self)
-        window.title("키움 전 종목 목록 · 조회 전용")
+        window.title("키움 전 종목 목록")
         window.geometry("680x620")
         frame = ttk.Frame(window, padding=8)
         frame.pack(fill="both", expand=True)
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(2, weight=1)
         count = sum(len(symbols) for _, symbols in markets)
-        ttk.Label(frame, text=f"KOSPI/KOSDAQ {count:,}종목 · 조회 전용, 자동 주문 대상 아님").pack(anchor="w")
-        table = ttk.Treeview(frame, columns=("market", "symbol"), show="headings")
+        status = tk.StringVar(value=f"KOSPI/KOSDAQ {count:,}종목")
+        ttk.Label(frame, textvariable=status).grid(row=0, column=0, sticky="w")
+        filter_row = ttk.Frame(frame)
+        filter_row.grid(row=1, column=0, sticky="ew", pady=6)
+        filter_row.columnconfigure(1, weight=1)
+        ttk.Label(filter_row, text="종목 검색").grid(row=0, column=0, padx=(0, 8))
+        query = tk.StringVar()
+        ttk.Entry(filter_row, textvariable=query).grid(row=0, column=1, sticky="ew")
+        table_frame = ttk.Frame(frame)
+        table_frame.grid(row=2, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        table = ttk.Treeview(table_frame, columns=("market", "symbol", "name"), show="headings")
         table.heading("market", text="시장")
         table.heading("symbol", text="종목코드")
-        table.pack(side="left", fill="both", expand=True)
-        scroll = ttk.Scrollbar(frame, orient="vertical", command=table.yview)
-        scroll.pack(side="right", fill="y")
+        table.heading("name", text="종목명")
+        table.column("market", width=90, stretch=False)
+        table.column("symbol", width=110, stretch=False)
+        table.grid(row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(table_frame, orient="vertical", command=table.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
         table.configure(yscrollcommand=scroll.set)
-        for market, symbols in markets:
-            for symbol in symbols:
-                table.insert("", "end", values=(market, symbol))
+        rows = [
+            (market, symbol, known_symbol_name(symbol))
+            for market, symbols in markets for symbol in symbols
+        ]
+
+        def redraw(*_args) -> None:
+            term = query.get().strip().casefold()
+            for item in table.get_children():
+                table.delete(item)
+            for market, symbol, name in rows:
+                if not term or term in symbol.casefold() or term in name.casefold():
+                    table.insert("", "end", values=(market, symbol, name))
+
+        def register_selected() -> None:
+            selection = table.selection()
+            if not selection:
+                return
+            symbol = table.item(selection[0], "values")[1]
+            added = self.service.add_watchlist_symbol(symbol)
+            status.set(
+                f"{symbol} 관심종목 등록 완료 · 자동주문은 프로필 설정 필요" if added
+                else self.service.last_api_message
+            )
+            self._refresh_monitor()
+
+        query.trace_add("write", redraw)
+        redraw()
+        ttk.Button(frame, text="선택 종목 등록", command=register_selected).grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
+        )
 
     def _load_strategy_profiles(self) -> None:
         try:
@@ -1959,14 +2366,24 @@ class TraderApp(tk.Tk):
 
     def _start(self) -> None:
         self._save_settings()
+        profile_settings = self._active_pdf_profile_settings()
+        pdf_mode = any(profile.get("pdf", {}).get("enabled") for profile in self._strategy_profiles[:3])
         if self.kiwoom_auto_order_var.get():
             if not self._require_live_connection():
                 return
-            if not self._trading_ready():
+            if pdf_mode and not self._profile_trading_ready(profile_settings):
+                messagebox.showwarning("자동운용 준비 필요", "기획서 설정의 종목·계좌·실거래 승인을 확인해 주세요.")
+                return
+            if not pdf_mode and not self._trading_ready():
                 messagebox.showwarning("자동운용 준비 필요", self.trade_ready_var.get())
                 return
-            if self.service.real_time_symbol != normalize_symbol(self.symbol_var.get()):
+            if not pdf_mode and self.service.real_time_symbol != normalize_symbol(self.symbol_var.get()):
                 self.service.register_real_time_price(self.symbol_var.get())
+            if pdf_mode and self.service.profile_real_time_symbols != tuple(profile_settings):
+                self.service.register_profile_realtime(tuple(profile_settings))
+                if self.service.profile_real_time_symbols != tuple(profile_settings):
+                    messagebox.showwarning("실시간 등록 실패", self.service.last_api_message)
+                    return
             if self._real_trading_account() and not self._regular_market_open():
                 self.service.storage.log(
                     "INFO",
@@ -1975,7 +2392,33 @@ class TraderApp(tk.Tk):
                     "주식체결(0B) 장중 신호가 확인되면 DMI 전략 판단과 주문을 시작합니다.",
                 )
         self.service.start()
+        self._last_profile_scan_at = 0.0
         self._refresh()
+
+    def _active_pdf_profile_settings(self) -> dict[str, StrategySettings]:
+        settings: dict[str, StrategySettings] = {}
+        for profile in self._strategy_profiles[:3]:
+            if not profile.get("pdf", {}).get("enabled"):
+                continue
+            symbol = normalize_symbol(profile.get("symbol", ""))
+            if symbol and symbol != "000000":
+                settings[symbol] = StrategySettings(
+                    dmi_period=int(profile.get("dmi_period", 14)), profile=deepcopy(profile)
+                )
+        return settings
+
+    def _profile_trading_ready(self, settings: dict[str, StrategySettings]) -> bool:
+        enabled_count = sum(bool(profile.get("pdf", {}).get("enabled")) for profile in self._strategy_profiles[:3])
+        if not settings or len(settings) != enabled_count or not self._account_connection_confirmed(self.service.account_info):
+            return False
+        if not clean_account_number(self._account_for_api()) or self._operating_capital() <= 0:
+            return False
+        if self._real_trading_account() and not self._real_order_session_ready():
+            return False
+        return all(
+            not validate_profile(item.profile, int(item.profile.get("slot", 1)) - 1)
+            for item in settings.values()
+        )
 
     def _stop(self) -> None:
         self.service.stop()
@@ -2893,6 +3336,11 @@ class TraderApp(tk.Tk):
         highest = max(
             max(candle.high, candle.open or candle.close, candle.close) for candle in displayed
         )
+        monitor_chart = canvas is getattr(self, "monitor_chart_canvas", None)
+        daily_levels = self.monitor_daily_ma_values if monitor_chart else {}
+        if daily_levels:
+            lowest = min(lowest, *daily_levels.values())
+            highest = max(highest, *daily_levels.values())
         price_span = max(1.0, highest - lowest)
 
         def price_y(price: float) -> float:
@@ -2979,10 +3427,16 @@ class TraderApp(tk.Tk):
                 outline=color,
             )
 
+        short_ma, long_ma = self.monitor_chart_ma_periods if monitor_chart else (5, 20)
         if self.show_ma5_var.get():
-            draw_price_line(moving_average(candles, 5), "#d92787")
+            draw_price_line(moving_average(candles, short_ma), "#d92787")
         if self.show_ma20_var.get():
-            draw_price_line(moving_average(candles, 20), "#3459c7")
+            draw_price_line(moving_average(candles, long_ma), "#3459c7")
+        for index, (period, value) in enumerate(sorted(daily_levels.items())):
+            y = price_y(value)
+            color = "#087a55" if index == 0 else "#b45a13"
+            canvas.create_line(left_pad, y, left_pad + plot_width, y, fill=color, dash=(4, 3))
+            canvas.create_text(left_pad + 6, y - 5, text=f"{period}일 {value:,.0f}", anchor="sw", fill=color)
 
         canvas.create_line(left_pad, price_bottom, left_pad + plot_width, price_bottom, fill="#6f7880")
         canvas.create_line(
@@ -3231,6 +3685,7 @@ class TraderApp(tk.Tk):
             quantity=self._order_quantity(),
             allow_real_order=allow_real,
             account_password=self._account_password_for_order(),
+            auto=auto,
         )
         self._handle_order_account_verification()
         self._refresh()
@@ -3295,6 +3750,7 @@ class TraderApp(tk.Tk):
         self._replace_rows(self.orders, self._format_orders(snapshot.orders))
         self._replace_rows(self.logs, self._format_logs(snapshot.logs))
         self._replace_trade_history_rows(self._format_trade_history(snapshot.trade_history))
+        self._refresh_dashboard()
         if self.service.storage.trade_history_file_error:
             self.trade_history_file_var.set(
                 f"CSV 로그 오류: {self.service.storage.trade_history_file_error}"
@@ -3401,7 +3857,10 @@ class TraderApp(tk.Tk):
             return
         if self.service.running:
             if self.kiwoom_auto_order_var.get():
-                if self._trading_ready():
+                profile_settings = self._active_pdf_profile_settings()
+                pdf_mode = any(profile.get("pdf", {}).get("enabled") for profile in self._strategy_profiles[:3])
+                ready = self._profile_trading_ready(profile_settings) if pdf_mode else self._trading_ready()
+                if ready:
                     market_status = self.service.latest_market_session_status()
                     if self._real_trading_account():
                         market_code = market_status.operation_code if market_status else ""
@@ -3427,7 +3886,22 @@ class TraderApp(tk.Tk):
                         if not market_open:
                             self._refresh()
                             return
-                    self._evaluate_and_send_order(auto=True)
+                    if pdf_mode:
+                        now = monotonic()
+                        if now - self._last_profile_scan_at >= 30:
+                            self._last_profile_scan_at = now
+                            self.service.execute_profile_orders(
+                                settings_by_symbol=profile_settings,
+                                account=self._account_for_api(),
+                                account_password=self._account_password_for_order(),
+                                allow_real_order=self._real_order_session_ready(),
+                                regular_market_open=self._regular_market_open(),
+                            )
+                            self._handle_order_account_verification()
+                            self._refresh_monitor()
+                            self._refresh()
+                    else:
+                        self._evaluate_and_send_order(auto=True)
                 else:
                     self.service.stop()
                     self.service.storage.log(
@@ -3454,6 +3928,29 @@ class TraderApp(tk.Tk):
 
     def _realtime_price_tick(self) -> None:
         self._price_refresh_after_id = None
+        if (self.service.running and self.kiwoom_auto_order_var.get()
+                and self.service.profile_real_time_symbols):
+            settings = self._active_pdf_profile_settings()
+            if self._profile_trading_ready(settings):
+                submitted = self.service.execute_profile_tick_orders(
+                    settings_by_symbol=settings,
+                    account=self._account_for_api(),
+                    account_password=self._account_password_for_order(),
+                    allow_real_order=self._real_order_session_ready(),
+                    regular_market_open=self._regular_market_open(),
+                )
+                if submitted:
+                    self._handle_order_account_verification()
+                    self._refresh_monitor()
+                    self._refresh()
+                elif (self.monitor_window is not None and self.monitor_window.winfo_viewable()
+                      and monotonic() - self._last_monitor_tick_refresh >= 1.0):
+                    self._last_monitor_tick_refresh = monotonic()
+                    if self.monitor_chart_symbol:
+                        self._update_monitor_indicators(self.monitor_chart_symbol)
+                    self._refresh_monitor()
+                if self._dashboard.winfo_ismapped() and submitted:
+                    self._refresh_dashboard()
         if self.service.real_time_symbol:
             quote = self.service.refresh_real_time_quote()
             if quote is not None:
@@ -4026,12 +4523,13 @@ class TraderApp(tk.Tk):
 
     def _update_connection_badge(self, connected: bool, connection_method: str = "") -> None:
         if connected:
-            self.connection_state_var.set("ON 연결됨")
-            self.connection_badge.configure(bg="#16833a", fg="white")
+            live = self.service.account_info.server_type == "실거래"
+            self.connection_state_var.set("ON 실거래 연결됨" if live else "ON 모의투자 연결됨")
+            self.connection_badge.configure(bg="#b32626" if live else "#16833a", fg="white")
             self.connection_light.itemconfigure(
                 self._connection_light_id,
-                fill="#2ecc71",
-                outline="#1e8449",
+                fill="#e24848" if live else "#2ecc71",
+                outline="#8f1717" if live else "#1e8449",
             )
         else:
             self.connection_state_var.set("OFF 연결 안됨")

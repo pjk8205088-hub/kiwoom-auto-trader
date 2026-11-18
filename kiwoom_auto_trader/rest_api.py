@@ -150,7 +150,9 @@ class KiwoomRestApiClient:
             connection_method="REST API",
         )
         self._real_time_symbol = ""
+        self._real_time_symbols: tuple[str, ...] = ()
         self._real_time_quote: RealTimeQuote | None = None
+        self._real_time_quotes: dict[str, RealTimeQuote] = {}
         self._real_quote_events: deque[RealTimeQuote] = deque(maxlen=5000)
         self._market_session_status: MarketSessionStatus | None = None
         self._market_session_confirmed_at = 0.0
@@ -213,8 +215,10 @@ class KiwoomRestApiClient:
         self._token_expires_at = 0.0
         self._account = ""
         self._real_time_symbol = ""
+        self._real_time_symbols = ()
         with self._websocket_lock:
             self._real_time_quote = None
+            self._real_time_quotes.clear()
             self._real_quote_events.clear()
             self._market_session_status = None
             self._market_session_confirmed_at = 0.0
@@ -265,6 +269,10 @@ class KiwoomRestApiClient:
             change=_number(body.get("pred_pre")),
             change_rate=_number(body.get("flu_rt")),
             volume=_integer(body.get("trde_qty")),
+            open_price=_price(body.get("open_pric")),
+            high_price=_price(body.get("high_pric")),
+            low_price=_price(body.get("low_pric")),
+            trade_value=_number(body.get("trde_prica")),
             timestamp=datetime.now().strftime("%Y%m%d%H%M%S"),
             message="REST API 현재가 조회 완료",
         )
@@ -488,15 +496,22 @@ class KiwoomRestApiClient:
 
     def register_real_time_price(self, symbol: str, screen_no: str = "") -> str:
         del screen_no
+        return self.register_real_time_prices([symbol])
+
+    def register_real_time_prices(self, symbols: list[str]) -> str:
         if not self.is_connected():
             raise KiwoomRestApiError("REST API 토큰 연결 후 실시간 시세를 등록할 수 있습니다.")
-        symbol = normalize_symbol(symbol)
-        if not symbol:
-            raise KiwoomRestApiError("실시간 조회 종목코드를 입력해 주세요.")
+        normalized = tuple(dict.fromkeys(
+            value for value in (normalize_symbol(symbol) for symbol in symbols) if value
+        ))
+        if not normalized or len(normalized) > 200:
+            raise KiwoomRestApiError("REST 실시간 등록은 1~200종목만 가능합니다.")
         self._stop_websocket()
-        self._real_time_symbol = symbol
+        self._real_time_symbols = normalized
+        self._real_time_symbol = normalized[0]
         with self._websocket_lock:
             self._real_time_quote = None
+            self._real_time_quotes.clear()
             self._real_quote_events.clear()
             self._market_session_status = None
             self._market_session_confirmed_at = 0.0
@@ -508,20 +523,22 @@ class KiwoomRestApiClient:
         token = self._token
         self._websocket_thread = threading.Thread(
             target=self._run_websocket,
-            args=(stop_event, token, symbol),
+            args=(stop_event, token, normalized[0]),
             name="KiwoomRestRealtime",
             daemon=True,
         )
         self._websocket_thread.start()
-        return f"{symbol} REST WebSocket 주식체결(0B) 등록을 시작했습니다."
+        return f"{len(normalized)}종목 REST WebSocket 주식체결(0B) 등록을 시작했습니다."
 
     def unregister_real_time(self, screen_no: str = "") -> str:
         del screen_no
         symbol = self._real_time_symbol
         self._stop_websocket()
         self._real_time_symbol = ""
+        self._real_time_symbols = ()
         with self._websocket_lock:
             self._real_time_quote = None
+            self._real_time_quotes.clear()
             self._real_quote_events.clear()
             self._market_session_status = None
             self._market_session_confirmed_at = 0.0
@@ -532,18 +549,23 @@ class KiwoomRestApiClient:
 
     def latest_real_time_quote(self, symbol: str) -> RealTimeQuote | None:
         symbol = normalize_symbol(symbol)
-        if not self._real_time_symbol or symbol != self._real_time_symbol:
+        if symbol not in self._real_time_symbols and symbol != self._real_time_symbol:
             return None
         if self._websocket_error:
             raise KiwoomRestApiError(self._websocket_error)
         with self._websocket_lock:
-            return self._real_time_quote
+            return self._real_time_quotes.get(symbol) or (
+                self._real_time_quote if symbol == self._real_time_symbol else None
+            )
 
     def drain_real_time_quotes(self, symbol: str) -> list[RealTimeQuote]:
         target = normalize_symbol(symbol)
         with self._websocket_lock:
             quotes = [quote for quote in self._real_quote_events if quote.symbol == target]
-            self._real_quote_events.clear()
+            self._real_quote_events = deque(
+                (quote for quote in self._real_quote_events if quote.symbol != target),
+                maxlen=5000,
+            )
         return quotes
 
     def latest_market_session_status(self) -> MarketSessionStatus | None:
@@ -719,7 +741,7 @@ class KiwoomRestApiClient:
             if row_type != "0B":
                 continue
             symbol = normalize_symbol(row.get("item"))
-            if symbol != self._real_time_symbol or not isinstance(values, dict):
+            if (symbol not in self._real_time_symbols and symbol != self._real_time_symbol) or not isinstance(values, dict):
                 continue
             trade_time = str(values.get("20") or "").strip()
             time_digits = "".join(character for character in trade_time if character.isdigit())
@@ -748,7 +770,9 @@ class KiwoomRestApiClient:
                     source=f"키움 REST 주식체결(0B) 장구분 {trade_session_code}",
                 )
             with self._websocket_lock:
-                self._real_time_quote = quote
+                self._real_time_quotes[symbol] = quote
+                if symbol == self._real_time_symbol:
+                    self._real_time_quote = quote
                 self._real_quote_events.append(quote)
                 if trade_status is not None:
                     self._market_session_status = trade_status
@@ -757,24 +781,26 @@ class KiwoomRestApiClient:
         return None
 
     def _register_real_time_message(self, symbol: str = "") -> dict[str, Any]:
-        target = normalize_symbol(symbol) or self._real_time_symbol
+        targets = [normalize_symbol(symbol)] if normalize_symbol(symbol) else list(self._real_time_symbols)
+        if not targets and self._real_time_symbol:
+            targets = [self._real_time_symbol]
         return {
             "trnm": "REG",
             "grp_no": "1",
             "refresh": "1",
             "data": [
-                {"item": [target], "type": ["0B"]},
+                {"item": targets, "type": ["0B"]},
                 {"item": [""], "type": ["0s"]},
             ],
         }
 
     def _remove_real_time_message(self, symbol: str = "") -> dict[str, Any]:
-        target = normalize_symbol(symbol) or self._real_time_symbol
+        targets = list(self._real_time_symbols) or ([normalize_symbol(symbol)] if normalize_symbol(symbol) else [])
         return {
             "trnm": "REMOVE",
             "grp_no": "1",
             "data": [
-                {"item": [target], "type": ["0B"]},
+                {"item": targets, "type": ["0B"]},
                 {"item": [""], "type": ["0s"]},
             ],
         }
